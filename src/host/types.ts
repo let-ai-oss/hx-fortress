@@ -94,9 +94,21 @@ export interface ScopedLogger {
   error(msg: string, fields?: Record<string, unknown>): void;
 }
 
+/** The enrolled Fortress identity handed down to modules after the cloud
+ *  connection authenticates. Contains the org/fortress binding issued by the
+ *  hub at enrollment time. */
+export interface EnrolledIdentity {
+  orgId: string;
+  fortressId: string;
+  credential: string;
+}
+
 export interface ModuleContext {
   readonly moduleId: string;
   readonly logger: ScopedLogger;
+  /** Populated once the Fortress cloud connection has authenticated. Null if
+   *  the host is not yet enrolled or identity could not be loaded. */
+  readonly fortressIdentity: EnrolledIdentity | null;
 }
 
 export interface Module {

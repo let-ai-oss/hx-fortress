@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface CloudCredential {
@@ -71,4 +71,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function invalidCredentials(reason: string): Error {
   return new Error(`Invalid Fortress credentials: ${reason}`);
+}
+
+// ── Pending enrollment ────────────────────────────────────────────────────────
+
+/** A not-yet-consumed enrollment token left by the wizard. Fortress reads this
+ *  once on startup to perform the first-run enroll handshake, then clears it. */
+export interface PendingEnrollment {
+  token: string;
+  /** WebSocket URL of the let.ai hub — written by the wizard so Fortress can
+   *  write/update config.json before connecting. */
+  cloudUrl: string;
+}
+
+export class FilePendingEnrollmentStore {
+  constructor(private readonly enrollmentPath: string) {}
+
+  async load(): Promise<PendingEnrollment | null> {
+    let contents: string;
+    try {
+      contents = await readFile(this.enrollmentPath, "utf8");
+    } catch (error) {
+      if (isMissingFile(error)) return null;
+      throw error;
+    }
+    const value = JSON.parse(contents) as unknown;
+    if (!isRecord(value)) return null;
+    const token = value.token;
+    const cloudUrl = value.cloudUrl;
+    if (typeof token !== "string" || token.length === 0) return null;
+    if (typeof cloudUrl !== "string" || cloudUrl.length === 0) return null;
+    return { token, cloudUrl };
+  }
+
+  async save(enrollment: PendingEnrollment): Promise<void> {
+    await mkdir(path.dirname(this.enrollmentPath), { recursive: true });
+    const tmp = `${this.enrollmentPath}.${process.pid}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(enrollment, null, 2)}\n`, { mode: 0o600 });
+    await chmod(tmp, 0o600);
+    await rename(tmp, this.enrollmentPath);
+  }
+
+  async clear(): Promise<void> {
+    try {
+      await unlink(this.enrollmentPath);
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+    }
+  }
 }

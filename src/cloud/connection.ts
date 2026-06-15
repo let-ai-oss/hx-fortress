@@ -17,6 +17,9 @@ export interface WsCloudConnectionDeps {
   identity: FortressIdentity;
   moduleLoader?: ModuleLifecycleHandler;
   enrollToken?: string;
+  /** Called once immediately after a successful enrollment and credential save.
+   *  Use to clear the pending enrollment token and propagate identity to modules. */
+  onEnrolled?: (cred: CloudCredential) => Promise<void> | void;
   heartbeatMs?: number;
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
@@ -191,6 +194,11 @@ export class WsCloudConnection implements CloudConnection {
           await this.deps.credentialStore.save(cred);
         } catch (err) {
           this.deps.logger.error("Failed to save Fortress credentials", err);
+        }
+        try {
+          await this.deps.onEnrolled?.(cred);
+        } catch (err) {
+          this.deps.logger.error("onEnrolled hook failed", err);
         }
         this._state = "connected";
         settle();

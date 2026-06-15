@@ -1,19 +1,23 @@
 // The decline path is never a dead end: write a pre-filled credentials.json
 // template (storage block left to complete) plus a SETUP.md with the exact
-// commands. The enrollment token is persisted (locally, chmod 600) so Fortress
-// can complete enrollment on first connect (T15).
+// commands. The enrollment token is written to ~/.let/fortress/identity/ so
+// Fortress can complete enrollment on first connect.
 
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { VAULT_HOME, credentialsPath, type VaultStorageKind } from "../credentials.js";
+import { FilePendingEnrollmentStore } from "../../../cloud/credentials.js";
+import { fortressPaths } from "../../../host/paths.js";
 
 export interface TemplateContext {
   store: VaultStorageKind;
   bucket: string;
   region?: string;
   projectId?: string;
-  hubUrl: string;
+  cloudUrl: string;
   token: string;
+  /** Override for Fortress root directory. */
+  fortressRoot?: string;
 }
 
 export async function writeCredentialsTemplate(ctx: TemplateContext): Promise<string> {
@@ -26,17 +30,22 @@ export async function writeCredentialsTemplate(ctx: TemplateContext): Promise<st
           bucket: ctx.bucket,
           region: ctx.region ?? "<LOCATION>",
           gcs: "<REPLACE: a service-account key JSON object — { type, project_id, private_key, client_email, … } — for an account with roles/storage.objectAdmin on this bucket>",
-          letai: { hubUrl: ctx.hubUrl, pendingToken: ctx.token },
         }
       : {
           store: "s3",
           bucket: ctx.bucket,
           region: ctx.region ?? "<REGION>",
           s3: { accessKeyId: "<ACCESS_KEY_ID>", secretAccessKey: "<SECRET_ACCESS_KEY>" },
-          letai: { hubUrl: ctx.hubUrl, pendingToken: ctx.token },
         };
   const p = credentialsPath();
   await writeFile(p, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+
+  // Write pending enrollment to the Fortress identity directory so the host can
+  // authenticate on first connect once the user completes the storage block.
+  const paths = fortressPaths(ctx.fortressRoot);
+  const pendingStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
+  await pendingStore.save({ token: ctx.token, cloudUrl: ctx.cloudUrl });
+
   return p;
 }
 
