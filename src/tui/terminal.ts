@@ -131,11 +131,6 @@ function render(app: TuiApp, stdout: TerminalOutput): void {
     ...model.rows.flatMap((row, rowIndex) => renderRow(row, rowIndex, state)),
   ];
 
-  if (state.screen === "details" && state.pendingDetailsFor) {
-    lines.push("");
-    lines.push(`details: ${state.pendingDetailsFor} view is not implemented yet.`);
-  }
-
   if (state.error) {
     lines.push("");
     lines.push(`error: ${state.error}`);
