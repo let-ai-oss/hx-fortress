@@ -8,6 +8,9 @@ describe("project skeleton", () => {
     expect(packageJson.name).toBe("hx-fortress");
     expect(packageJson.private).toBe(true);
     expect(packageJson.type).toBe("module");
+    expect(packageJson.bin).toEqual({
+      "hx-fortress": "./src/cli.ts",
+    });
     expect(packageJson.packageManager).toBe("bun@1.3.14");
     expect(packageJson.devDependencies).toEqual({
       "@eslint/js": "10.0.1",
@@ -24,6 +27,7 @@ describe("project skeleton", () => {
       FileStatusStore: expect.any(Function),
       HostRuntime: expect.any(Function),
       fortressPaths: expect.any(Function),
+      runFortressHost: expect.any(Function),
       runHost: expect.any(Function),
     });
   });
