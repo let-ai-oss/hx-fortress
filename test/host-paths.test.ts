@@ -12,6 +12,7 @@ describe("Fortress paths", () => {
       credentials: paths.credentials,
       moduleInventory: paths.moduleInventory,
       log: paths.log,
+      serviceLog: paths.serviceLog,
       status: paths.status,
     }).toEqual({
       root: "/tmp/fortress",
@@ -19,6 +20,7 @@ describe("Fortress paths", () => {
       credentials: "/tmp/fortress/identity/credentials.json",
       moduleInventory: "/tmp/fortress/modules/inventory.json",
       log: "/tmp/fortress/logs/fortress.jsonl",
+      serviceLog: "/tmp/fortress/logs/service.log",
       status: "/tmp/fortress/runtime/status.json",
     });
     expect(paths.moduleConfig("session_vault")).toBe(

@@ -22,6 +22,7 @@ export function fortressPaths(root = defaultFortressRoot()) {
     credentials: path.join(root, "identity", "credentials.json"),
     moduleInventory: path.join(modules, "inventory.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
+    serviceLog: path.join(root, "logs", "service.log"),
     status: path.join(root, "runtime", "status.json"),
     moduleConfig(moduleId: string): string {
       assertModuleId(moduleId);
