@@ -24,6 +24,7 @@ export type {
   HostLogger,
   HostState,
   HostStatusSnapshot,
+  MessageDispatcher,
   Module,
   ModuleContext,
   ModuleRuntimeStatus,
