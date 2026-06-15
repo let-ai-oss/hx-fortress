@@ -1,3 +1,5 @@
+export { BusHostLogger, LogBus } from "./logging";
+export { FileLogSink } from "./file-log-sink";
 export { FileConfigStore, parseFortressConfig } from "./config";
 export {
   FsModuleInventoryStore,
@@ -31,6 +33,8 @@ export type {
   HostState,
   HostStatusSnapshot,
   LoadableRegistry,
+  LogRecord,
+  LogSink,
   MessageDispatcher,
   Module,
   ModuleContext,
@@ -41,5 +45,6 @@ export type {
   ModuleState,
   ModuleStopResult,
   ModuleSupervisor,
+  ScopedLogger,
   StatusStore,
 } from "./types";
