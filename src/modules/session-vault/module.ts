@@ -12,7 +12,7 @@ export default function createModule(): Module {
   let store: SessionStore | null = null;
 
   return {
-    id: "session-vault",
+    id: "session_vault",
 
     async init(context: ModuleContext): Promise<void> {
       const creds = await readVaultCredentials();
