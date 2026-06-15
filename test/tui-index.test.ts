@@ -196,6 +196,36 @@ describe("runFortressTui", () => {
       error: "update 1.2.4 is not wired in this build yet",
     });
   });
+
+  test("model reflects the post-action service state after start", async () => {
+    let renderedApp: TuiApp | undefined;
+    const manager = fakeManager([
+      { loaded: false, pid: null },
+      { loaded: false, pid: null },
+      { loaded: true, pid: 7777 },
+      { loaded: true, pid: 7777 },
+    ]);
+
+    await runFortressTui(
+      {},
+      {
+        serviceManager: manager,
+        statusReader: { read: async () => null },
+        runTerminalRenderer: async (app) => {
+          renderedApp = app;
+          return 0;
+        },
+        paths: testPaths(),
+        writeLine: () => {},
+      },
+    );
+
+    expect(renderedApp?.model().rows[0].actions[0]).toMatchObject({ kind: "start" });
+
+    await renderedApp?.activate();
+
+    expect(renderedApp?.model().rows[0].actions[0]).toMatchObject({ kind: "stop" });
+  });
 });
 
 interface FakeManager extends ServiceManager {

@@ -57,8 +57,16 @@ export async function runFortressTui(
     updateStatusProvider: dependencies.updateStatusProvider,
     paths,
   });
+  const modelDeps = {
+    serviceStateReader,
+    statusReader: dependencies.statusReader,
+    inventoryStore: dependencies.inventoryStore,
+    updateStatusProvider: dependencies.updateStatusProvider,
+    paths,
+  };
   const app = createTuiApp({
     model,
+    reloadModel: () => loadMainScreenModel(modelDeps),
     actions: {
       start: async () =>
         await startFortress({

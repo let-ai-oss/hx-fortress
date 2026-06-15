@@ -297,4 +297,112 @@ describe("createTuiApp", () => {
       error: null,
     });
   });
+
+  test("refreshes the model after a successful lifecycle action", async () => {
+    const afterStart = buildMainScreenModel({
+      service: { loaded: true, pid: 9999 },
+      snapshot: null,
+      installedModules: [],
+      updates: {},
+    });
+
+    const app = createTuiApp({
+      model: buildMainScreenModel({
+        service: { loaded: false, pid: null },
+        snapshot: null,
+        installedModules: [],
+        updates: {},
+      }),
+      reloadModel: async () => afterStart,
+      actions: {
+        start: async () => {},
+        stop: async () => {},
+        update: async () => {},
+      },
+    });
+
+    await app.activate();
+
+    expect(app.model()).toBe(afterStart);
+    expect(app.state().screen).toBe("main");
+    expect(app.state().pendingDetailsFor).toBeNull();
+  });
+
+  test("keeps the stale model when reloadModel throws, without surfacing the reload error", async () => {
+    const initialModel = buildMainScreenModel({
+      service: { loaded: false, pid: null },
+      snapshot: null,
+      installedModules: [],
+      updates: {},
+    });
+
+    const app = createTuiApp({
+      model: initialModel,
+      reloadModel: async () => {
+        throw new Error("reload boom");
+      },
+      actions: {
+        start: async () => {},
+        stop: async () => {},
+        update: async () => {},
+      },
+    });
+
+    await expect(app.activate()).resolves.toBeUndefined();
+
+    expect(app.model()).toBe(initialModel);
+    expect(app.state().error).toBeNull();
+  });
+
+  test("clamps selectedAction when the refreshed model has fewer actions on the current row", async () => {
+    const oneActionModel = {
+      rows: [
+        {
+          id: "session_vault" as const,
+          label: "session_vault",
+          availability: "live" as const,
+          statusLabel: "stopped" as const,
+          installedVersion: "1.2.4",
+          availableVersion: null,
+          actions: [{ kind: "stop" as const, enabled: true }],
+        },
+      ],
+      footerNote: "note",
+    };
+
+    const app = createTuiApp({
+      model: {
+        rows: [
+          {
+            id: "session_vault" as const,
+            label: "session_vault",
+            availability: "live" as const,
+            statusLabel: "stopped" as const,
+            installedVersion: "1.2.3",
+            availableVersion: "1.2.4",
+            actions: [
+              { kind: "stop" as const, enabled: true },
+              { kind: "update" as const, enabled: true, version: "1.2.4" },
+              { kind: "view-details" as const, enabled: true },
+            ],
+          },
+        ],
+        footerNote: "note",
+      },
+      reloadModel: async () => oneActionModel,
+      actions: {
+        start: async () => {},
+        stop: async () => {},
+        update: async () => {},
+      },
+    });
+
+    app.moveAction(1);
+    expect(app.state().selectedAction).toBe(1);
+
+    await app.activate();
+
+    expect(app.model()).toBe(oneActionModel);
+    expect(app.state().selectedAction).toBe(0);
+  });
 });

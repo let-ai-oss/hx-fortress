@@ -19,6 +19,7 @@ export interface TuiAppActions {
 export interface CreateTuiAppParams {
   model: MainScreenModel;
   actions: TuiAppActions;
+  reloadModel?: () => Promise<MainScreenModel>;
 }
 
 export interface TuiApp {
@@ -30,6 +31,7 @@ export interface TuiApp {
 }
 
 export function createTuiApp(params: CreateTuiAppParams): TuiApp {
+  let currentModel = params.model;
   const currentState: TuiAppState = {
     screen: "main",
     selectedRow: 0,
@@ -38,13 +40,31 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
     error: null,
   };
 
+  const returnToMain = () => {
+    currentState.pendingDetailsFor = null;
+    currentState.screen = "main";
+  };
+
+  const refreshModel = async () => {
+    if (!params.reloadModel) return;
+    await params.reloadModel()
+      .then((m) => {
+        currentModel = m;
+        const newActions = currentRow(m, currentState.selectedRow).actions;
+        if (currentState.selectedAction >= newActions.length) {
+          currentState.selectedAction = 0;
+        }
+      })
+      .catch(() => {});
+  };
+
   return {
-    model: () => params.model,
+    model: () => currentModel,
     state: () => ({ ...currentState }),
     moveRow: (delta) => {
       const nextRow = wrapIndex(
         currentState.selectedRow + delta,
-        params.model.rows.length,
+        currentModel.rows.length,
       );
 
       if (nextRow !== currentState.selectedRow) {
@@ -55,12 +75,12 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
     moveAction: (delta) => {
       currentState.selectedAction = wrapIndex(
         currentState.selectedAction + delta,
-        currentRow(params.model, currentState.selectedRow).actions.length,
+        currentRow(currentModel, currentState.selectedRow).actions.length,
       );
     },
     activate: async () => {
       const action =
-        currentRow(params.model, currentState.selectedRow).actions[
+        currentRow(currentModel, currentState.selectedRow).actions[
           currentState.selectedAction
         ];
 
@@ -74,23 +94,23 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
         switch (action.kind) {
           case "start":
             await params.actions.start();
-            currentState.pendingDetailsFor = null;
-            currentState.screen = "main";
+            returnToMain();
+            await refreshModel();
             return;
           case "stop":
             await params.actions.stop();
-            currentState.pendingDetailsFor = null;
-            currentState.screen = "main";
+            returnToMain();
+            await refreshModel();
             return;
           case "update":
             await params.actions.update(action.version);
-            currentState.pendingDetailsFor = null;
-            currentState.screen = "main";
+            returnToMain();
+            await refreshModel();
             return;
           case "view-details":
             currentState.screen = "details";
             currentState.pendingDetailsFor = currentRow(
-              params.model,
+              currentModel,
               currentState.selectedRow,
             ).id;
             return;

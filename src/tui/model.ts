@@ -57,7 +57,7 @@ function buildRow(
     installedVersion: installed?.version ?? null,
     availableVersion: update?.version ?? null,
     actions: [
-      action(params.service.pid === null ? "start" : "stop"),
+      action(!hasRunningService ? "start" : "stop"),
       ...(update ? [updateAction(update.version)] : []),
       action("view-details"),
     ],
