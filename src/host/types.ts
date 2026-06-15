@@ -1,3 +1,5 @@
+import type { MsgData, MsgReply } from "../protocol";
+
 export interface FortressConfig {
   schemaVersion: 1;
   cloud: {
@@ -68,3 +70,17 @@ export interface HostLogger {
 }
 
 export type Clock = () => Date;
+
+export interface ModuleContext {
+  readonly moduleId: string;
+}
+
+export interface Module {
+  readonly id: string;
+  init?(context: ModuleContext): Promise<void> | void;
+  start?(): Promise<void> | void;
+  stop?(): Promise<void> | void;
+  update?(): Promise<void> | void;
+  uninstall?(): Promise<void> | void;
+  onMessage(data: MsgData): Promise<MsgReply | void> | MsgReply | void;
+}
