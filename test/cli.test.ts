@@ -5,6 +5,21 @@ import type { LogsOptions } from "../src/cli-logs";
 import type { WizardOpts } from "../src/modules/session-vault/wizard";
 
 describe("runCli", () => {
+  test("dispatches no args into the tui entrypoint", async () => {
+    let ranTui = false;
+
+    const exitCode = await runCli([], {
+      runTui: async () => {
+        ranTui = true;
+        return 0;
+      },
+      writeLine: () => {},
+    });
+
+    expect(exitCode).toBe(0);
+    expect(ranTui).toBe(true);
+  });
+
   test("shows public help for unknown commands", async () => {
     const lines: string[] = [];
 
