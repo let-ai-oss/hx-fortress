@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
+import { LogBus } from "../src/host/logging";
 import { ModuleRegistry } from "../src/host/module-registry";
-import type { HostLogger, Module } from "../src/host/types";
+import type { Module } from "../src/host/types";
 import {
   decodeFrame,
   encodeFrame,
@@ -39,7 +40,7 @@ function handleVaultRpc(request: VaultRpcRequest): VaultRpcResult {
 
 describe("module message routing through the protocol seam", () => {
   test("routes a hub moduleMessage frame to the core module and replies", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(sessionVaultModule());
     await registry.startAll(["session_vault"]);
 
@@ -76,6 +77,6 @@ describe("module message routing through the protocol seam", () => {
   });
 });
 
-function silentLogger(): HostLogger {
-  return { error() {} };
+function silentBus(): LogBus {
+  return new LogBus({ write: () => {} });
 }

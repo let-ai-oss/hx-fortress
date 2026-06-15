@@ -2,11 +2,16 @@ import { describe, expect, test } from "bun:test";
 
 import type { InstalledModuleRecord, ModuleInventoryStore } from "../src/host/module-inventory";
 import { ModuleLoader } from "../src/host/module-loader";
+import { LogBus } from "../src/host/logging";
 import { ModuleRegistry } from "../src/host/module-registry";
-import type { HostLogger, Module } from "../src/host/types";
+import type { HostLogger, LogRecord, Module } from "../src/host/types";
 import type { MsgData } from "../src/protocol";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+function silentBus(): LogBus {
+  return new LogBus({ write: () => {} });
+}
 
 function silentLogger(): HostLogger {
   return { error() {} };
@@ -65,12 +70,13 @@ interface FakeLoaderDepsOptions {
   saveError?: Error;
   inventory?: InstalledModuleRecord[];
   logger?: HostLogger;
+  bus?: LogBus;
 }
 
 function makeLoader(opts: FakeLoaderDepsOptions = {}) {
   const artifactBytes = opts.artifactData ?? new TextEncoder().encode("fake-artifact");
   const checksum = sha256hex(artifactBytes);
-  const registry = new ModuleRegistry(opts.logger ?? silentLogger());
+  const registry = new ModuleRegistry(opts.bus ?? silentBus());
   const inventory = makeInventory(opts.inventory);
   const saved = new Map<string, Uint8Array>();
   const deleted: string[] = [];
@@ -199,7 +205,7 @@ describe("ModuleLoader.install", () => {
   test("updates an already-installed module to a new version", async () => {
     const artifactData = new TextEncoder().encode("fake-artifact");
     const checksum = sha256hex(artifactData);
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const inventory = makeInventory([
       {
         moduleId: "test_echo",
@@ -273,7 +279,7 @@ describe("ModuleLoader.uninstall", () => {
     const events: string[] = [];
     const artifactData = new TextEncoder().encode("fake-artifact");
     const checksum = sha256hex(artifactData);
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const inventory = makeInventory();
 
     const loader = new ModuleLoader({
@@ -308,10 +314,11 @@ describe("ModuleLoader.uninstall", () => {
   });
 
   test("proceeds with cleanup even when stop hook throws", async () => {
-    const loggedErrors: Array<[string, string]> = [];
+    const busRecords: LogRecord[] = [];
+    const bus = new LogBus({ write: (r) => busRecords.push(r) });
     const artifactData = new TextEncoder().encode("fake-artifact");
     const checksum = sha256hex(artifactData);
-    const registry = new ModuleRegistry(recordingLogger(loggedErrors));
+    const registry = new ModuleRegistry(bus);
     const inventory = makeInventory();
     const deleted: string[] = [];
 
@@ -331,7 +338,7 @@ describe("ModuleLoader.uninstall", () => {
       saveArtifact: async () => {},
       deleteArtifact: async (path) => { deleted.push(path); },
       artifactPathFor: (moduleId, version) => `/fake/${moduleId}-${version}.js`,
-      logger: recordingLogger(loggedErrors),
+      logger: silentLogger(),
     });
 
     await loader.install({
@@ -346,7 +353,7 @@ describe("ModuleLoader.uninstall", () => {
     expect(registry.has("test_echo")).toBe(false);
     expect(deleted).toHaveLength(1);
     expect((await inventory.load())).toHaveLength(0);
-    expect(loggedErrors.some(([msg]) => msg.includes("stop"))).toBe(true);
+    expect(busRecords.some((r) => r.level === "error" && r.msg.includes("stop"))).toBe(true);
   });
 });
 
@@ -356,7 +363,7 @@ describe("ModuleLoader.loadFromInventory", () => {
   test("registers and starts all modules recorded in the inventory", async () => {
     const artifactData = new TextEncoder().encode("fake-artifact");
     const checksum = sha256hex(artifactData);
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const inventory = makeInventory([
       {
         moduleId: "test_echo",
@@ -388,7 +395,7 @@ describe("ModuleLoader.loadFromInventory", () => {
     const artifactData = new TextEncoder().encode("fake-artifact");
     const checksum = sha256hex(artifactData);
     const loggedErrors: Array<[string, string]> = [];
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const inventory = makeInventory([
       {
         moduleId: "broken",
@@ -430,7 +437,7 @@ describe("ModuleLoader.loadFromInventory", () => {
   });
 
   test("does nothing when inventory is empty", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const inventory = makeInventory([]);
 
     const loader = new ModuleLoader({
@@ -459,7 +466,7 @@ describe("ModuleLoader end-to-end (throwaway test module)", () => {
     const artifactData = await Bun.file(artifactPath).bytes();
     const checksum = sha256hex(artifactData);
 
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const inventory = makeInventory();
 
     const loader = new ModuleLoader({
