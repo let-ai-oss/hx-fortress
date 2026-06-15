@@ -75,8 +75,28 @@ export interface HostLogger {
 
 export type Clock = () => Date;
 
+export interface LogRecord {
+  ts: string;
+  module: string;
+  level: "debug" | "info" | "warn" | "error";
+  msg: string;
+  fields?: Record<string, unknown>;
+}
+
+export interface LogSink {
+  write(record: LogRecord): void;
+}
+
+export interface ScopedLogger {
+  debug(msg: string, fields?: Record<string, unknown>): void;
+  info(msg: string, fields?: Record<string, unknown>): void;
+  warn(msg: string, fields?: Record<string, unknown>): void;
+  error(msg: string, fields?: Record<string, unknown>): void;
+}
+
 export interface ModuleContext {
   readonly moduleId: string;
+  readonly logger: ScopedLogger;
 }
 
 export interface Module {
