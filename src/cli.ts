@@ -12,15 +12,18 @@ import {
 } from "./modules/session-vault/wizard";
 import { FileStatusReader } from "./status-reader";
 import { getServiceManager } from "./service";
+import { runFortressTui } from "./tui";
 
 type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
 type RunEnrollWizard = (options: WizardOpts) => Promise<void>;
+type RunTui = () => Promise<number>;
 
 interface CliDependencies {
   getServiceManager?: typeof getServiceManager;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
+  runTui?: RunTui;
   writeLine?: (line: string) => void;
 }
 
@@ -33,6 +36,8 @@ export async function runCli(
 
   try {
     switch (command) {
+      case undefined:
+        return await (dependencies.runTui ?? runFortressTui)();
       case "enroll": {
         const token = args[1];
         const cloudIdx = args.indexOf("--cloud");
@@ -94,7 +99,6 @@ export async function runCli(
         await runLogs({ logPath: paths.log, moduleFilter, linesBack, writeLine });
         return 0;
       }
-      case undefined:
       case "help":
       case "--help":
         printHelp(writeLine);
