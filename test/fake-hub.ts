@@ -96,6 +96,11 @@ export class FakeHub {
     this.socket?.send(encodeFrame(frame));
   }
 
+  /** Drop the current connection without a fatal frame, triggering client reconnect. */
+  dropConnection(): void {
+    this.socket?.close(1001, "test-drop");
+  }
+
   /** Stop the hub server, immediately closing any open connections. */
   async stop(): Promise<void> {
     await this.server.stop(true);
