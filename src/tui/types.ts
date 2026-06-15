@@ -15,10 +15,11 @@ export type MainScreenActionKind =
   | "update"
   | "view-details";
 
-export interface MainScreenAction {
-  kind: MainScreenActionKind;
-  enabled: boolean;
-}
+export type MainScreenAction =
+  | { kind: "start"; enabled: boolean }
+  | { kind: "stop"; enabled: boolean }
+  | { kind: "update"; enabled: boolean; version: string }
+  | { kind: "view-details"; enabled: boolean };
 
 export interface MainScreenRow {
   id: MainScreenRowId;
@@ -36,7 +37,7 @@ export interface MainScreenModel {
 }
 
 export interface ModuleUpdateStatus {
-  kind: "module";
+  kind: "module" | "binary";
   version: string;
 }
 

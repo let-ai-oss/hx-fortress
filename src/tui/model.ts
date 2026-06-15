@@ -9,7 +9,7 @@ const ROW_ORDER: MainScreenRowId[] = [
 const LABELS: Record<MainScreenRowId, string> = {
   session_vault: "session_vault",
   session_computer: "session_computer",
-  devops_utility: "devops_utility",
+  devops_utility: "devops-utility",
 };
 
 const FOOTER_NOTE =
@@ -48,6 +48,7 @@ function buildRow(
     hasRunningService &&
     params.snapshot !== null &&
     params.snapshot.host.pid === params.service.pid;
+  const isRunning = hasFreshSnapshot;
 
   return {
     id,
@@ -57,16 +58,24 @@ function buildRow(
     installedVersion: installed?.version ?? null,
     availableVersion: update?.version ?? null,
     actions: [
-      action(params.service.pid === null ? "start" : "stop"),
-      ...(update ? [action("update")] : []),
+      action(isRunning ? "stop" : "start"),
+      ...(update ? [updateAction(update.version)] : []),
       action("view-details"),
     ],
   };
 }
 
-function action(kind: MainScreenAction["kind"]): MainScreenAction {
+function action(kind: Exclude<MainScreenAction["kind"], "update">): MainScreenAction {
   return {
     kind,
     enabled: true,
+  };
+}
+
+function updateAction(version: string): MainScreenAction {
+  return {
+    kind: "update",
+    enabled: true,
+    version,
   };
 }

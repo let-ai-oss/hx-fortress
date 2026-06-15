@@ -9,7 +9,3 @@ export class NoUpdateStatusProvider implements UpdateStatusProvider {
     return {};
   }
 }
-
-export function noUpdates(): ModuleUpdateMap {
-  return {};
-}

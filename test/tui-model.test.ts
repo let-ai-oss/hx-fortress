@@ -40,6 +40,11 @@ describe("buildMainScreenModel", () => {
       "update",
       "view-details",
     ]);
+    expect(model.rows[0]?.actions[1]).toEqual({
+      kind: "update",
+      enabled: true,
+      version: "1.2.4",
+    });
     expect(model.rows[1]).toMatchObject({
       id: "session_computer",
       label: "session_computer",
@@ -48,6 +53,12 @@ describe("buildMainScreenModel", () => {
       installedVersion: null,
       availableVersion: null,
       actions: [{ kind: "view-details", enabled: true }],
+    });
+    expect(model.rows[2]).toMatchObject({
+      id: "devops_utility",
+      label: "devops-utility",
+      availability: "unavailable",
+      statusLabel: "unavailable",
     });
     expect(model.footerNote).toBe(
       "Safe to exit HX Fortress. Components keep running in the background.",
@@ -88,6 +99,34 @@ describe("buildMainScreenModel", () => {
     expect(model.rows[0]?.actions.map((action) => action.kind)).toEqual([
       "stop",
       "view-details",
+    ]);
+  });
+
+  test("treats stale runtime status as stopped and does not offer stop", () => {
+    const model = buildMainScreenModel({
+      service: { loaded: true, pid: 1234 },
+      snapshot: {
+        ...runningSnapshot(),
+        host: {
+          ...runningSnapshot().host,
+          pid: 9999,
+        },
+      },
+      installedModules: [],
+      updates: {
+        session_vault: { kind: "binary", version: "2.0.0" },
+      },
+    });
+
+    expect(model.rows[0]).toMatchObject({
+      id: "session_vault",
+      statusLabel: "stopped",
+      availableVersion: "2.0.0",
+    });
+    expect(model.rows[0]?.actions).toEqual([
+      { kind: "start", enabled: true },
+      { kind: "update", enabled: true, version: "2.0.0" },
+      { kind: "view-details", enabled: true },
     ]);
   });
 });
