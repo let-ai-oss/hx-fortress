@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import packageJson from "../package.json";
+import * as host from "../src/host";
 
 describe("project skeleton", () => {
   test("uses the hx-fortress package identity", () => {
@@ -14,6 +15,16 @@ describe("project skeleton", () => {
       eslint: "10.5.0",
       typescript: "6.0.3",
       "typescript-eslint": "8.61.0",
+    });
+  });
+
+  test("exposes the host lifecycle through one public boundary", () => {
+    expect(host).toMatchObject({
+      FileConfigStore: expect.any(Function),
+      FileStatusStore: expect.any(Function),
+      HostRuntime: expect.any(Function),
+      fortressPaths: expect.any(Function),
+      runHost: expect.any(Function),
     });
   });
 });
