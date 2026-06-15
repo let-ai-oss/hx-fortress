@@ -6,6 +6,7 @@
  */
 
 import type { ServerWebSocket } from "bun";
+import { createServer } from "node:net";
 import { decodeFrame, encodeFrame } from "../src/protocol/codec";
 import type { FortressToHubFrame, HubToFortressFrame } from "../src/protocol/frames";
 import { SUPPORTED_PROTOCOL_VERSION } from "../src/cloud/connection";
@@ -33,43 +34,56 @@ export class FakeHub {
   private _received: FortressToHubFrame[] = [];
   private readonly opts: Required<Omit<FakeHubOptions, "rejectWith">> & Pick<FakeHubOptions, "rejectWith">;
 
-  constructor(options: FakeHubOptions = {}) {
-    this.opts = {
+  static async create(options: FakeHubOptions = {}): Promise<FakeHub> {
+    const port = await reservePort();
+    const opts = {
       orgId: options.orgId ?? "test-org",
       fortressId: options.fortressId ?? "test-fortress",
       credential: options.credential ?? "test-credential",
       protocolVersion: options.protocolVersion ?? SUPPORTED_PROTOCOL_VERSION,
       rejectWith: options.rejectWith,
     };
+    const hub = new FakeHub(
+      Bun.serve<undefined>({
+        port,
+        hostname: "127.0.0.1",
+        fetch: (req, server) => {
+          if (server.upgrade(req)) return undefined;
+          return new Response("not found", { status: 404 });
+        },
+        websocket: {
+          open: (ws) => {
+            hub.socket = ws;
+          },
+          message: (ws, data) => {
+            const raw = typeof data === "string" ? data : data.toString();
+            let frame: FortressToHubFrame;
+            try {
+              frame = decodeFrame<FortressToHubFrame>(raw);
+            } catch {
+              return;
+            }
+            hub._received.push(frame);
+            hub.autoRespond(ws, frame);
+          },
+          close: () => {
+            hub.socket = null;
+          },
+        },
+      }),
+      opts,
+    );
+    return hub;
+  }
 
-    this.server = Bun.serve<undefined>({
-      port: 0,
-      fetch: (req, server) => {
-        if (server.upgrade(req)) return undefined;
-        return new Response("not found", { status: 404 });
-      },
-      websocket: {
-        open: (ws) => {
-          this.socket = ws;
-        },
-        message: (ws, data) => {
-          const raw = typeof data === "string" ? data : data.toString();
-          let frame: FortressToHubFrame;
-          try {
-            frame = decodeFrame<FortressToHubFrame>(raw);
-          } catch {
-            return;
-          }
-          this._received.push(frame);
-          this.autoRespond(ws, frame);
-        },
-        close: () => {
-          this.socket = null;
-        },
-      },
-    });
-
-    this.url = `ws://localhost:${this.server.port}`;
+  private constructor(
+    server: Bun.Server<undefined>,
+    options: Required<Omit<FakeHubOptions, "rejectWith">> &
+      Pick<FakeHubOptions, "rejectWith">,
+  ) {
+    this.server = server;
+    this.opts = options;
+    this.url = `ws://127.0.0.1:${this.server.port}`;
   }
 
   /** All frames received from the Fortress client, in arrival order. */
@@ -106,4 +120,26 @@ export class FakeHub {
       ws.send(encodeFrame({ t: "heartbeatAck" }));
     }
   }
+}
+
+function reservePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("Failed to reserve loopback port")));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
 }

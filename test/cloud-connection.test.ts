@@ -60,8 +60,8 @@ function noopDispatcher(): MessageDispatcher {
 describe("WsCloudConnection", () => {
   let hub: FakeHub;
 
-  beforeEach(() => {
-    hub = new FakeHub();
+  beforeEach(async () => {
+    hub = await FakeHub.create();
   });
 
   afterEach(async () => {
@@ -212,7 +212,7 @@ describe("WsCloudConnection", () => {
   });
 
   test("rejects open when hub sends fatal frame", async () => {
-    const rejectedHub = new FakeHub({ rejectWith: "unauthorized" });
+    const rejectedHub = await FakeHub.create({ rejectWith: "unauthorized" });
     const cred: CloudCredential = { orgId: "o", fortressId: "f", credential: "c" };
     const conn = new WsCloudConnection({
       dispatcher: noopDispatcher(),
@@ -231,7 +231,7 @@ describe("WsCloudConnection", () => {
   });
 
   test("logs error and rejects open on mismatched protocol version in welcome", async () => {
-    const mismatchHub = new FakeHub({ protocolVersion: 99 });
+    const mismatchHub = await FakeHub.create({ protocolVersion: 99 });
     const cred: CloudCredential = { orgId: "o", fortressId: "f", credential: "c" };
     const { logger, errors } = captureLogger();
     const conn = new WsCloudConnection({
@@ -251,7 +251,7 @@ describe("WsCloudConnection", () => {
   });
 
   test("logs error and rejects open on mismatched protocol version in enrolled", async () => {
-    const mismatchHub = new FakeHub({ protocolVersion: 99 });
+    const mismatchHub = await FakeHub.create({ protocolVersion: 99 });
     const store = makeCredentialStore(null);
     const { logger, errors } = captureLogger();
     const conn = new WsCloudConnection({
