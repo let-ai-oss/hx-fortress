@@ -6,6 +6,7 @@ import {
 } from "../cloud";
 import type { WsCloudConnectionDeps } from "../cloud";
 import packageJson from "../../package.json";
+import createSessionVaultModule from "../modules/session-vault/module";
 import { FileConfigStore } from "./config";
 import { FileLogSink } from "./file-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
@@ -32,6 +33,7 @@ export async function runFortressHost(
   const bus = new LogBus(new FileLogSink(paths.log));
   const logger = new BusHostLogger(bus);
   const registry = new ModuleRegistry(bus);
+  registry.register(createSessionVaultModule());
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
 

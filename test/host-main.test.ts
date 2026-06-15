@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runFortressHost } from "../src/host/main";
 import type { WsCloudConnectionDeps } from "../src/cloud";
+import type { ModuleRegistry } from "../src/host/module-registry";
 import type { CloudConnection } from "../src/host/types";
 
 describe("runFortressHost", () => {
@@ -41,5 +42,9 @@ describe("runFortressHost", () => {
       version: "0.0.0-test",
       protocolVersion: 1,
     });
+    const registry = dependencies.dispatcher as ModuleRegistry;
+    expect(registry.snapshot()).toEqual([
+      { id: "session_vault", state: "stopped", error: null },
+    ]);
   });
 });
