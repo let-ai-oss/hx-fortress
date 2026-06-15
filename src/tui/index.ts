@@ -1,4 +1,5 @@
 import { createTuiApp } from "./app";
+import { startFortress, stopFortress } from "../cli-lifecycle";
 import { FsModuleInventoryStore } from "../host/module-inventory";
 import { fortressPaths } from "../host/paths";
 import { FileStatusReader } from "../status-reader";
@@ -19,27 +20,39 @@ import type { StatusReader } from "../status-reader";
 import type { ServiceManager } from "../service";
 
 interface TuiDependencies {
-  serviceManager?: Pick<ServiceManager, "state">;
+  serviceManager?: Pick<ServiceManager, "install" | "name" | "state" | "stop">;
   statusReader?: Pick<StatusReader, "read">;
   inventoryStore?: Pick<ModuleInventoryStore, "load">;
   updateStatusProvider?: Pick<UpdateStatusProvider, "load">;
+  executablePath?: string;
+  paths?: Pick<ReturnType<typeof fortressPaths>, "log" | "serviceLog" | "status">;
   runTerminalRenderer?: typeof runTerminalRenderer;
+  writeLine?: (line: string) => void;
 }
 
 export async function runFortressTui(
   options: RunTerminalRendererOptions = {},
   dependencies: TuiDependencies = {},
 ): Promise<number> {
+  const paths = dependencies.paths ?? fortressPaths();
+  const serviceManager = dependencies.serviceManager ?? getServiceManager();
+  const writeLine = dependencies.writeLine ?? (() => {});
   const model = await loadMainScreenModel(dependencies);
   const app = createTuiApp({
     model,
     actions: {
-      start: async () => {
-        throw new Error("start is not wired in this build yet");
-      },
-      stop: async () => {
-        throw new Error("stop is not wired in this build yet");
-      },
+      start: async () =>
+        await startFortress({
+          manager: serviceManager,
+          executablePath: dependencies.executablePath ?? process.execPath,
+          paths,
+          writeLine,
+        }),
+      stop: async () =>
+        await stopFortress({
+          manager: serviceManager,
+          writeLine,
+        }),
       update: async (version) => {
         throw new Error(`update ${version} is not wired in this build yet`);
       },
@@ -55,7 +68,7 @@ export async function runFortressTui(
 async function loadMainScreenModel(
   dependencies: TuiDependencies,
 ) {
-  const paths = fortressPaths();
+  const paths = dependencies.paths ?? fortressPaths();
   const serviceManager = dependencies.serviceManager ?? getServiceManager();
   const inventory =
     dependencies.inventoryStore ?? new FsModuleInventoryStore(paths);

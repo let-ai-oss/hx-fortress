@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runFortressTui } from "../src/tui";
 import type { TuiApp } from "../src/tui/app";
+import type { ServiceInstallOptions, ServiceManager, ServiceState } from "../src/service";
 
 describe("runFortressTui", () => {
   test("fails clearly when service state cannot be read", async () => {
@@ -91,4 +92,102 @@ describe("runFortressTui", () => {
       statusLabel: "stopped",
     });
   });
+
+  test("wires the start action through the lifecycle helper", async () => {
+    let renderedApp: TuiApp | undefined;
+    const manager = fakeManager([
+      { loaded: false, pid: null },
+      { loaded: false, pid: null },
+      { loaded: true, pid: 4321 },
+    ]);
+    const lines: string[] = [];
+
+    await runFortressTui(
+      {},
+      {
+        serviceManager: manager,
+        statusReader: {
+          read: async () => null,
+        },
+        runTerminalRenderer: async (app) => {
+          renderedApp = app;
+          return 0;
+        },
+        executablePath: "/tmp/hx-fortress-bin",
+        paths: {
+          log: "/tmp/fortress.log",
+          serviceLog: "/tmp/service.log",
+        },
+        writeLine: (line) => lines.push(line),
+      },
+    );
+
+    await renderedApp?.activate();
+
+    expect(manager.installCalls).toEqual([
+      {
+        executablePath: "/tmp/hx-fortress-bin",
+        serviceLogPath: "/tmp/service.log",
+      },
+    ]);
+    expect(lines).toEqual([
+      "Fortress started (launchd, pid 4321).",
+      "logs: /tmp/fortress.log",
+      "status: hx-fortress status",
+    ]);
+  });
+
+  test("wires the stop action through the lifecycle helper", async () => {
+    let renderedApp: TuiApp | undefined;
+    const manager = fakeManager([{ loaded: true, pid: 4321 }], true);
+    const lines: string[] = [];
+
+    await runFortressTui(
+      {},
+      {
+        serviceManager: manager,
+        statusReader: {
+          read: async () => null,
+        },
+        runTerminalRenderer: async (app) => {
+          renderedApp = app;
+          return 0;
+        },
+        writeLine: (line) => lines.push(line),
+      },
+    );
+
+    await renderedApp?.activate();
+
+    expect(manager.stopCalls).toBe(1);
+    expect(lines).toEqual([
+      "Fortress stopped (launchd). Run `hx-fortress start` to resume.",
+    ]);
+  });
 });
+
+interface FakeManager extends ServiceManager {
+  installCalls: ServiceInstallOptions[];
+  stopCalls: number;
+}
+
+function fakeManager(
+  states: ServiceState[],
+  wasRunning = false,
+): FakeManager {
+  return {
+    name: "launchd",
+    installCalls: [],
+    stopCalls: 0,
+    async install(options) {
+      this.installCalls.push(options);
+    },
+    async stop() {
+      this.stopCalls += 1;
+      return { wasRunning };
+    },
+    async state() {
+      return states.shift() ?? { loaded: false, pid: null };
+    },
+  };
+}
