@@ -7,4 +7,23 @@ export default tseslint.config(
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@forge/session-store", "@forge/session-store/*"],
+              message: "Import the wire contract through src/protocol only.",
+            },
+            {
+              group: ["@forge/hx-client", "@forge/hx-client/*"],
+              message: "Import the wire contract through src/protocol only.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 );
