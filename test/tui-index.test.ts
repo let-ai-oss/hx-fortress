@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { fortressPaths } from "../src/host/paths";
 import { runFortressTui } from "../src/tui";
 import type { TuiApp } from "../src/tui/app";
 import type { ServiceInstallOptions, ServiceManager, ServiceState } from "../src/service";
@@ -12,7 +13,7 @@ describe("runFortressTui", () => {
       runFortressTui(
         {},
         {
-          serviceManager: {
+          serviceStateReader: {
             state: async () => {
               throw new Error("service boom");
             },
@@ -35,7 +36,7 @@ describe("runFortressTui", () => {
       runFortressTui(
         {},
         {
-          serviceManager: {
+          serviceStateReader: {
             state: async () => ({ loaded: false, pid: null }),
           },
           statusReader: {
@@ -60,7 +61,7 @@ describe("runFortressTui", () => {
     const exitCode = await runFortressTui(
       {},
       {
-        serviceManager: {
+        serviceStateReader: {
           state: async () => ({ loaded: false, pid: null }),
         },
         statusReader: {
@@ -114,10 +115,7 @@ describe("runFortressTui", () => {
           return 0;
         },
         executablePath: "/tmp/hx-fortress-bin",
-        paths: {
-          log: "/tmp/fortress.log",
-          serviceLog: "/tmp/service.log",
-        },
+        paths: testPaths(),
         writeLine: (line) => lines.push(line),
       },
     );
@@ -127,12 +125,12 @@ describe("runFortressTui", () => {
     expect(manager.installCalls).toEqual([
       {
         executablePath: "/tmp/hx-fortress-bin",
-        serviceLogPath: "/tmp/service.log",
+        serviceLogPath: "/tmp/fortress/logs/service.log",
       },
     ]);
     expect(lines).toEqual([
       "Fortress started (launchd, pid 4321).",
-      "logs: /tmp/fortress.log",
+      "logs: /tmp/fortress/logs/fortress.jsonl",
       "status: hx-fortress status",
     ]);
   });
@@ -164,6 +162,40 @@ describe("runFortressTui", () => {
       "Fortress stopped (launchd). Run `hx-fortress start` to resume.",
     ]);
   });
+
+  test("keeps update as the single stubbed seam and captures its error in controller state", async () => {
+    let renderedApp: TuiApp | undefined;
+
+    await runFortressTui(
+      {},
+      {
+        serviceStateReader: {
+          state: async () => ({ loaded: true, pid: 4321 }),
+        },
+        statusReader: {
+          read: async () => null,
+        },
+        updateStatusProvider: {
+          load: async () => ({
+            session_vault: { kind: "module", version: "1.2.4" },
+          }),
+        },
+        runTerminalRenderer: async (app) => {
+          renderedApp = app;
+          return 0;
+        },
+      },
+    );
+
+    renderedApp?.moveAction(1);
+
+    await expect(renderedApp?.activate()).resolves.toBeUndefined();
+    expect(renderedApp?.state()).toMatchObject({
+      screen: "main",
+      pendingDetailsFor: null,
+      error: "update 1.2.4 is not wired in this build yet",
+    });
+  });
 });
 
 interface FakeManager extends ServiceManager {
@@ -190,4 +222,8 @@ function fakeManager(
       return states.shift() ?? { loaded: false, pid: null };
     },
   };
+}
+
+function testPaths() {
+  return fortressPaths("/tmp/fortress");
 }

@@ -19,15 +19,26 @@ import type { ModuleUpdateMap } from "./types";
 import type { StatusReader } from "../status-reader";
 import type { ServiceManager } from "../service";
 
-interface TuiDependencies {
-  serviceManager?: Pick<ServiceManager, "install" | "name" | "state" | "stop">;
+type FortressPaths = ReturnType<typeof fortressPaths>;
+type TuiServiceStateReader = Pick<ServiceManager, "state">;
+type TuiLifecycleManager = Pick<ServiceManager, "install" | "name" | "state" | "stop">;
+
+interface TuiModelDependencies {
+  serviceStateReader?: TuiServiceStateReader;
   statusReader?: Pick<StatusReader, "read">;
   inventoryStore?: Pick<ModuleInventoryStore, "load">;
   updateStatusProvider?: Pick<UpdateStatusProvider, "load">;
+  paths?: FortressPaths;
+}
+
+interface TuiActionDependencies {
+  serviceManager?: TuiLifecycleManager;
   executablePath?: string;
-  paths?: Pick<ReturnType<typeof fortressPaths>, "log" | "serviceLog" | "status">;
-  runTerminalRenderer?: typeof runTerminalRenderer;
   writeLine?: (line: string) => void;
+}
+
+interface TuiDependencies extends TuiModelDependencies, TuiActionDependencies {
+  runTerminalRenderer?: typeof runTerminalRenderer;
 }
 
 export async function runFortressTui(
@@ -36,8 +47,16 @@ export async function runFortressTui(
 ): Promise<number> {
   const paths = dependencies.paths ?? fortressPaths();
   const serviceManager = dependencies.serviceManager ?? getServiceManager();
+  const serviceStateReader =
+    dependencies.serviceStateReader ?? dependencies.serviceManager ?? serviceManager;
   const writeLine = dependencies.writeLine ?? (() => {});
-  const model = await loadMainScreenModel(dependencies);
+  const model = await loadMainScreenModel({
+    serviceStateReader,
+    statusReader: dependencies.statusReader,
+    inventoryStore: dependencies.inventoryStore,
+    updateStatusProvider: dependencies.updateStatusProvider,
+    paths,
+  });
   const app = createTuiApp({
     model,
     actions: {
@@ -66,19 +85,19 @@ export async function runFortressTui(
 }
 
 async function loadMainScreenModel(
-  dependencies: TuiDependencies,
+  dependencies: TuiModelDependencies & { paths: FortressPaths },
 ) {
-  const paths = dependencies.paths ?? fortressPaths();
-  const serviceManager = dependencies.serviceManager ?? getServiceManager();
+  const serviceStateReader =
+    dependencies.serviceStateReader ?? getServiceManager();
   const inventory =
-    dependencies.inventoryStore ?? new FsModuleInventoryStore(paths);
+    dependencies.inventoryStore ?? new FsModuleInventoryStore(dependencies.paths);
   const statusReader =
-    dependencies.statusReader ?? new FileStatusReader(paths.status);
+    dependencies.statusReader ?? new FileStatusReader(dependencies.paths.status);
   const updates =
     dependencies.updateStatusProvider ?? new NoUpdateStatusProvider();
 
   const [service, snapshot, installedModules, updateMap] = await Promise.all([
-    loadServiceState(serviceManager),
+    loadServiceState(serviceStateReader),
     loadSnapshot(statusReader),
     loadInstalledModules(inventory),
     loadUpdates(updates),

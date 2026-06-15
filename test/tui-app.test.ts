@@ -141,9 +141,15 @@ describe("createTuiApp", () => {
         updates: {},
       }),
       actions: {
-        start: async () => startCalls.push("start"),
-        stop: async () => startCalls.push("stop"),
-        update: async (version) => startCalls.push(`update:${version}`),
+        start: async () => {
+          startCalls.push("start");
+        },
+        stop: async () => {
+          startCalls.push("stop");
+        },
+        update: async (version) => {
+          startCalls.push(`update:${version}`);
+        },
       },
     });
 
@@ -161,9 +167,15 @@ describe("createTuiApp", () => {
         },
       }),
       actions: {
-        start: async () => stopCalls.push("start"),
-        stop: async () => stopCalls.push("stop"),
-        update: async (version) => stopCalls.push(`update:${version}`),
+        start: async () => {
+          stopCalls.push("start");
+        },
+        stop: async () => {
+          stopCalls.push("stop");
+        },
+        update: async (version) => {
+          stopCalls.push(`update:${version}`);
+        },
       },
     });
 
@@ -181,9 +193,15 @@ describe("createTuiApp", () => {
         },
       }),
       actions: {
-        start: async () => updateCalls.push("start"),
-        stop: async () => updateCalls.push("stop"),
-        update: async (version) => updateCalls.push(`update:${version}`),
+        start: async () => {
+          updateCalls.push("start");
+        },
+        stop: async () => {
+          updateCalls.push("stop");
+        },
+        update: async (version) => {
+          updateCalls.push(`update:${version}`);
+        },
       },
     });
 
@@ -258,9 +276,15 @@ describe("createTuiApp", () => {
         footerNote: "note",
       },
       actions: {
-        start: async () => calls.push("start"),
-        stop: async () => calls.push("stop"),
-        update: async (version) => calls.push(`update:${version}`),
+        start: async () => {
+          calls.push("start");
+        },
+        stop: async () => {
+          calls.push("stop");
+        },
+        update: async (version) => {
+          calls.push(`update:${version}`);
+        },
       },
     });
 
