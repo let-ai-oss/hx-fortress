@@ -4,9 +4,9 @@ HX Fortress is the on-customer-infrastructure host for let.ai components. It
 runs as a long-lived Bun process, owns the connection to let.ai cloud, and
 loads component modules such as `session_vault`.
 
-This repository currently contains the project skeleton. The host runtime,
-component modules, installer, and release artifacts are implemented in
-follow-up tasks.
+This repository currently contains the project skeleton and the vendored
+Fortress/cloud protocol boundary. The host runtime, component modules,
+installer, and release artifacts are implemented in follow-up tasks.
 
 ## Install
 
