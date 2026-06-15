@@ -48,7 +48,6 @@ function buildRow(
     hasRunningService &&
     params.snapshot !== null &&
     params.snapshot.host.pid === params.service.pid;
-  const isRunning = hasFreshSnapshot;
 
   return {
     id,
@@ -58,7 +57,7 @@ function buildRow(
     installedVersion: installed?.version ?? null,
     availableVersion: update?.version ?? null,
     actions: [
-      action(isRunning ? "stop" : "start"),
+      action(params.service.pid === null ? "start" : "stop"),
       ...(update ? [updateAction(update.version)] : []),
       action("view-details"),
     ],

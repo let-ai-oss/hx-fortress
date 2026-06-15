@@ -102,7 +102,7 @@ describe("buildMainScreenModel", () => {
     ]);
   });
 
-  test("treats stale runtime status as stopped and does not offer stop", () => {
+  test("treats stale runtime status as stopped while keeping pid-based stop action", () => {
     const model = buildMainScreenModel({
       service: { loaded: true, pid: 1234 },
       snapshot: {
@@ -124,7 +124,7 @@ describe("buildMainScreenModel", () => {
       availableVersion: "2.0.0",
     });
     expect(model.rows[0]?.actions).toEqual([
-      { kind: "start", enabled: true },
+      { kind: "stop", enabled: true },
       { kind: "update", enabled: true, version: "2.0.0" },
       { kind: "view-details", enabled: true },
     ]);
