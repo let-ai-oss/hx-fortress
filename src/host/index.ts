@@ -12,6 +12,7 @@ export {
   type HostSignal,
   type SignalSource,
 } from "./run-host";
+export { ModuleRegistry } from "./module-registry";
 export { HostRuntime, type HostRuntimeDependencies } from "./runtime";
 export { FileStatusStore } from "./status";
 export type {
@@ -23,6 +24,8 @@ export type {
   HostLogger,
   HostState,
   HostStatusSnapshot,
+  Module,
+  ModuleContext,
   ModuleRuntimeStatus,
   ModuleStartResult,
   ModuleState,

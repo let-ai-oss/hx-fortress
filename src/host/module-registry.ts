@@ -1,0 +1,136 @@
+import type { MsgData, MsgReply } from "../protocol";
+import { assertModuleId } from "./paths";
+import type {
+  HostLogger,
+  Module,
+  ModuleRuntimeStatus,
+  ModuleStartResult,
+  ModuleState,
+  ModuleStopResult,
+  ModuleSupervisor,
+} from "./types";
+
+interface RegisteredModule {
+  id: string;
+  module: Module | null;
+  state: ModuleState;
+  error: string | null;
+}
+
+export class ModuleRegistry implements ModuleSupervisor {
+  private readonly modules = new Map<string, RegisteredModule>();
+
+  constructor(private readonly logger: HostLogger) {}
+
+  register(module: Module): void {
+    assertModuleId(module.id);
+    if (this.modules.has(module.id)) {
+      throw new Error(`Module already registered: ${module.id}`);
+    }
+    this.modules.set(module.id, {
+      id: module.id,
+      module,
+      state: "stopped",
+      error: null,
+    });
+  }
+
+  has(id: string): boolean {
+    return this.modules.get(id)?.module != null;
+  }
+
+  get(id: string): Module | undefined {
+    return this.modules.get(id)?.module ?? undefined;
+  }
+
+  snapshot(): readonly ModuleRuntimeStatus[] {
+    return [...this.modules.values()].map((entry) => ({
+      id: entry.id,
+      state: entry.state,
+      error: entry.error,
+    }));
+  }
+
+  async startAll(
+    moduleIds: readonly string[],
+  ): Promise<readonly ModuleStartResult[]> {
+    const results: ModuleStartResult[] = [];
+    for (const id of moduleIds) {
+      const entry = this.modules.get(id);
+      if (!entry?.module) {
+        const error = `Module not registered: ${id}`;
+        this.modules.set(id, { id, module: null, state: "failed", error });
+        results.push({ id, ok: false, error });
+        continue;
+      }
+      try {
+        entry.state = "starting";
+        entry.error = null;
+        await entry.module.init?.({ moduleId: id });
+        await entry.module.start?.();
+        entry.state = "running";
+        results.push({ id, ok: true });
+      } catch (error) {
+        const message = errorMessage(error);
+        entry.state = "failed";
+        entry.error = message;
+        results.push({ id, ok: false, error: message });
+      }
+    }
+    return results;
+  }
+
+  async stopAll(): Promise<readonly ModuleStopResult[]> {
+    const results: ModuleStopResult[] = [];
+    for (const entry of this.modules.values()) {
+      if (entry.state !== "running" || !entry.module) continue;
+      const { id, module } = entry;
+      try {
+        entry.state = "stopping";
+        await module.stop?.();
+        entry.state = "stopped";
+        entry.error = null;
+        results.push({ id, ok: true });
+      } catch (error) {
+        const message = errorMessage(error);
+        entry.state = "failed";
+        entry.error = message;
+        this.logger.error(`Failed to stop Fortress module: ${id}`, error);
+        results.push({ id, ok: false, error: message });
+      }
+    }
+    return results;
+  }
+
+  async dispatch(data: MsgData): Promise<MsgReply | undefined> {
+    const entry = this.modules.get(data.module);
+    if (!entry?.module || entry.state !== "running") {
+      if (data.kind === "event") {
+        this.logger.error(`Dropped event for module not running: ${data.module}`);
+        return undefined;
+      }
+      return { ok: false, error: `Module not running: ${data.module}` };
+    }
+
+    let reply: MsgReply | void;
+    try {
+      reply = await entry.module.onMessage(data);
+    } catch (error) {
+      if (data.kind === "event") {
+        this.logger.error(`Module event handler failed: ${data.module}`, error);
+        return undefined;
+      }
+      return { ok: false, error: errorMessage(error) };
+    }
+
+    if (data.kind === "event") return undefined;
+    if (!reply) {
+      return { ok: false, error: `Module returned no reply for request: ${data.id}` };
+    }
+    return reply;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
