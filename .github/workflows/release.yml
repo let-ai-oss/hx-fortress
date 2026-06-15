@@ -1,0 +1,15 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-stub:
+    name: Release workflow stub
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report release status
+        run: echo "Binary build and publication are implemented by MC-2270."
