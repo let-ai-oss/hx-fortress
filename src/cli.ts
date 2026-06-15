@@ -1,12 +1,20 @@
 import { startFortress, statusFortress, stopFortress } from "./cli-lifecycle";
+import {
+  createProductionLogsDeps,
+  logsCommand,
+  type LogsOptions,
+} from "./cli-logs";
 import { runFortressHost } from "./host/main";
 import { fortressPaths } from "./host/paths";
 import { FileStatusReader } from "./status-reader";
 import { getServiceManager } from "./service";
 
+type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
+
 interface CliDependencies {
   getServiceManager?: typeof getServiceManager;
   runFortressHost?: typeof runFortressHost;
+  runLogs?: RunLogs;
   writeLine?: (line: string) => void;
 }
 
@@ -45,6 +53,27 @@ export async function runCli(
       case "host":
         await (dependencies.runFortressHost ?? runFortressHost)();
         return 0;
+      case "logs": {
+        const paths = fortressPaths();
+        const rest = args.slice(1);
+        const moduleFilter = rest.find((a) => !a.startsWith("--"));
+        const linesIdx = rest.indexOf("--lines");
+        const linesArg = linesIdx >= 0 ? Number(rest[linesIdx + 1]) : NaN;
+        const linesBack = Number.isFinite(linesArg) && linesArg >= 0 ? linesArg : 50;
+        const runLogs =
+          dependencies.runLogs ??
+          ((opts: Omit<LogsOptions, "follow" | "signal">) => {
+            const ac = new AbortController();
+            const onSig = () => ac.abort();
+            process.once("SIGINT", onSig);
+            return logsCommand(
+              { ...opts, follow: true, signal: ac.signal },
+              createProductionLogsDeps(),
+            ).finally(() => process.removeListener("SIGINT", onSig));
+          });
+        await runLogs({ logPath: paths.log, moduleFilter, linesBack, writeLine });
+        return 0;
+      }
       case undefined:
       case "help":
       case "--help":
