@@ -1,5 +1,11 @@
 export { FileConfigStore, parseFortressConfig } from "./config";
 export {
+  FsModuleInventoryStore,
+  type InstalledModuleRecord,
+  type ModuleInventoryStore,
+} from "./module-inventory";
+export { ModuleLoader, type ModuleLoaderDeps } from "./module-loader";
+export {
   MODULE_ID_PATTERN,
   assertModuleId,
   defaultFortressRoot,
@@ -24,9 +30,12 @@ export type {
   HostLogger,
   HostState,
   HostStatusSnapshot,
+  LoadableRegistry,
   MessageDispatcher,
   Module,
   ModuleContext,
+  ModuleInstallParams,
+  ModuleLifecycleHandler,
   ModuleRuntimeStatus,
   ModuleStartResult,
   ModuleState,

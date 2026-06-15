@@ -88,3 +88,24 @@ export interface Module {
   uninstall?(): Promise<void> | void;
   onMessage(data: MsgData): Promise<MsgReply | void> | MsgReply | void;
 }
+
+export interface LoadableRegistry {
+  register(module: Module): void;
+  has(id: string): boolean;
+  get(id: string): Module | undefined;
+  startOne(id: string): Promise<ModuleStartResult>;
+  stopOne(id: string): Promise<ModuleStopResult>;
+  unregister(id: string): void;
+}
+
+export interface ModuleInstallParams {
+  moduleId: string;
+  version: string;
+  artifactUrl: string;
+  checksum: string;
+}
+
+export interface ModuleLifecycleHandler {
+  install(params: ModuleInstallParams): Promise<void>;
+  uninstall(moduleId: string): Promise<void>;
+}
