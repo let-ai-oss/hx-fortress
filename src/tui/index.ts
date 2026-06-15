@@ -5,15 +5,32 @@ import { FileStatusReader } from "../status-reader";
 import { getServiceManager, type ServiceState } from "../service";
 import { buildMainScreenModel } from "./model";
 import { runTerminalRenderer, type RunTerminalRendererOptions } from "./terminal";
-import { NoUpdateStatusProvider } from "./update-status";
+import {
+  NoUpdateStatusProvider,
+  type UpdateStatusProvider,
+} from "./update-status";
 import type { HostStatusSnapshot } from "../host/types";
-import type { InstalledModuleRecord } from "../host/module-inventory";
+import type {
+  InstalledModuleRecord,
+  ModuleInventoryStore,
+} from "../host/module-inventory";
 import type { ModuleUpdateMap } from "./types";
+import type { StatusReader } from "../status-reader";
+import type { ServiceManager } from "../service";
+
+interface TuiDependencies {
+  serviceManager?: Pick<ServiceManager, "state">;
+  statusReader?: Pick<StatusReader, "read">;
+  inventoryStore?: Pick<ModuleInventoryStore, "load">;
+  updateStatusProvider?: Pick<UpdateStatusProvider, "load">;
+  runTerminalRenderer?: typeof runTerminalRenderer;
+}
 
 export async function runFortressTui(
   options: RunTerminalRendererOptions = {},
+  dependencies: TuiDependencies = {},
 ): Promise<number> {
-  const model = await loadMainScreenModel();
+  const model = await loadMainScreenModel(dependencies);
   const app = createTuiApp({
     model,
     actions: {
@@ -29,15 +46,23 @@ export async function runFortressTui(
     },
   });
 
-  return await runTerminalRenderer(app, options);
+  return await (dependencies.runTerminalRenderer ?? runTerminalRenderer)(
+    app,
+    options,
+  );
 }
 
-async function loadMainScreenModel() {
+async function loadMainScreenModel(
+  dependencies: TuiDependencies,
+) {
   const paths = fortressPaths();
-  const serviceManager = getServiceManager();
-  const inventory = new FsModuleInventoryStore(paths);
-  const statusReader = new FileStatusReader(paths.status);
-  const updates = new NoUpdateStatusProvider();
+  const serviceManager = dependencies.serviceManager ?? getServiceManager();
+  const inventory =
+    dependencies.inventoryStore ?? new FsModuleInventoryStore(paths);
+  const statusReader =
+    dependencies.statusReader ?? new FileStatusReader(paths.status);
+  const updates =
+    dependencies.updateStatusProvider ?? new NoUpdateStatusProvider();
 
   const [service, snapshot, installedModules, updateMap] = await Promise.all([
     loadServiceState(serviceManager),
@@ -55,27 +80,19 @@ async function loadMainScreenModel() {
 }
 
 async function loadServiceState(
-  serviceManager: ReturnType<typeof getServiceManager>,
+  serviceManager: Pick<ServiceManager, "state">,
 ): Promise<ServiceState> {
-  try {
-    return await serviceManager.state();
-  } catch {
-    return { loaded: false, pid: null };
-  }
+  return await serviceManager.state();
 }
 
 async function loadSnapshot(
-  statusReader: FileStatusReader,
+  statusReader: Pick<StatusReader, "read">,
 ): Promise<HostStatusSnapshot | null> {
-  try {
-    return await statusReader.read();
-  } catch {
-    return null;
-  }
+  return await statusReader.read();
 }
 
 async function loadInstalledModules(
-  inventory: FsModuleInventoryStore,
+  inventory: Pick<ModuleInventoryStore, "load">,
 ): Promise<InstalledModuleRecord[]> {
   try {
     return await inventory.load();
@@ -85,7 +102,7 @@ async function loadInstalledModules(
 }
 
 async function loadUpdates(
-  updates: NoUpdateStatusProvider,
+  updates: Pick<UpdateStatusProvider, "load">,
 ): Promise<ModuleUpdateMap> {
   try {
     return await updates.load();

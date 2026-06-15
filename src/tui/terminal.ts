@@ -74,7 +74,7 @@ export async function runTerminalRenderer(
 
       pending = pending
         .then(async () => {
-          const shouldExit = await handleKey(app, key);
+          const shouldExit = await handleTerminalKey(app, key);
           if (shouldExit) {
             finish(0);
             return;
@@ -95,7 +95,10 @@ export async function runTerminalRenderer(
   });
 }
 
-async function handleKey(app: TuiApp, key: string): Promise<boolean> {
+export async function handleTerminalKey(
+  app: TuiApp,
+  key: string,
+): Promise<boolean> {
   switch (key) {
     case "q":
     case "Q":
@@ -106,15 +109,19 @@ async function handleKey(app: TuiApp, key: string): Promise<boolean> {
       await app.activate();
       return false;
     case "\u001b[A":
+    case "\u001bOA":
       app.moveRow(-1);
       return false;
     case "\u001b[B":
+    case "\u001bOB":
       app.moveRow(1);
       return false;
     case "\u001b[D":
+    case "\u001bOD":
       app.moveAction(-1);
       return false;
     case "\u001b[C":
+    case "\u001bOC":
       app.moveAction(1);
       return false;
     default:
