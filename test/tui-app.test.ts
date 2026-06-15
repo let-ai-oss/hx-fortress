@@ -52,6 +52,42 @@ describe("createTuiApp", () => {
     });
   });
 
+  test("preserves the selected action when a row move resolves to the same row", () => {
+    const app = createTuiApp({
+      model: buildMainScreenModel({
+        service: { loaded: true, pid: 1234 },
+        snapshot: null,
+        installedModules: [],
+        updates: {
+          session_vault: { kind: "module", version: "1.2.4" },
+        },
+      }),
+      actions: {
+        start: async () => {},
+        stop: async () => {},
+        update: async () => {},
+      },
+    });
+
+    app.moveAction(1);
+    expect(app.state()).toMatchObject({
+      selectedRow: 0,
+      selectedAction: 1,
+    });
+
+    app.moveRow(0);
+    expect(app.state()).toMatchObject({
+      selectedRow: 0,
+      selectedAction: 1,
+    });
+
+    app.moveRow(3);
+    expect(app.state()).toMatchObject({
+      selectedRow: 0,
+      selectedAction: 1,
+    });
+  });
+
   test("wraps actions within the current row", () => {
     const app = createTuiApp({
       model: buildMainScreenModel({

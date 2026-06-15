@@ -40,11 +40,15 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
   return {
     state: () => ({ ...currentState }),
     moveRow: (delta) => {
-      currentState.selectedRow = wrapIndex(
+      const nextRow = wrapIndex(
         currentState.selectedRow + delta,
         params.model.rows.length,
       );
-      currentState.selectedAction = 0;
+
+      if (nextRow !== currentState.selectedRow) {
+        currentState.selectedRow = nextRow;
+        currentState.selectedAction = 0;
+      }
     },
     moveAction: (delta) => {
       currentState.selectedAction = wrapIndex(
