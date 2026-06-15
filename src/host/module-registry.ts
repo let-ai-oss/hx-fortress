@@ -2,6 +2,7 @@ import type { MsgData, MsgReply } from "../protocol";
 import { LogBus } from "./logging";
 import { assertModuleId } from "./paths";
 import type {
+  EnrolledIdentity,
   LoadableRegistry,
   Module,
   ModuleRuntimeStatus,
@@ -20,8 +21,15 @@ interface RegisteredModule {
 
 export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
   private readonly modules = new Map<string, RegisteredModule>();
+  private enrolledIdentity: EnrolledIdentity | null = null;
 
   constructor(private readonly bus: LogBus) {}
+
+  /** Set the enrolled Fortress identity. Call this after the cloud connection
+   *  authenticates, before starting modules. */
+  setFortressIdentity(identity: EnrolledIdentity | null): void {
+    this.enrolledIdentity = identity;
+  }
 
   register(module: Module): void {
     assertModuleId(module.id);
@@ -67,7 +75,11 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
       try {
         entry.state = "starting";
         entry.error = null;
-        await entry.module.init?.({ moduleId: id, logger: this.bus.scopeFor(id) });
+        await entry.module.init?.({
+          moduleId: id,
+          logger: this.bus.scopeFor(id),
+          fortressIdentity: this.enrolledIdentity,
+        });
         await entry.module.start?.();
         entry.state = "running";
         results.push({ id, ok: true });

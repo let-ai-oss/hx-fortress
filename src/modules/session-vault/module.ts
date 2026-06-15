@@ -1,6 +1,6 @@
 // session-vault Fortress module — implements the Module interface so the
 // Fortress host routes MsgData payloads here. The store (S3/GCS) is built
-// from credentials.json on init. Transport is owned by Fortress (T6).
+// from credentials.json on init. Transport and identity are owned by Fortress.
 
 import { handleVaultRpc, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
@@ -20,7 +20,21 @@ export default function createModule(): Module {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");
       }
       store = buildStore(creds);
-      context.logger.info("store initialized", { kind: creds.store, bucket: creds.bucket });
+
+      const { fortressIdentity } = context;
+      if (fortressIdentity) {
+        context.logger.info("store initialized", {
+          kind: creds.store,
+          bucket: creds.bucket,
+          orgId: fortressIdentity.orgId,
+          fortressId: fortressIdentity.fortressId,
+        });
+      } else {
+        context.logger.warn("store initialized without Fortress identity — not yet enrolled", {
+          kind: creds.store,
+          bucket: creds.bucket,
+        });
+      }
     },
 
     async onMessage(data) {

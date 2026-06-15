@@ -20,6 +20,7 @@ export function fortressPaths(root = defaultFortressRoot()) {
     root,
     config: path.join(root, "config.json"),
     credentials: path.join(root, "identity", "credentials.json"),
+    pendingEnrollment: path.join(root, "identity", "pending-enrollment.json"),
     moduleInventory: path.join(modules, "inventory.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
     serviceLog: path.join(root, "logs", "service.log"),

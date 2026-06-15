@@ -17,6 +17,9 @@ export interface HostRuntimeDependencies {
   logger: HostLogger;
   clock?: Clock;
   pid?: number;
+  /** Called after the cloud connection opens and before modules start. Use to
+   *  propagate the Fortress identity into the module supervisor. */
+  afterConnect?: () => Promise<void>;
 }
 
 export class HostRuntime {
@@ -44,6 +47,7 @@ export class HostRuntime {
     try {
       const config = await this.dependencies.configStore.load();
       await this.dependencies.connection.open(config);
+      await this.dependencies.afterConnect?.();
       await this.dependencies.supervisor.startAll(config.modules.enabled);
 
       this.state = "running";

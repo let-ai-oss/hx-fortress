@@ -25,13 +25,18 @@ import {
   type S3Credentials,
 } from "./credentials.js";
 import { buildStore } from "./store.js";
+import { FilePendingEnrollmentStore } from "../../cloud/credentials.js";
+import { fortressPaths } from "../../host/paths.js";
 
 type Log = (m: string) => void;
 
 export interface WizardOpts {
-  hubUrl: string;
+  /** WebSocket URL of the let.ai hub, e.g. wss://let.ai/api/fortress/tunnel. */
+  cloudUrl: string;
   token: string;
   log: Log;
+  /** Override the Fortress root directory (default: ~/.let/fortress). */
+  fortressRoot?: string;
 }
 
 export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
@@ -47,10 +52,11 @@ export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
   ]);
   if (store === "gcs") return enrollGcs(opts);
   return enrollS3(opts);
+
 }
 
 async function enrollGcs(opts: WizardOpts): Promise<void> {
-  const { hubUrl, token, log } = opts;
+  const { cloudUrl, token, log } = opts;
   const boot = await ensureGcloud(log);
   const state = await detectGcloud();
 
@@ -68,7 +74,7 @@ async function enrollGcs(opts: WizardOpts): Promise<void> {
   );
   const bucket = await requireBucketName(log);
 
-  const ctx: TemplateContext = { store: "gcs", bucket, region: location, projectId: project, hubUrl, token };
+  const ctx: TemplateContext = { store: "gcs", bucket, region: location, projectId: project, cloudUrl, token };
 
   // No usable gcloud → can't auto-provision; offer paste, else template.
   if (!boot.ready) {
@@ -104,14 +110,14 @@ async function enrollGcs(opts: WizardOpts): Promise<void> {
   if (!key) return defer(ctx, log);
 
   await finishAndConnect(
-    { store: "gcs", bucket, region: location, projectId: project, gcs: key, letai: { hubUrl } },
-    token,
+    { store: "gcs", bucket, region: location, projectId: project, gcs: key },
+    opts,
     log,
   );
 }
 
 async function enrollS3(opts: WizardOpts): Promise<void> {
-  const { hubUrl, token, log } = opts;
+  const { log } = opts;
   const state = await detectAws();
   const region = await selectPrompt(
     "Bucket region (where transcripts rest):",
@@ -119,7 +125,7 @@ async function enrollS3(opts: WizardOpts): Promise<void> {
     { filter: true, defaultIndex: indexOf(AWS_REGIONS, state.region) },
   );
   const bucket = await requireBucketName(log);
-  const ctx: TemplateContext = { store: "s3", bucket, region, hubUrl, token };
+  const ctx: TemplateContext = { store: "s3", bucket, region, cloudUrl: opts.cloudUrl, token: opts.token };
 
   const method = await selectPrompt<"create" | "paste">("Credentials:", [
     { label: "Create a least-privilege IAM user (requires an aws admin login)", value: "create" },
@@ -145,7 +151,7 @@ async function enrollS3(opts: WizardOpts): Promise<void> {
   }
   if (!creds) return defer(ctx, log);
 
-  await finishAndConnect({ store: "s3", bucket, region, s3: creds, letai: { hubUrl } }, token, log);
+  await finishAndConnect({ store: "s3", bucket, region, s3: creds }, opts, log);
 }
 
 /** Ensure the S3 bucket exists, offering a secure create. Uses `creds` when
@@ -185,34 +191,36 @@ async function maybeKmsKey(): Promise<string | undefined> {
 
 // ── shared steps ─────────────────────────────────────────────────────────────
 
-async function finishAndConnect(creds: VaultCredentials, token: string, log: Log): Promise<void> {
-  // Store the enrollment token so Fortress can complete the handshake on first connect (T15).
-  const credsWithToken: VaultCredentials = {
-    ...creds,
-    letai: { ...creds.letai, pendingToken: token },
-  };
-  await writeVaultCredentials(credsWithToken);
+async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: Log): Promise<void> {
+  await writeVaultCredentials(creds);
   log("Verifying write + read access to the bucket…");
   try {
-    await buildStore(credsWithToken).selfTest();
+    await buildStore(creds).selfTest();
     log("Storage verified.");
   } catch (e) {
     log(`Storage check failed: ${(e as Error).message}`);
     log("credentials.json was written; fix the bucket access and re-run enroll.");
     process.exit(1);
   }
+
+  // Write the enrollment token to the Fortress identity directory so the host
+  // can authenticate on first connect without the vault module knowing the token.
+  const paths = fortressPaths(opts.fortressRoot);
+  const pendingStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
+  await pendingStore.save({ token: opts.token, cloudUrl: opts.cloudUrl });
+
   log("");
-  log(`Session Vault credentials saved. Transcripts will rest in ${credsWithToken.bucket}.`);
+  log(`Session Vault credentials saved. Transcripts will rest in ${creds.bucket}.`);
   log("Start Fortress to activate:  hx-fortress start");
 }
 
 async function pasteKeyOrDefer(ctx: TemplateContext, opts: WizardOpts): Promise<void> {
-  const { hubUrl, token, log } = opts;
+  const { log } = opts;
   const key = await pasteGcsKey(log);
   if (!key) return defer(ctx, log);
   await finishAndConnect(
-    { store: "gcs", bucket: ctx.bucket, region: ctx.region, projectId: ctx.projectId, gcs: key, letai: { hubUrl } },
-    token,
+    { store: "gcs", bucket: ctx.bucket, region: ctx.region, projectId: ctx.projectId, gcs: key },
+    opts,
     log,
   );
 }
@@ -245,7 +253,7 @@ async function defer(ctx: TemplateContext, log: Log): Promise<void> {
   log("");
   log(`Template written to ${credsPath} — complete the ${ctx.store} block to finish.`);
   log(`Exact commands: ${setupPath}`);
-  log("Then run: hx-session-vault start");
+  log("Then run: hx-fortress start");
   process.exit(0);
 }
 

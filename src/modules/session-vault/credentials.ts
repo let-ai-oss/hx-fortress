@@ -1,11 +1,11 @@
-// ~/.let/session-vault/credentials.json is the single state file for a Session
-// Vault: the storage backend + the inline credentials that read/write the
-// organization's own bucket, plus the let.ai tunnel identity issued at
-// enrollment. Atomic-write (tmp + rename), chmod 600.
+// ~/.let/session-vault/credentials.json holds the storage-backend credentials
+// for one Session Vault: the bucket name and the inline GCS/S3 keys that read
+// and write the organization's own bucket. Atomic-write (tmp + rename),
+// chmod 600.
 //
-// Storage credentials live ONLY in this file, on this host — they are never
-// transmitted to let.ai. A Session Vault install is exactly two files: the
-// hx-session-vault binary and this credentials.json.
+// Enrollment identity (orgId, fortressId, credential) is Fortress-owned and
+// lives under ~/.let/fortress/ — it never appears in this file. Bucket
+// credentials are module-local and never leave the host.
 
 import { readFile, writeFile, rename, mkdir, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -32,19 +32,6 @@ export interface S3Credentials {
   sessionToken?: string;
 }
 
-/** Identity issued by let.ai at enrollment; written back into this file so a
- *  later `start` reconnects without a fresh token. */
-export interface LetaiIdentity {
-  hubUrl: string;
-  orgId?: string;
-  vaultId?: string;
-  cred?: string;
-  /** A not-yet-consumed enrollment token persisted by the wizard's manual path,
-   *  so `hx-session-vault start` can finish enrollment after the storage block
-   *  is filled in. Cleared once enrollment succeeds. */
-  pendingToken?: string;
-}
-
 export interface VaultCredentials {
   store: VaultStorageKind;
   bucket: string;
@@ -60,8 +47,6 @@ export interface VaultCredentials {
   gcs?: GcsServiceAccountKey;
   /** Inline S3 access key. Absent → AWS default credential chain. */
   s3?: S3Credentials;
-  /** let.ai tunnel identity (hub URL always; ids + cred after enrollment). */
-  letai: LetaiIdentity;
 }
 
 export const VAULT_HOME = path.join(os.homedir(), ".let", "session-vault");
@@ -89,8 +74,6 @@ export async function writeVaultCredentials(creds: VaultCredentials): Promise<vo
   const tmp = `${CREDENTIALS_PATH}.tmp`;
   await writeFile(tmp, `${JSON.stringify(creds, null, 2)}\n`, { mode: 0o600 });
   await rename(tmp, CREDENTIALS_PATH);
-  // rename preserves the tmp mode, but chmod again in case the file pre-existed
-  // with looser perms.
   await chmod(CREDENTIALS_PATH, 0o600).catch(() => {});
 }
 
@@ -108,9 +91,5 @@ export function redactCredentials(c: VaultCredentials): Record<string, unknown> 
         : c.s3
           ? "inline access key"
           : "AWS default credential chain",
-    enrolled: Boolean(c.letai.vaultId && c.letai.cred),
-    hubUrl: c.letai.hubUrl,
-    orgId: c.letai.orgId ?? null,
-    vaultId: c.letai.vaultId ?? null,
   };
 }
