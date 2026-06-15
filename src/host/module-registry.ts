@@ -1,7 +1,7 @@
 import type { MsgData, MsgReply } from "../protocol";
+import { LogBus } from "./logging";
 import { assertModuleId } from "./paths";
 import type {
-  HostLogger,
   LoadableRegistry,
   Module,
   ModuleRuntimeStatus,
@@ -21,7 +21,7 @@ interface RegisteredModule {
 export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
   private readonly modules = new Map<string, RegisteredModule>();
 
-  constructor(private readonly logger: HostLogger) {}
+  constructor(private readonly bus: LogBus) {}
 
   register(module: Module): void {
     assertModuleId(module.id);
@@ -67,7 +67,7 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
       try {
         entry.state = "starting";
         entry.error = null;
-        await entry.module.init?.({ moduleId: id });
+        await entry.module.init?.({ moduleId: id, logger: this.bus.scopeFor(id) });
         await entry.module.start?.();
         entry.state = "running";
         results.push({ id, ok: true });
@@ -96,7 +96,7 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
         const message = errorMessage(error);
         entry.state = "failed";
         entry.error = message;
-        this.logger.error(`Failed to stop Fortress module: ${id}`, error);
+        this.bus.host.error(`Failed to stop Fortress module: ${id}`, { error: errorMessage(error) });
         results.push({ id, ok: false, error: message });
       }
     }
@@ -123,7 +123,7 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
       const message = errorMessage(error);
       entry.state = "failed";
       entry.error = message;
-      this.logger.error(`Failed to stop Fortress module: ${id}`, error);
+      this.bus.host.error(`Failed to stop Fortress module: ${id}`, { error: errorMessage(error) });
       return { id, ok: false, error: message };
     }
   }
@@ -141,7 +141,7 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
     const entry = this.modules.get(data.module);
     if (!entry?.module || entry.state !== "running") {
       if (data.kind === "event") {
-        this.logger.error(`Dropped event for module not running: ${data.module}`);
+        this.bus.host.error(`Dropped event for module not running: ${data.module}`);
         return undefined;
       }
       return { ok: false, error: `Module not running: ${data.module}` };
@@ -152,7 +152,7 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
       reply = await entry.module.onMessage(data);
     } catch (error) {
       if (data.kind === "event") {
-        this.logger.error(`Module event handler failed: ${data.module}`, error);
+        this.bus.host.error(`Module event handler failed: ${data.module}`, { error: errorMessage(error) });
         return undefined;
       }
       return { ok: false, error: errorMessage(error) };

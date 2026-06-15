@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
+import { LogBus } from "../src/host/logging";
 import { ModuleRegistry } from "../src/host/module-registry";
-import type { HostLogger, Module, ModuleContext } from "../src/host/types";
+import type { LogRecord, LogSink, Module, ModuleContext, ScopedLogger } from "../src/host/types";
 import type { MsgData, MsgReply } from "../src/protocol";
 
 describe("ModuleRegistry registration", () => {
   test("registers a module and exposes it as stopped", () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(fixtureModule({ id: "session_vault" }));
 
     expect(registry.has("session_vault")).toBe(true);
@@ -17,7 +18,7 @@ describe("ModuleRegistry registration", () => {
   });
 
   test("lists modules in registration order", () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(fixtureModule({ id: "session_vault" }));
     registry.register(fixtureModule({ id: "analytics" }));
 
@@ -28,7 +29,7 @@ describe("ModuleRegistry registration", () => {
   });
 
   test("rejects a duplicate module id", () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(fixtureModule({ id: "session_vault" }));
 
     expect(() => registry.register(fixtureModule({ id: "session_vault" }))).toThrow(
@@ -37,7 +38,7 @@ describe("ModuleRegistry registration", () => {
   });
 
   test("rejects an invalid module id", () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
 
     expect(() => registry.register(fixtureModule({ id: "Session-Vault" }))).toThrow(
       "Invalid module id: Session-Vault",
@@ -48,7 +49,7 @@ describe("ModuleRegistry registration", () => {
 describe("ModuleRegistry lifecycle", () => {
   test("starts enabled modules in order through init then start", async () => {
     const events: string[] = [];
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(
       fixtureModule({
         id: "session_vault",
@@ -91,7 +92,7 @@ describe("ModuleRegistry lifecycle", () => {
   });
 
   test("only starts modules named in the enabled list", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(fixtureModule({ id: "session_vault" }));
     registry.register(fixtureModule({ id: "analytics" }));
 
@@ -104,7 +105,7 @@ describe("ModuleRegistry lifecycle", () => {
   });
 
   test("isolates a failing module so the others still start", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(
       fixtureModule({
         id: "session_vault",
@@ -128,7 +129,7 @@ describe("ModuleRegistry lifecycle", () => {
   });
 
   test("marks an enabled-but-unregistered module as failed", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(fixtureModule({ id: "session_vault" }));
 
     const results = await registry.startAll(["session_vault", "ghost"]);
@@ -146,8 +147,8 @@ describe("ModuleRegistry lifecycle", () => {
 
   test("stops running modules and isolates a failing stop", async () => {
     const events: string[] = [];
-    const loggedErrors: Array<[string, string]> = [];
-    const registry = new ModuleRegistry(recordingLogger(loggedErrors));
+    const { bus, records } = recordingBus();
+    const registry = new ModuleRegistry(bus);
     registry.register(
       fixtureModule({
         id: "session_vault",
@@ -177,15 +178,16 @@ describe("ModuleRegistry lifecycle", () => {
       { id: "session_vault", state: "failed", error: "flush failed" },
       { id: "analytics", state: "stopped", error: null },
     ]);
-    expect(loggedErrors).toContainEqual([
-      "Failed to stop Fortress module: session_vault",
-      "flush failed",
-    ]);
+    expect(
+      records.some(
+        (r) => r.level === "error" && r.msg.includes("Failed to stop Fortress module: session_vault"),
+      ),
+    ).toBe(true);
   });
 
   test("only stops modules that are running", async () => {
     const events: string[] = [];
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(
       fixtureModule({
         id: "analytics",
@@ -200,11 +202,26 @@ describe("ModuleRegistry lifecycle", () => {
     expect(events).toEqual([]);
     expect(results).toEqual([]);
   });
+
+  test("init receives ModuleContext with working logger", async () => {
+    const { bus, records } = recordingBus();
+    const registry = new ModuleRegistry(bus);
+    let capturedLogger: ScopedLogger | undefined;
+    registry.register({
+      id: "test_module",
+      init(ctx) { capturedLogger = ctx.logger; },
+      onMessage: async () => ({ ok: true, payload: null }),
+    });
+    await registry.startAll(["test_module"]);
+    expect(capturedLogger).toBeDefined();
+    capturedLogger!.info("hello from module");
+    expect(records.some((r) => r.module === "test_module" && r.msg === "hello from module")).toBe(true);
+  });
 });
 
 describe("ModuleRegistry dispatch", () => {
   test("routes a request to the addressed module and returns its reply", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const received: MsgData[] = [];
     registry.register(
       fixtureModule({
@@ -230,7 +247,7 @@ describe("ModuleRegistry dispatch", () => {
   });
 
   test("replies with an error when a request targets an unknown module", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
 
     const reply = await registry.dispatch({
       module: "ghost",
@@ -243,7 +260,7 @@ describe("ModuleRegistry dispatch", () => {
   });
 
   test("replies with an error when a request targets a stopped module", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(fixtureModule({ id: "session_vault" }));
 
     const reply = await registry.dispatch({
@@ -260,7 +277,7 @@ describe("ModuleRegistry dispatch", () => {
   });
 
   test("turns a throwing request handler into a failed reply", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(
       fixtureModule({
         id: "session_vault",
@@ -282,7 +299,7 @@ describe("ModuleRegistry dispatch", () => {
   });
 
   test("fails a request whose handler returns no reply", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     registry.register(
       fixtureModule({
         id: "session_vault",
@@ -305,7 +322,7 @@ describe("ModuleRegistry dispatch", () => {
   });
 
   test("delivers an event without producing a reply", async () => {
-    const registry = new ModuleRegistry(silentLogger());
+    const registry = new ModuleRegistry(silentBus());
     const received: MsgData[] = [];
     registry.register(
       fixtureModule({
@@ -330,8 +347,8 @@ describe("ModuleRegistry dispatch", () => {
   });
 
   test("swallows and logs a throwing event handler", async () => {
-    const loggedErrors: Array<[string, string]> = [];
-    const registry = new ModuleRegistry(recordingLogger(loggedErrors));
+    const { bus, records } = recordingBus();
+    const registry = new ModuleRegistry(bus);
     registry.register(
       fixtureModule({
         id: "session_vault",
@@ -350,15 +367,19 @@ describe("ModuleRegistry dispatch", () => {
     });
 
     expect(reply).toBeUndefined();
-    expect(loggedErrors).toContainEqual([
-      "Module event handler failed: session_vault",
-      "handler blew up",
-    ]);
+    expect(
+      records.some(
+        (r) =>
+          r.level === "error" &&
+          r.msg.includes("Module event handler failed: session_vault") &&
+          r.fields?.["error"] === "handler blew up",
+      ),
+    ).toBe(true);
   });
 
   test("drops an event for an unknown module without throwing", async () => {
-    const loggedErrors: Array<[string, string]> = [];
-    const registry = new ModuleRegistry(recordingLogger(loggedErrors));
+    const { bus, records } = recordingBus();
+    const registry = new ModuleRegistry(bus);
 
     const reply = await registry.dispatch({
       module: "ghost",
@@ -368,9 +389,11 @@ describe("ModuleRegistry dispatch", () => {
     });
 
     expect(reply).toBeUndefined();
-    expect(loggedErrors.map((entry) => entry[0])).toContain(
-      "Dropped event for module not running: ghost",
-    );
+    expect(
+      records.some(
+        (r) => r.level === "error" && r.msg.includes("Dropped event for module not running: ghost"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -394,14 +417,12 @@ function fixtureModule(options: FixtureOptions): Module {
   };
 }
 
-function silentLogger(): HostLogger {
-  return { error() {} };
+function silentBus(): LogBus {
+  return new LogBus({ write: () => {} });
 }
 
-function recordingLogger(sink: Array<[string, string]>): HostLogger {
-  return {
-    error(message, error) {
-      sink.push([message, error instanceof Error ? error.message : String(error)]);
-    },
-  };
+function recordingBus(): { bus: LogBus; records: LogRecord[] } {
+  const records: LogRecord[] = [];
+  const sink: LogSink = { write: (r) => records.push(r) };
+  return { bus: new LogBus(sink), records };
 }
