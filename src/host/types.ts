@@ -1,5 +1,9 @@
 import type { MsgData, MsgReply } from "../protocol";
 
+export interface MessageDispatcher {
+  dispatch(data: MsgData): Promise<MsgReply | undefined>;
+}
+
 export interface FortressConfig {
   schemaVersion: 1;
   cloud: {
