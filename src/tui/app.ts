@@ -22,6 +22,7 @@ export interface CreateTuiAppParams {
 }
 
 export interface TuiApp {
+  model: () => Readonly<MainScreenModel>;
   state: () => TuiAppState;
   moveRow: (delta: number) => void;
   moveAction: (delta: number) => void;
@@ -38,6 +39,7 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
   };
 
   return {
+    model: () => params.model,
     state: () => ({ ...currentState }),
     moveRow: (delta) => {
       const nextRow = wrapIndex(
@@ -63,6 +65,10 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
         ];
 
       currentState.error = null;
+
+      if (!action.enabled) {
+        return;
+      }
 
       try {
         switch (action.kind) {
@@ -91,7 +97,7 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
         }
       } catch (error) {
         currentState.error = errorMessage(error);
-        throw error;
+        return;
       }
     },
   };

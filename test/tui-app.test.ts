@@ -4,6 +4,25 @@ import { createTuiApp } from "../src/tui/app";
 import { buildMainScreenModel } from "../src/tui/model";
 
 describe("createTuiApp", () => {
+  test("exposes the model for a renderer to consume", () => {
+    const model = buildMainScreenModel({
+      service: { loaded: false, pid: null },
+      snapshot: null,
+      installedModules: [],
+      updates: {},
+    });
+    const app = createTuiApp({
+      model,
+      actions: {
+        start: async () => {},
+        stop: async () => {},
+        update: async () => {},
+      },
+    });
+
+    expect(app.model()).toBe(model);
+  });
+
   test("wraps rows and resets the selected action when the row changes", () => {
     const app = createTuiApp({
       model: buildMainScreenModel({
@@ -200,7 +219,7 @@ describe("createTuiApp", () => {
     });
   });
 
-  test("captures action errors in controller state", async () => {
+  test("captures action errors in controller state without throwing", async () => {
     const app = createTuiApp({
       model: buildMainScreenModel({
         service: { loaded: false, pid: null },
@@ -217,7 +236,41 @@ describe("createTuiApp", () => {
       },
     });
 
-    await expect(app.activate()).rejects.toThrow("boom");
+    await expect(app.activate()).resolves.toBeUndefined();
     expect(app.state().error).toBe("boom");
+  });
+
+  test("ignores disabled actions", async () => {
+    const calls: string[] = [];
+    const app = createTuiApp({
+      model: {
+        rows: [
+          {
+            id: "session_vault",
+            label: "session_vault",
+            availability: "live",
+            statusLabel: "stopped",
+            installedVersion: null,
+            availableVersion: null,
+            actions: [{ kind: "start", enabled: false }],
+          },
+        ],
+        footerNote: "note",
+      },
+      actions: {
+        start: async () => calls.push("start"),
+        stop: async () => calls.push("stop"),
+        update: async (version) => calls.push(`update:${version}`),
+      },
+    });
+
+    await app.activate();
+
+    expect(calls).toEqual([]);
+    expect(app.state()).toMatchObject({
+      screen: "main",
+      pendingDetailsFor: null,
+      error: null,
+    });
   });
 });
