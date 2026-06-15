@@ -6,13 +6,19 @@ import {
 } from "./cli-logs";
 import { runFortressHost } from "./host/main";
 import { fortressPaths } from "./host/paths";
+import {
+  runEnrollWizard,
+  type WizardOpts,
+} from "./modules/session-vault/wizard";
 import { FileStatusReader } from "./status-reader";
 import { getServiceManager } from "./service";
 
 type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
+type RunEnrollWizard = (options: WizardOpts) => Promise<void>;
 
 interface CliDependencies {
   getServiceManager?: typeof getServiceManager;
+  runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
   writeLine?: (line: string) => void;
@@ -27,6 +33,20 @@ export async function runCli(
 
   try {
     switch (command) {
+      case "enroll": {
+        const token = args[1];
+        const cloudIdx = args.indexOf("--cloud");
+        const cloudUrl = cloudIdx >= 0 ? args[cloudIdx + 1] : undefined;
+        if (!token || token.startsWith("--") || !cloudUrl) {
+          throw new Error("usage: hx-fortress enroll <token> --cloud <url>");
+        }
+        await (dependencies.runEnrollWizard ?? runEnrollWizard)({
+          token,
+          cloudUrl,
+          log: writeLine,
+        });
+        return 0;
+      }
       case "start":
         await startFortress({
           manager: (dependencies.getServiceManager ?? getServiceManager)(),
@@ -91,7 +111,7 @@ export async function runCli(
 
 function printHelp(writeLine: (line: string) => void): void {
   writeLine("hx-fortress");
-  writeLine("commands: start stop status logs update");
+  writeLine("commands: enroll start stop status logs update");
 }
 
 if (import.meta.main) {

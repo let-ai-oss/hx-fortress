@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { runCli } from "../src/cli";
 import type { LogsOptions } from "../src/cli-logs";
+import type { WizardOpts } from "../src/modules/session-vault/wizard";
 
 describe("runCli", () => {
   test("shows public help for unknown commands", async () => {
@@ -12,7 +13,56 @@ describe("runCli", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(lines).toContain("commands: start stop status logs update");
+    expect(lines).toContain("commands: enroll start stop status logs update");
+  });
+
+  test("dispatches enroll with the token and cloud URL", async () => {
+    let captured: WizardOpts | undefined;
+    const lines: string[] = [];
+
+    const exitCode = await runCli(
+      ["enroll", "vlt_test", "--cloud", "wss://let.ai/_api/hx-gateway/vault-tunnel"],
+      {
+        runEnrollWizard: async (opts) => {
+          captured = opts;
+        },
+        writeLine: (line) => lines.push(line),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(captured?.token).toBe("vlt_test");
+    expect(captured?.cloudUrl).toBe("wss://let.ai/_api/hx-gateway/vault-tunnel");
+    captured?.log("wizard output");
+    expect(lines).toEqual(["wizard output"]);
+  });
+
+  test("rejects enroll without a token", async () => {
+    const lines: string[] = [];
+
+    const exitCode = await runCli(["enroll", "--cloud", "wss://let.ai/tunnel"], {
+      runEnrollWizard: async () => {
+        throw new Error("wizard should not run");
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(lines).toEqual(["error: usage: hx-fortress enroll <token> --cloud <url>"]);
+  });
+
+  test("rejects enroll without a cloud URL", async () => {
+    const lines: string[] = [];
+
+    const exitCode = await runCli(["enroll", "vlt_test"], {
+      runEnrollWizard: async () => {
+        throw new Error("wizard should not run");
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(lines).toEqual(["error: usage: hx-fortress enroll <token> --cloud <url>"]);
   });
 
   test("dispatches the internal host command without listing it in help", async () => {
