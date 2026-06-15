@@ -1,7 +1,7 @@
 import { decodeFrame, encodeFrame } from "../protocol/codec";
 import type { FortressToHubFrame, HubToFortressFrame } from "../protocol/frames";
 import type { FortressIdentity } from "../protocol/identity";
-import type { CloudConnection, ConnectionState, FortressConfig, HostLogger, MessageDispatcher } from "../host/types";
+import type { CloudConnection, ConnectionState, FortressConfig, HostLogger, MessageDispatcher, ModuleLifecycleHandler } from "../host/types";
 import type { CloudCredential, CredentialStore } from "./credentials";
 
 export const SUPPORTED_PROTOCOL_VERSION = 1;
@@ -15,6 +15,7 @@ export interface WsCloudConnectionDeps {
   credentialStore: CredentialStore;
   logger: HostLogger;
   identity: FortressIdentity;
+  moduleLoader?: ModuleLifecycleHandler;
   enrollToken?: string;
   heartbeatMs?: number;
   reconnectMinMs?: number;
@@ -219,6 +220,34 @@ export class WsCloudConnection implements CloudConnection {
       }
       case "heartbeatAck":
         break;
+      case "moduleAdvertise": {
+        const { moduleId, version, artifactUrl, checksum } = frame;
+        if (this.deps.moduleLoader) {
+          try {
+            await this.deps.moduleLoader.install({ moduleId, version, artifactUrl, checksum });
+            send({ t: "moduleInstallResult", moduleId, version, ok: true });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.deps.logger.error(`Failed to install module: ${moduleId}`, error);
+            send({ t: "moduleInstallResult", moduleId, version, ok: false, error: message });
+          }
+        }
+        break;
+      }
+      case "moduleRemove": {
+        const { moduleId } = frame;
+        if (this.deps.moduleLoader) {
+          try {
+            await this.deps.moduleLoader.uninstall(moduleId);
+            send({ t: "moduleRemoveResult", moduleId, ok: true });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            this.deps.logger.error(`Failed to remove module: ${moduleId}`, error);
+            send({ t: "moduleRemoveResult", moduleId, ok: false, error: message });
+          }
+        }
+        break;
+      }
       case "fatal": {
         this.deps.logger.error(`Fortress hub rejected connection: ${frame.reason}`);
         this.stopped = true;

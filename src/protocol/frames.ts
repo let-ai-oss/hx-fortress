@@ -8,7 +8,11 @@ export type FortressToHubFrame =
   | ({ t: "enroll"; enrollToken: string } & FortressIdentity)
   | ({ t: "hello"; fortressId: string; credential: string } & FortressIdentity)
   | { t: "heartbeat" }
-  | { t: "moduleReply"; id: string; reply: MsgReply };
+  | { t: "moduleReply"; id: string; reply: MsgReply }
+  | { t: "moduleInstallResult"; moduleId: string; version: string; ok: true }
+  | { t: "moduleInstallResult"; moduleId: string; version: string; ok: false; error: string }
+  | { t: "moduleRemoveResult"; moduleId: string; ok: true }
+  | { t: "moduleRemoveResult"; moduleId: string; ok: false; error: string };
 
 export type HubToFortressFrame =
   | { t: "welcome"; orgId: string; protocolVersion: number }
@@ -21,6 +25,14 @@ export type HubToFortressFrame =
     }
   | { t: "moduleMessage"; data: MsgData }
   | { t: "heartbeatAck" }
-  | { t: "fatal"; reason: string };
+  | { t: "fatal"; reason: string }
+  | {
+      t: "moduleAdvertise";
+      moduleId: string;
+      version: string;
+      artifactUrl: string;
+      checksum: string;
+    }
+  | { t: "moduleRemove"; moduleId: string };
 
 export type ProtocolFrame = FortressToHubFrame | HubToFortressFrame;

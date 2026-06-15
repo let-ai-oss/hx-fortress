@@ -2,6 +2,7 @@ import type { MsgData, MsgReply } from "../protocol";
 import { assertModuleId } from "./paths";
 import type {
   HostLogger,
+  LoadableRegistry,
   Module,
   ModuleRuntimeStatus,
   ModuleStartResult,
@@ -17,7 +18,7 @@ interface RegisteredModule {
   error: string | null;
 }
 
-export class ModuleRegistry implements ModuleSupervisor {
+export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
   private readonly modules = new Map<string, RegisteredModule>();
 
   constructor(private readonly logger: HostLogger) {}
@@ -100,6 +101,40 @@ export class ModuleRegistry implements ModuleSupervisor {
       }
     }
     return results;
+  }
+
+  async startOne(id: string): Promise<ModuleStartResult> {
+    const results = await this.startAll([id]);
+    return results[0] ?? { id, ok: false, error: "Module not registered" };
+  }
+
+  async stopOne(id: string): Promise<ModuleStopResult> {
+    const entry = this.modules.get(id);
+    if (!entry?.module || entry.state !== "running") {
+      return { id, ok: true };
+    }
+    try {
+      entry.state = "stopping";
+      await entry.module.stop?.();
+      entry.state = "stopped";
+      entry.error = null;
+      return { id, ok: true };
+    } catch (error) {
+      const message = errorMessage(error);
+      entry.state = "failed";
+      entry.error = message;
+      this.logger.error(`Failed to stop Fortress module: ${id}`, error);
+      return { id, ok: false, error: message };
+    }
+  }
+
+  unregister(id: string): void {
+    const entry = this.modules.get(id);
+    if (!entry) return;
+    if (entry.state === "running" || entry.state === "starting" || entry.state === "stopping") {
+      throw new Error(`Cannot unregister module that is ${entry.state}: ${id}`);
+    }
+    this.modules.delete(id);
   }
 
   async dispatch(data: MsgData): Promise<MsgReply | undefined> {
