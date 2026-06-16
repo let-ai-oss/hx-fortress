@@ -1,8 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { runCli } from "../src/cli";
 import type { LogsOptions } from "../src/cli-logs";
 import type { WizardOpts } from "../src/modules/session-vault/wizard";
+import type { UpdateResult } from "../src/update";
+import type { ServiceManager, ServiceState } from "../src/service/types";
 
 describe("runCli", () => {
   test("dispatches no args into the tui entrypoint", async () => {
@@ -126,3 +131,177 @@ describe("runCli", () => {
     expect(captured?.linesBack).toBe(50);
   });
 });
+
+describe("runCli update", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-cli-update-"));
+    await mkdir(path.join(root), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function writeConfig(cloudUrl: string): Promise<void> {
+    const config = {
+      schemaVersion: 1,
+      cloud: { url: cloudUrl },
+      modules: { enabled: ["session_vault"] },
+    };
+    await writeFile(path.join(root, "config.json"), JSON.stringify(config));
+  }
+
+  test("dispatches update with the download base URL derived from config", async () => {
+    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    let capturedDownloadBaseUrl: string | undefined;
+    const lines: string[] = [];
+
+    const alreadyLatestResult: UpdateResult = {
+      asset: "hx-fortress-darwin-arm64",
+      sha256: null,
+      installedPath: "/usr/local/bin/hx-fortress",
+      alreadyLatest: true,
+      localVersion: 1,
+      remoteVersion: 1,
+    };
+
+    const exitCode = await runCli(["update"], {
+      fortressRoot: root,
+      runUpdate: async (opts) => {
+        capturedDownloadBaseUrl = opts.downloadBaseUrl;
+        return alreadyLatestResult;
+      },
+      getServiceManager: () => fakeManager([{ loaded: false, pid: null }]),
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(capturedDownloadBaseUrl).toBe(
+      "https://workbench.let.ai/_api/hx-gateway/download",
+    );
+    expect(lines).toContain(
+      "hx-fortress is already on the latest version (v1). Nothing to do. 🎉",
+    );
+  });
+
+  test("prints updated message and version after a successful install", async () => {
+    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    const lines: string[] = [];
+
+    const installedResult: UpdateResult = {
+      asset: "hx-fortress-darwin-arm64",
+      sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      installedPath: "/usr/local/bin/hx-fortress",
+      alreadyLatest: false,
+      localVersion: 1,
+      remoteVersion: 2,
+    };
+
+    const exitCode = await runCli(["update"], {
+      fortressRoot: root,
+      runUpdate: async () => installedResult,
+      getServiceManager: () => fakeManager([{ loaded: false, pid: null }]),
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(lines[0]).toMatch(/hx-fortress updated to latest \(hx-fortress-darwin-arm64, sha256 abcdef123456…\)/);
+    expect(lines[lines.length - 1]).toBe("hx-fortress version: 2.0.0");
+  });
+
+  test("restarts the service when it was running before the update", async () => {
+    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    const lines: string[] = [];
+    const manager = fakeManager([{ loaded: true, pid: 9999 }]);
+
+    const installedResult: UpdateResult = {
+      asset: "hx-fortress-linux-x64",
+      sha256: "a".repeat(64),
+      installedPath: "/home/user/.let/bin/hx-fortress",
+      alreadyLatest: false,
+      localVersion: 1,
+      remoteVersion: 3,
+    };
+
+    const exitCode = await runCli(["update"], {
+      fortressRoot: root,
+      runUpdate: async () => installedResult,
+      getServiceManager: () => manager,
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(exitCode).toBe(0);
+    expect(manager.stops).toBe(1);
+    expect(manager.installs).toBe(1);
+    expect(lines.some((l) => l.includes("restarting Fortress"))).toBe(true);
+    expect(lines.some((l) => l.includes("restarted"))).toBe(true);
+  });
+
+  test("does not restart when fortress was not running", async () => {
+    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    const manager = fakeManager([{ loaded: false, pid: null }]);
+
+    const installedResult: UpdateResult = {
+      asset: "hx-fortress-darwin-arm64",
+      sha256: "b".repeat(64),
+      installedPath: "/home/user/.let/bin/hx-fortress",
+      alreadyLatest: false,
+      localVersion: 1,
+      remoteVersion: 2,
+    };
+
+    const exitCode = await runCli(["update"], {
+      fortressRoot: root,
+      runUpdate: async () => installedResult,
+      getServiceManager: () => manager,
+      writeLine: () => {},
+    });
+
+    expect(exitCode).toBe(0);
+    expect(manager.stops).toBe(0);
+    expect(manager.installs).toBe(0);
+  });
+
+  test("errors when fortress is not configured", async () => {
+    const lines: string[] = [];
+
+    const exitCode = await runCli(["update"], {
+      fortressRoot: root,
+      runUpdate: async () => {
+        throw new Error("should not run");
+      },
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(exitCode).toBe(1);
+    expect(lines[0]).toContain("Fortress is not configured");
+  });
+});
+
+interface FakeManager extends ServiceManager {
+  installs: number;
+  stops: number;
+}
+
+function fakeManager(states: ServiceState[], wasRunning = false): FakeManager {
+  let callIndex = 0;
+  return {
+    name: "launchd",
+    installs: 0,
+    stops: 0,
+    async state(): Promise<ServiceState> {
+      const s = states[callIndex] ?? states[states.length - 1] ?? { loaded: false, pid: null };
+      callIndex++;
+      return s;
+    },
+    async install(): Promise<void> {
+      (this as FakeManager).installs++;
+    },
+    async stop(): Promise<{ wasRunning: boolean }> {
+      (this as FakeManager).stops++;
+      return { wasRunning };
+    },
+  };
+}
