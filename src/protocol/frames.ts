@@ -9,6 +9,8 @@ export type FortressToHubFrame =
   | ({ t: "hello"; fortressId: string; credential: string } & FortressIdentity)
   | { t: "heartbeat" }
   | { t: "moduleReply"; id: string; reply: MsgReply }
+  | { t: "rpcResult"; id: string; result: unknown }
+  | { t: "rpcError"; id: string; error: string }
   | { t: "moduleInstallResult"; moduleId: string; version: string; ok: true }
   | { t: "moduleInstallResult"; moduleId: string; version: string; ok: false; error: string }
   | { t: "moduleRemoveResult"; moduleId: string; ok: true }
@@ -24,6 +26,7 @@ export type HubToFortressFrame =
       protocolVersion: number;
     }
   | { t: "moduleMessage"; data: MsgData }
+  | { t: "rpc"; id: string; req: unknown }
   | { t: "heartbeatAck" }
   | { t: "fatal"; reason: string }
   | {

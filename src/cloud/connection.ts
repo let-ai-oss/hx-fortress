@@ -226,6 +226,24 @@ export class WsCloudConnection implements CloudConnection {
         }
         break;
       }
+      case "rpc": {
+        const msgData = {
+          module: "session_vault",
+          id: frame.id,
+          kind: "request" as const,
+          payload: frame.req,
+        };
+        const reply = await this.deps.dispatcher.dispatch(msgData);
+        if (reply) {
+          if (reply.ok) {
+            send({ t: "rpcResult", id: frame.id, result: reply.payload });
+          } else {
+            this.deps.logger.error(`vault RPC error: ${reply.error}`);
+            send({ t: "rpcError", id: frame.id, error: reply.error });
+          }
+        }
+        break;
+      }
       case "heartbeatAck":
         break;
       case "moduleAdvertise": {
