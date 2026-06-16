@@ -73,16 +73,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="hx-fortress-latest"
           version="${{ steps.version.outputs.value }}"
+          tag="builds/hx-fortress-${version}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release delete "$tag" --yes --cleanup-tag
           fi
 
           gh release create "$tag" dist/hx-fortress-* \
-            --title "HX Fortress (rolling - v$version)" \
-            --notes "Rolling build from ${GITHUB_SHA:0:8} (HX Fortress v$version)." \
+            --title "HX Fortress build v$version" \
+            --notes "Build from ${GITHUB_SHA:0:8} (HX Fortress v$version)." \
             --target "$GITHUB_SHA" \
             --prerelease=false \
             --latest=false
@@ -94,7 +94,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="v${{ steps.version.outputs.value }}"
+          version="${{ steps.version.outputs.value }}"
+          tag="releases/hx-fortress-${version}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag already exists; skipping immutable release"
@@ -102,7 +103,7 @@ jobs:
           fi
 
           gh release create "$tag" dist/hx-fortress-* \
-            --title "HX Fortress $tag" \
+            --title "HX Fortress v$version" \
             --notes "Published from ${GITHUB_SHA:0:8}." \
             --target "$GITHUB_SHA" \
             --latest=false
