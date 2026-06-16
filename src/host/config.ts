@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 import { assertModuleId, type fortressPaths } from "./paths";
 import type { ConfigStore, FortressConfig } from "./types";
@@ -85,4 +86,29 @@ function invalidConfig(reason: string): Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown validation error";
+}
+
+/** Creates config.json with a minimal valid config if it does not already exist.
+ *  Called by the host on startup when a pending enrollment is present. */
+export async function ensureDefaultConfig(
+  paths: FortressPaths,
+  cloudUrl: string,
+): Promise<void> {
+  try {
+    await access(paths.config);
+    return;
+  } catch {
+    // file absent — write the default below
+  }
+
+  const config: FortressConfig = {
+    schemaVersion: 1,
+    cloud: { url: cloudUrl },
+    modules: { enabled: [] },
+  };
+
+  await mkdir(path.dirname(paths.config), { recursive: true });
+  const tmp = `${paths.config}.${process.pid}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`);
+  await rename(tmp, paths.config);
 }
