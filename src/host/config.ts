@@ -88,6 +88,32 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown validation error";
 }
 
+/** Migrate an existing config.json to include any core modules not yet listed
+ *  in modules.enabled. No-op if config doesn't exist yet or is already up to date. */
+export async function ensureCoreModulesEnabled(paths: FortressPaths): Promise<void> {
+  let config: FortressConfig;
+  try {
+    config = await new FileConfigStore(paths).load();
+  } catch {
+    return;
+  }
+
+  const missing = CORE_MODULE_IDS.filter((id) => !config.modules.enabled.includes(id));
+  if (missing.length === 0) return;
+
+  const updated: FortressConfig = {
+    ...config,
+    modules: { enabled: [...config.modules.enabled, ...missing] },
+  };
+  const tmp = `${paths.config}.${process.pid}.tmp`;
+  await writeFile(tmp, `${JSON.stringify(updated, null, 2)}\n`);
+  await rename(tmp, paths.config);
+}
+
+/** Bundled modules that must always be enabled. Added to new configs by default
+ *  and migrated into existing configs by ensureCoreModulesEnabled. */
+export const CORE_MODULE_IDS: readonly string[] = ["session_vault"];
+
 /** Creates config.json with a minimal valid config if it does not already exist.
  *  Called by the host on startup when a pending enrollment is present. */
 export async function ensureDefaultConfig(
@@ -104,7 +130,7 @@ export async function ensureDefaultConfig(
   const config: FortressConfig = {
     schemaVersion: 1,
     cloud: { url: cloudUrl },
-    modules: { enabled: [] },
+    modules: { enabled: [...CORE_MODULE_IDS] },
   };
 
   await mkdir(path.dirname(paths.config), { recursive: true });
