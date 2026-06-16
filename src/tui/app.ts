@@ -1,6 +1,11 @@
-import type { MainScreenModel, MainScreenRowId } from "./types";
+import { buildDetailsScreenModel } from "./model";
+import type {
+  DetailsScreenModel,
+  MainScreenModel,
+  MainScreenRowId,
+} from "./types";
 
-export type TuiScreen = "main" | "details";
+export type TuiScreen = "main" | "details" | "confirm-uninstall";
 
 export interface TuiAppState {
   screen: TuiScreen;
@@ -14,6 +19,7 @@ export interface TuiAppActions {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   update: (version: string) => Promise<void>;
+  uninstall: (moduleId: string) => Promise<void>;
 }
 
 export interface CreateTuiAppParams {
@@ -24,14 +30,18 @@ export interface CreateTuiAppParams {
 
 export interface TuiApp {
   model: () => Readonly<MainScreenModel>;
+  detailsModel: () => Readonly<DetailsScreenModel> | null;
   state: () => TuiAppState;
   moveRow: (delta: number) => void;
   moveAction: (delta: number) => void;
   activate: () => Promise<void>;
+  goBack: () => void;
 }
 
 export function createTuiApp(params: CreateTuiAppParams): TuiApp {
   let currentModel = params.model;
+  let currentDetailsModel: DetailsScreenModel | null = null;
+
   const currentState: TuiAppState = {
     screen: "main",
     selectedRow: 0,
@@ -40,9 +50,28 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
     error: null,
   };
 
-  const returnToMain = () => {
-    currentState.pendingDetailsFor = null;
+  const enterMain = () => {
     currentState.screen = "main";
+    currentState.pendingDetailsFor = null;
+    currentState.selectedAction = 0;
+    currentDetailsModel = null;
+  };
+
+  const enterDetails = (id: MainScreenRowId) => {
+    const row = currentModel.rows.find((r) => r.id === id);
+    currentDetailsModel = buildDetailsScreenModel({
+      id,
+      installedVersion: row?.installedVersion ?? null,
+      availableVersion: row?.availableVersion ?? null,
+    });
+    currentState.screen = "details";
+    currentState.pendingDetailsFor = id;
+    currentState.selectedAction = 0;
+  };
+
+  const enterConfirmUninstall = () => {
+    currentState.screen = "confirm-uninstall";
+    currentState.selectedAction = 0;
   };
 
   const refreshModel = async () => {
@@ -58,10 +87,23 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
       .catch(() => {});
   };
 
+  const actionCountForScreen = (): number => {
+    switch (currentState.screen) {
+      case "main":
+        return currentRow(currentModel, currentState.selectedRow).actions.length;
+      case "details":
+        return currentDetailsModel?.actions.length ?? 1;
+      case "confirm-uninstall":
+        return 2;
+    }
+  };
+
   return {
     model: () => currentModel,
+    detailsModel: () => currentDetailsModel,
     state: () => ({ ...currentState }),
     moveRow: (delta) => {
+      if (currentState.screen !== "main") return;
       const nextRow = wrapIndex(
         currentState.selectedRow + delta,
         currentModel.rows.length,
@@ -73,54 +115,127 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
       }
     },
     moveAction: (delta) => {
+      const count = actionCountForScreen();
       currentState.selectedAction = wrapIndex(
         currentState.selectedAction + delta,
-        currentRow(currentModel, currentState.selectedRow).actions.length,
+        count,
       );
     },
+    goBack: () => {
+      switch (currentState.screen) {
+        case "main":
+          return;
+        case "details":
+          enterMain();
+          return;
+        case "confirm-uninstall":
+          currentState.screen = "details";
+          currentState.selectedAction = 0;
+          return;
+      }
+    },
     activate: async () => {
-      const action =
-        currentRow(currentModel, currentState.selectedRow).actions[
-          currentState.selectedAction
-        ];
-
       currentState.error = null;
 
-      if (!action.enabled) {
-        return;
-      }
-
       try {
-        switch (action.kind) {
-          case "start":
-            await params.actions.start();
-            returnToMain();
-            await refreshModel();
+        switch (currentState.screen) {
+          case "main":
+            await activateMain(currentModel, currentState, params.actions, enterDetails, enterMain, refreshModel);
             return;
-          case "stop":
-            await params.actions.stop();
-            returnToMain();
-            await refreshModel();
+          case "details":
+            await activateDetails(currentDetailsModel, currentState, params.actions, enterMain, enterConfirmUninstall, refreshModel);
             return;
-          case "update":
-            await params.actions.update(action.version);
-            returnToMain();
-            await refreshModel();
-            return;
-          case "view-details":
-            currentState.screen = "details";
-            currentState.pendingDetailsFor = currentRow(
-              currentModel,
-              currentState.selectedRow,
-            ).id;
+          case "confirm-uninstall":
+            await activateConfirmUninstall(currentState, currentDetailsModel, params.actions, enterMain, refreshModel);
             return;
         }
       } catch (error) {
         currentState.error = errorMessage(error);
-        return;
       }
     },
   };
+}
+
+async function activateMain(
+  model: MainScreenModel,
+  state: TuiAppState,
+  handlers: TuiAppActions,
+  enterDetails: (id: MainScreenRowId) => void,
+  enterMain: () => void,
+  refreshModel: () => Promise<void>,
+): Promise<void> {
+  const row = currentRow(model, state.selectedRow);
+  const action = row.actions[state.selectedAction];
+
+  if (!action || !action.enabled) return;
+
+  switch (action.kind) {
+    case "start":
+      await handlers.start();
+      enterMain();
+      await refreshModel();
+      return;
+    case "stop":
+      await handlers.stop();
+      enterMain();
+      await refreshModel();
+      return;
+    case "update":
+      await handlers.update(action.version);
+      enterMain();
+      await refreshModel();
+      return;
+    case "view-details":
+      enterDetails(row.id);
+      return;
+  }
+}
+
+async function activateDetails(
+  detailsModel: DetailsScreenModel | null,
+  state: TuiAppState,
+  handlers: TuiAppActions,
+  enterMain: () => void,
+  enterConfirmUninstall: () => void,
+  refreshModel: () => Promise<void>,
+): Promise<void> {
+  if (!detailsModel) return;
+
+  const action = detailsModel.actions[state.selectedAction];
+  if (!action || !action.enabled) return;
+
+  switch (action.kind) {
+    case "update":
+      await handlers.update(action.version);
+      enterMain();
+      await refreshModel();
+      return;
+    case "uninstall":
+      enterConfirmUninstall();
+      return;
+    case "back":
+      enterMain();
+      return;
+  }
+}
+
+async function activateConfirmUninstall(
+  state: TuiAppState,
+  detailsModel: DetailsScreenModel | null,
+  handlers: TuiAppActions,
+  enterMain: () => void,
+  refreshModel: () => Promise<void>,
+): Promise<void> {
+  if (state.selectedAction === 0) {
+    const moduleId = state.pendingDetailsFor;
+    if (!moduleId || !detailsModel) return;
+    await handlers.uninstall(moduleId);
+    enterMain();
+    await refreshModel();
+  } else {
+    state.screen = "details";
+    state.selectedAction = 0;
+  }
 }
 
 function currentRow(model: MainScreenModel, selectedRow: number) {

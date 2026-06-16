@@ -23,6 +23,10 @@ type FortressPaths = ReturnType<typeof fortressPaths>;
 type TuiServiceStateReader = Pick<ServiceManager, "state">;
 type TuiLifecycleManager = Pick<ServiceManager, "install" | "name" | "state" | "stop">;
 
+interface UninstallHandler {
+  uninstall(moduleId: string): Promise<void>;
+}
+
 interface TuiModelDependencies {
   serviceStateReader?: TuiServiceStateReader;
   statusReader?: Pick<StatusReader, "read">;
@@ -33,6 +37,7 @@ interface TuiModelDependencies {
 
 interface TuiActionDependencies {
   serviceManager?: TuiLifecycleManager;
+  moduleLifecycleHandler?: UninstallHandler;
   executablePath?: string;
   writeLine?: (line: string) => void;
 }
@@ -82,6 +87,13 @@ export async function runFortressTui(
         }),
       update: async (version) => {
         throw new Error(`update ${version} is not wired in this build yet`);
+      },
+      uninstall: async (moduleId) => {
+        const handler = dependencies.moduleLifecycleHandler;
+        if (!handler) {
+          throw new Error(`uninstall ${moduleId} is not wired in this build yet`);
+        }
+        await handler.uninstall(moduleId);
       },
     },
   });

@@ -1,7 +1,7 @@
 import type { TuiApp } from "./app";
-import type { MainScreenAction, MainScreenRow } from "./types";
+import type { DetailsScreenAction, MainScreenAction, MainScreenRow } from "./types";
 
-const CSI = "\u001b[";
+const CSI = "[";
 const CLEAR_SCREEN = `${CSI}2J${CSI}H`;
 const CLEAR_REMAINDER = `${CSI}J`;
 const HIDE_CURSOR = `${CSI}?25l`;
@@ -102,26 +102,31 @@ export async function handleTerminalKey(
   switch (key) {
     case "q":
     case "Q":
-    case "\u0003":
+    case "":
       return true;
     case "\r":
     case "\n":
       await app.activate();
       return false;
-    case "\u001b[A":
-    case "\u001bOA":
+    case "":
+    case "b":
+    case "B":
+      app.goBack();
+      return false;
+    case "[A":
+    case "OA":
       app.moveRow(-1);
       return false;
-    case "\u001b[B":
-    case "\u001bOB":
+    case "[B":
+    case "OB":
       app.moveRow(1);
       return false;
-    case "\u001b[D":
-    case "\u001bOD":
+    case "[D":
+    case "OD":
       app.moveAction(-1);
       return false;
-    case "\u001b[C":
-    case "\u001bOC":
+    case "[C":
+    case "OC":
       app.moveAction(1);
       return false;
     default:
@@ -130,12 +135,28 @@ export async function handleTerminalKey(
 }
 
 function render(app: TuiApp, stdout: TerminalOutput): void {
+  const state = app.state();
+
+  switch (state.screen) {
+    case "main":
+      renderMain(app, stdout);
+      return;
+    case "details":
+      renderDetails(app, stdout);
+      return;
+    case "confirm-uninstall":
+      renderConfirmUninstall(app, stdout);
+      return;
+  }
+}
+
+function renderMain(app: TuiApp, stdout: TerminalOutput): void {
   const model = app.model();
   const state = app.state();
   const lines: string[] = [
     `${HIDE_CURSOR}${CLEAR_SCREEN}HX Fortress`,
     "",
-    ...model.rows.flatMap((row, rowIndex) => renderRow(row, rowIndex, state)),
+    ...model.rows.flatMap((row, rowIndex) => renderMainRow(row, rowIndex, state)),
   ];
 
   if (state.error) {
@@ -149,7 +170,63 @@ function render(app: TuiApp, stdout: TerminalOutput): void {
   stdout.write(`${lines.join("\n")}${CLEAR_REMAINDER}`);
 }
 
-function renderRow(
+function renderDetails(app: TuiApp, stdout: TerminalOutput): void {
+  const details = app.detailsModel();
+  const state = app.state();
+
+  if (!details) {
+    stdout.write(`${HIDE_CURSOR}${CLEAR_SCREEN}HX Fortress — Details${CLEAR_REMAINDER}`);
+    return;
+  }
+
+  const installed = details.installedVersion ?? "—";
+  const available = details.availableVersion ?? "—";
+
+  const lines: string[] = [
+    `${HIDE_CURSOR}${CLEAR_SCREEN}HX Fortress — ${details.label}`,
+    "",
+    `  installed: ${installed}`,
+    `  available: ${available}`,
+    "",
+    `  ${details.actions
+      .map((action, index) => renderDetailsAction(action, index === state.selectedAction))
+      .join("  ")}`,
+  ];
+
+  if (state.error) {
+    lines.push("");
+    lines.push(`  error: ${state.error}`);
+  }
+
+  lines.push("");
+  lines.push(`${DIM}Use left/right to select action, Enter to activate, Esc or b to go back, q to quit.${RESET}`);
+  stdout.write(`${lines.join("\n")}${CLEAR_REMAINDER}`);
+}
+
+function renderConfirmUninstall(app: TuiApp, stdout: TerminalOutput): void {
+  const details = app.detailsModel();
+  const state = app.state();
+  const label = details?.label ?? "component";
+
+  const lines: string[] = [
+    `${HIDE_CURSOR}${CLEAR_SCREEN}HX Fortress — Uninstall ${label}`,
+    "",
+    `  This will remove ${label} from Fortress. This cannot be undone.`,
+    "",
+    `  ${renderConfirmButton("Confirm", state.selectedAction === 0)}  ${renderConfirmButton("Cancel", state.selectedAction === 1)}`,
+  ];
+
+  if (state.error) {
+    lines.push("");
+    lines.push(`  error: ${state.error}`);
+  }
+
+  lines.push("");
+  lines.push(`${DIM}Use left/right to select, Enter to activate, Esc or b to cancel.${RESET}`);
+  stdout.write(`${lines.join("\n")}${CLEAR_REMAINDER}`);
+}
+
+function renderMainRow(
   row: MainScreenRow,
   rowIndex: number,
   state: ReturnType<TuiApp["state"]>,
@@ -163,24 +240,24 @@ function renderRow(
     `${prefix} ${row.label}  status:${row.statusLabel}  installed:${installed}  available:${available}`,
     `  ${row.actions
       .map((action, actionIndex) =>
-        renderAction(action, selected && actionIndex === state.selectedAction),
+        renderMainAction(action, selected && actionIndex === state.selectedAction),
       )
       .join("  ")}`,
   ];
 }
 
-function renderAction(action: MainScreenAction, selected: boolean): string {
-  const label = actionLabel(action);
-  const disabled = action.enabled ? label : `${label} (disabled)`;
+function renderMainAction(action: MainScreenAction, selected: boolean): string {
+  const label = mainActionLabel(action);
+  const text = action.enabled ? label : `${label} (disabled)`;
 
   if (!selected) {
-    return `[${disabled}]`;
+    return `[${text}]`;
   }
 
-  return `${INVERT}[${disabled}]${RESET}`;
+  return `${INVERT}[${text}]${RESET}`;
 }
 
-function actionLabel(action: MainScreenAction): string {
+function mainActionLabel(action: MainScreenAction): string {
   switch (action.kind) {
     case "start":
       return "start";
@@ -191,6 +268,39 @@ function actionLabel(action: MainScreenAction): string {
     case "view-details":
       return "details";
   }
+}
+
+function renderDetailsAction(action: DetailsScreenAction, selected: boolean): string {
+  const label = detailsActionLabel(action);
+
+  if (!action.enabled) {
+    return `${DIM}[${label}]${RESET}`;
+  }
+
+  if (!selected) {
+    return `[${label}]`;
+  }
+
+  return `${INVERT}[${label}]${RESET}`;
+}
+
+function detailsActionLabel(action: DetailsScreenAction): string {
+  switch (action.kind) {
+    case "update":
+      return `update to v${action.version}`;
+    case "uninstall":
+      return action.reason !== null ? `uninstall (${action.reason})` : "uninstall";
+    case "back":
+      return "back";
+  }
+}
+
+function renderConfirmButton(label: string, selected: boolean): string {
+  if (!selected) {
+    return `[${label}]`;
+  }
+
+  return `${INVERT}[${label}]${RESET}`;
 }
 
 function assertInteractiveTerminal(

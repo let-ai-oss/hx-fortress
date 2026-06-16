@@ -1,4 +1,14 @@
-import type { BuildMainScreenModelParams, MainScreenAction, MainScreenModel, MainScreenRow, MainScreenRowId } from "./types";
+import type {
+  BuildDetailsScreenModelParams,
+  BuildMainScreenModelParams,
+  DetailsScreenAction,
+  DetailsScreenModel,
+  MainScreenAction,
+  MainScreenModel,
+  MainScreenRow,
+  MainScreenRowId,
+} from "./types";
+
 
 const ROW_ORDER: MainScreenRowId[] = [
   "session_vault",
@@ -76,5 +86,43 @@ function updateAction(version: string): MainScreenAction {
     kind: "update",
     enabled: true,
     version,
+  };
+}
+
+const BUNDLED_CORE_MODULES: ReadonlySet<MainScreenRowId> = new Set(["session_vault"]);
+
+export function buildDetailsScreenModel(params: BuildDetailsScreenModelParams): DetailsScreenModel {
+  const { id, installedVersion, availableVersion } = params;
+  const isBundledCore = BUNDLED_CORE_MODULES.has(id);
+
+  if (installedVersion === null && !isBundledCore) {
+    return {
+      id,
+      label: LABELS[id],
+      installedVersion: null,
+      availableVersion: null,
+      isBundledCore: false,
+      actions: [{ kind: "back", enabled: true }],
+    };
+  }
+
+  const actions: DetailsScreenAction[] = [];
+  if (availableVersion !== null) {
+    actions.push({ kind: "update", enabled: true, version: availableVersion });
+  }
+  actions.push({
+    kind: "uninstall",
+    enabled: !isBundledCore,
+    reason: isBundledCore ? "bundled component — cannot remove" : null,
+  });
+  actions.push({ kind: "back", enabled: true });
+
+  return {
+    id,
+    label: LABELS[id],
+    installedVersion,
+    availableVersion,
+    isBundledCore,
+    actions,
   };
 }

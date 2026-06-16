@@ -10,6 +10,7 @@ describe("handleTerminalKey", () => {
     let activations = 0;
     const app: TuiApp = {
       model: () => ({ rows: [], footerNote: "" }),
+      detailsModel: () => null,
       state: () => ({
         screen: "main",
         selectedRow: 0,
@@ -22,6 +23,7 @@ describe("handleTerminalKey", () => {
       activate: async () => {
         activations += 1;
       },
+      goBack: () => {},
     };
 
     await expect(handleTerminalKey(app, "\u001bOA")).resolves.toBe(false);
