@@ -1,33 +1,46 @@
-// Minimal interactive prompt kit for the Session Vault enroll wizard. Reads the
-// controlling terminal (the installer rebinds stdin to /dev/tty), so prompts
-// work even under `curl … | sh`. Node built-ins only — no dependencies.
+// Minimal interactive prompt kit for the Session Vault enroll wizard.
+// Opens /dev/tty directly for all prompts — this works even when the process
+// is exec'd with `</dev/tty` by the install script (curl … | sh), where
+// Bun compiled binaries do not reliably expose setRawMode on process.stdin.
 //
 // Cooked-mode prompts (text, confirm) use readline; raw-mode prompts (select,
-// password) drive the terminal directly. Every prompt restores cooked mode on
-// exit, so they compose in sequence.
+// password) drive the terminal directly. Every prompt closes its /dev/tty fd
+// on exit, so they compose in sequence.
 
-import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
+import { stdout } from "node:process";
+import { ReadStream } from "node:tty";
+import { openSync, closeSync } from "node:fs";
 
 const ESC = "\x1b";
 
-/** True when an interactive terminal is attached. The wizard only prompts when
- *  this holds; otherwise the CLI falls back to flag-driven enrollment. */
+/** True when /dev/tty is accessible — the wizard only prompts when this holds. */
 export function ttyAvailable(): boolean {
-  return Boolean(stdin.isTTY);
+  try {
+    closeSync(openSync("/dev/tty", "r"));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function write(s: string): void {
   stdout.write(s);
 }
 
+function openTty(): ReadStream {
+  return new ReadStream(openSync("/dev/tty", "r+"));
+}
+
 /** Free-text input with an optional default (Enter accepts the default). */
 export function textPrompt(message: string, opts: { default?: string } = {}): Promise<string> {
-  const rl = createInterface({ input: stdin, output: stdout });
+  const tty = openTty();
+  const rl = createInterface({ input: tty, output: stdout });
   const suffix = opts.default ? ` [${opts.default}]` : "";
   return new Promise((resolve) => {
     rl.question(`${message}${suffix} `, (answer) => {
       rl.close();
+      tty.destroy();
       resolve(answer.trim() || opts.default || "");
     });
   });
@@ -48,13 +61,14 @@ export async function confirmPrompt(
 export function passwordPrompt(message: string): Promise<string> {
   return new Promise((resolve) => {
     write(`${message} `);
-    stdin.setRawMode?.(true);
-    stdin.resume();
+    const tty = openTty();
+    tty.setRawMode(true);
+    tty.resume();
     let buf = "";
     const cleanup = (): void => {
-      stdin.off("data", onData);
-      stdin.setRawMode?.(false);
-      stdin.pause();
+      tty.off("data", onData);
+      tty.setRawMode(false);
+      tty.destroy();
     };
     const onData = (d: Buffer): void => {
       for (const ch of d.toString("utf8")) {
@@ -73,7 +87,7 @@ export function passwordPrompt(message: string): Promise<string> {
         else buf += ch;
       }
     };
-    stdin.on("data", onData);
+    tty.on("data", onData);
   });
 }
 
@@ -83,13 +97,16 @@ export interface Choice<T> {
   hint?: string;
 }
 
-/** Arrow-key select, with optional type-to-filter. Returns the chosen value. */
+/** Arrow-key select with optional type-to-filter and 1–9 number shortcuts.
+ *  In non-filter mode pressing a digit immediately picks that option.
+ *  Returns the chosen value. */
 export function selectPrompt<T>(
   message: string,
   choices: Choice<T>[],
   opts: { filter?: boolean; defaultIndex?: number } = {},
 ): Promise<T> {
   return new Promise((resolve) => {
+    const tty = openTty();
     let filter = "";
     let index = opts.defaultIndex ?? 0;
     let lastLines = 0;
@@ -101,7 +118,7 @@ export function selectPrompt<T>(
 
     const render = (): void => {
       if (lastLines > 0) write(`${ESC}[${lastLines}A`);
-      write(`${ESC}[0J`); // clear from cursor to end of screen
+      write(`${ESC}[0J`);
       const list = visible();
       if (index >= list.length) index = Math.max(0, list.length - 1);
       const out: string[] = [
@@ -110,16 +127,16 @@ export function selectPrompt<T>(
       if (list.length === 0) out.push("  (no matches)");
       list.forEach((c, i) => {
         const prefix = i === index ? "❯ " : "  ";
-        out.push(`${prefix}${c.label}${c.hint ? `  ${c.hint}` : ""}`);
+        out.push(`${prefix}${i + 1}) ${c.label}${c.hint ? `  ${c.hint}` : ""}`);
       });
       write(`${out.join("\n")}\n`);
       lastLines = out.length;
     };
 
     const cleanup = (): void => {
-      stdin.off("data", onData);
-      stdin.setRawMode?.(false);
-      stdin.pause();
+      tty.off("data", onData);
+      tty.setRawMode(false);
+      tty.destroy();
     };
 
     const onData = (d: Buffer): void => {
@@ -150,6 +167,18 @@ export function selectPrompt<T>(
         write("\n");
         process.exit(130);
       }
+      // Digit shortcuts: only in non-filter mode to avoid conflicting with typing.
+      if (!opts.filter && s >= "1" && s <= "9") {
+        const pick = list[Number(s) - 1];
+        if (pick) {
+          index = Number(s) - 1;
+          render();
+          cleanup();
+          write("\n");
+          resolve(pick.value);
+          return;
+        }
+      }
       if (opts.filter) {
         if (s === "\x7f" || s === "\b") {
           filter = filter.slice(0, -1);
@@ -163,9 +192,9 @@ export function selectPrompt<T>(
       }
     };
 
-    stdin.setRawMode?.(true);
-    stdin.resume();
+    tty.setRawMode(true);
+    tty.resume();
     render();
-    stdin.on("data", onData);
+    tty.on("data", onData);
   });
 }
