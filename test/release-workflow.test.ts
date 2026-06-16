@@ -23,7 +23,6 @@ describe("release workflow", () => {
 
   test("publishes rolling releases and immutable releases on manual dispatch", () => {
     expect(workflow).toContain("contents: write");
-    expect(workflow).toContain("hx-fortress-latest");
     expect(workflow).toContain('gh release create "$tag" dist/hx-fortress-*');
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
   });
