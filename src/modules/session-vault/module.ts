@@ -6,15 +6,17 @@ import { handleVaultRpc, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials } from "./credentials.js";
 import { buildStore } from "./store.js";
-import type { Module, ModuleContext } from "../../host/types.js";
+import type { Module, ModuleContext, ScopedLogger } from "../../host/types.js";
 
 export default function createModule(): Module {
   let store: SessionStore | null = null;
+  let logger: ScopedLogger | null = null;
 
   return {
     id: "session_vault",
 
     async init(context: ModuleContext): Promise<void> {
+      logger = context.logger;
       const creds = await readVaultCredentials();
       if (!creds) {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");
@@ -46,7 +48,9 @@ export default function createModule(): Module {
         const result = await handleVaultRpc(store, req);
         return { ok: true, payload: result };
       } catch (err) {
-        return { ok: false, error: (err as Error).message };
+        const message = err instanceof Error ? err.message : String(err);
+        logger?.error("vault RPC failed", { method: req.method, error: message });
+        return { ok: false, error: message };
       }
     },
   };
