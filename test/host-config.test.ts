@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { FileConfigStore } from "../src/host/config";
+import { ensureDefaultConfig, FileConfigStore } from "../src/host/config";
 import { fortressPaths } from "../src/host/paths";
 
 describe("Fortress config", () => {
@@ -90,4 +90,53 @@ describe("Fortress config", () => {
     const contents = typeof value === "string" ? value : JSON.stringify(value);
     await writeFile(fortressPaths(root).config, contents);
   }
+});
+
+describe("ensureDefaultConfig", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-ensure-config-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("creates config.json with the given cloud URL when absent", async () => {
+    const paths = fortressPaths(root);
+    await ensureDefaultConfig(paths, "wss://let.ai/tunnel");
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored).toEqual({
+      schemaVersion: 1,
+      cloud: { url: "wss://let.ai/tunnel" },
+      modules: { enabled: [] },
+    });
+  });
+
+  test("creates parent directory if it does not exist", async () => {
+    const nested = path.join(root, "deep", "fortress");
+    const paths = fortressPaths(nested);
+    await ensureDefaultConfig(paths, "wss://let.ai/tunnel");
+
+    const raw = JSON.parse(await readFile(paths.config, "utf8")) as unknown;
+    expect((raw as { schemaVersion: number }).schemaVersion).toBe(1);
+  });
+
+  test("does not overwrite an existing config", async () => {
+    const paths = fortressPaths(root);
+    const existing = {
+      schemaVersion: 1,
+      cloud: { url: "wss://original.let.ai/tunnel" },
+      modules: { enabled: ["session_vault"] },
+    };
+    await writeFile(paths.config, JSON.stringify(existing));
+
+    await ensureDefaultConfig(paths, "wss://new.let.ai/tunnel");
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.cloud.url).toBe("wss://original.let.ai/tunnel");
+    expect(stored.modules.enabled).toEqual(["session_vault"]);
+  });
 });
