@@ -1,0 +1,244 @@
+// `hx-fortress update` — fetch the newest hx-fortress binary from the workbench
+// download proxy, verify its SHA-256, and atomically swap it over the
+// currently-running binary's path. Mirrors the `hx-client/update.ts` flow
+// and messaging exactly.
+//
+// The binary lives in the private `let-ai/hx-fortress` GitHub release tagged
+// `hx-fortress-latest`. We never hit github.com directly — workbench-api's
+// `GET /api/hx-gateway/download/:asset` is a server-side proxy that
+// authenticates to GitHub with a PAT and streams the asset back.
+//
+// Atomic swap rationale: on POSIX, `rename(2)` on the same filesystem replaces
+// the destination inode in one operation. A process already executing the old
+// binary keeps its open file descriptor on the old inode; the kernel only
+// releases the inode once that process exits. So overwriting while modules are
+// running is safe — they keep their old code until a restart.
+//
+// Restart: the caller (cli.ts) is responsible for restarting the service after
+// a successful install. runFortressUpdate itself only swaps the binary.
+
+import { arch, platform } from "node:os";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
+import { dirname } from "node:path";
+import { FORTRESS_VERSION } from "./version.js";
+
+export interface UpdateProgress {
+  phase: "download" | "unpack" | "verify";
+  pct: number;
+  received?: number;
+  total?: number;
+}
+
+export interface UpdateOpts {
+  /**
+   * Absolute base URL for the workbench-api `hx-gateway/download` mount, e.g.
+   * `https://workbench.let.ai/_api/hx-gateway/download`. Derived from the
+   * fortress config's `cloud.url` via `downloadBaseFromCloudUrl`.
+   */
+  downloadBaseUrl: string;
+  /** Override the destination binary path. Defaults to `process.execPath`. */
+  binPath?: string;
+  log?: (msg: string) => void;
+  onProgress?: (ev: UpdateProgress) => void;
+}
+
+export interface UpdateResult {
+  asset: string;
+  sha256: string | null;
+  installedPath: string;
+  alreadyLatest: boolean;
+  localVersion: number;
+  remoteVersion: number | null;
+}
+
+/**
+ * Derive the HTTP download base URL from the fortress cloud WebSocket URL.
+ *
+ * The cloud URL pattern (from `deriveFortressUrls`) is:
+ *   `wss://{host}{prefix}/_api/hx-gateway/vault-tunnel`
+ * The download base is:
+ *   `https://{host}{prefix}/_api/hx-gateway/download`
+ *
+ * Transformation: convert ws(s):// to http(s):// and replace the
+ * `/vault-tunnel` suffix with `/download`.
+ */
+export function downloadBaseFromCloudUrl(cloudUrl: string): string {
+  const httpUrl = cloudUrl
+    .replace(/^wss:\/\//, "https://")
+    .replace(/^ws:\/\//, "http://");
+  return httpUrl.replace(/\/vault-tunnel$/, "/download");
+}
+
+export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult> {
+  const binPath = opts.binPath ?? process.execPath;
+  const log = opts.log ?? noop;
+  const onProgress = opts.onProgress ?? noopProgress;
+  const downloadBase = opts.downloadBaseUrl.replace(/\/+$/, "");
+
+  const target = detectTarget();
+  const asset = `hx-fortress-${target}`;
+  const localVersion = FORTRESS_VERSION;
+
+  // Cheap version pre-check: skip the ~24 MB download when already current.
+  const remoteVersion = await fetchRemoteVersion(downloadBase);
+  if (remoteVersion !== null && remoteVersion <= localVersion) {
+    return alreadyLatest(asset, binPath, localVersion, remoteVersion);
+  }
+
+  const binUrl = `${downloadBase}/${asset}.gz`;
+  const shaUrl = `${downloadBase}/${asset}.sha256`;
+
+  const gzBytes = await fetchBytesWithProgress(binUrl, (received, total) => {
+    const pct = total > 0 ? Math.min(85, Math.floor((received * 85) / total)) : 0;
+    onProgress({ phase: "download", pct, received, total });
+  });
+
+  onProgress({ phase: "unpack", pct: 90 });
+  const binBytes = gunzipSync(gzBytes);
+  const shaText = (await fetchBytes(shaUrl)).toString("utf8").trim();
+
+  // sha256sum format: "<hex>  <filename>" or bare hex.
+  const expected = shaText.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (!/^[0-9a-f]{64}$/.test(expected)) {
+    throw new Error(`malformed sha256 for ${asset}: ${shaText.slice(0, 200)}`);
+  }
+  onProgress({ phase: "verify", pct: 96 });
+  const actual = sha256(binBytes);
+  if (actual !== expected) {
+    throw new Error(`checksum mismatch for ${asset}: expected ${expected}, got ${actual}`);
+  }
+  onProgress({ phase: "verify", pct: 100 });
+
+  // Fallback no-op guard: if the downloaded binary is byte-identical to the
+  // installed one (version pre-check was inconclusive), skip the swap.
+  if ((await sha256OfFile(binPath)) === actual) {
+    return alreadyLatest(asset, binPath, localVersion, remoteVersion);
+  }
+
+  await mkdir(dirname(binPath), { recursive: true });
+  const tmpPath = `${binPath}.new`;
+  await writeFile(tmpPath, binBytes);
+  await chmod(tmpPath, 0o755);
+
+  // Atomic on same fs — no half-written binary even on power loss.
+  await rename(tmpPath, binPath);
+  log(`installed → ${binPath}`);
+
+  return {
+    asset,
+    sha256: actual,
+    installedPath: binPath,
+    alreadyLatest: false,
+    localVersion,
+    remoteVersion,
+  };
+}
+
+function alreadyLatest(
+  asset: string,
+  binPath: string,
+  localVersion: number,
+  remoteVersion: number | null,
+): UpdateResult {
+  return {
+    asset,
+    sha256: null,
+    installedPath: binPath,
+    alreadyLatest: true,
+    localVersion,
+    remoteVersion,
+  };
+}
+
+async function fetchRemoteVersion(downloadBase: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${downloadBase}/hx-fortress-version`, {
+      headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const n = Number.parseInt((await res.text()).trim(), 10);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+async function sha256OfFile(path: string): Promise<string | null> {
+  try {
+    return sha256(await readFile(path));
+  } catch {
+    return null;
+  }
+}
+
+function detectTarget(): string {
+  const osMap: Record<string, string> = {
+    darwin: "darwin",
+    linux: "linux",
+  };
+  const archMap: Record<string, string> = {
+    x64: "x64",
+    arm64: "arm64",
+  };
+  const os = osMap[platform()];
+  const a = archMap[arch()];
+  if (!os) throw new Error(`hx-fortress update: unsupported OS ${platform()}`);
+  if (!a) throw new Error(`hx-fortress update: unsupported arch ${arch()}`);
+  return `${os}-${a}`;
+}
+
+async function fetchBytes(url: string): Promise<Buffer> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
+    redirect: "follow",
+  });
+  if (!res.ok) {
+    throw new Error(`GET ${url} → ${res.status} ${res.statusText}`);
+  }
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+async function fetchBytesWithProgress(
+  url: string,
+  onChunk: (received: number, total: number) => void,
+): Promise<Buffer> {
+  const res = await fetch(url, {
+    headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
+    redirect: "follow",
+  });
+  if (!res.ok) {
+    throw new Error(`GET ${url} → ${res.status} ${res.statusText}`);
+  }
+  const total = Number(res.headers.get("content-length")) || 0;
+  if (!res.body) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    onChunk(buf.length, total || buf.length);
+    return buf;
+  }
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let received = 0;
+  onChunk(0, total);
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.length > 0) {
+      chunks.push(Buffer.from(value));
+      received += value.length;
+      onChunk(received, total);
+    }
+  }
+  return Buffer.concat(chunks);
+}
+
+function sha256(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+function noop(): void {}
+
+function noopProgress(): void {}
