@@ -17,6 +17,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -37,6 +38,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -85,6 +87,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -121,6 +124,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -150,6 +154,7 @@ describe("createTuiApp", () => {
         update: async (version) => {
           startCalls.push(`update:${version}`);
         },
+        uninstall: async () => {},
       },
     });
 
@@ -176,6 +181,7 @@ describe("createTuiApp", () => {
         update: async (version) => {
           stopCalls.push(`update:${version}`);
         },
+        uninstall: async () => {},
       },
     });
 
@@ -202,6 +208,7 @@ describe("createTuiApp", () => {
         update: async (version) => {
           updateCalls.push(`update:${version}`);
         },
+        uninstall: async () => {},
       },
     });
 
@@ -222,6 +229,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -232,7 +240,7 @@ describe("createTuiApp", () => {
       screen: "details",
       pendingDetailsFor: "session_vault",
       selectedRow: 0,
-      selectedAction: 1,
+      selectedAction: 0,
       error: null,
     });
   });
@@ -251,6 +259,7 @@ describe("createTuiApp", () => {
         },
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -285,6 +294,7 @@ describe("createTuiApp", () => {
         update: async (version) => {
           calls.push(`update:${version}`);
         },
+        uninstall: async () => {},
       },
     });
 
@@ -318,6 +328,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -345,6 +356,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 
@@ -394,6 +406,7 @@ describe("createTuiApp", () => {
         start: async () => {},
         stop: async () => {},
         update: async () => {},
+        uninstall: async () => {},
       },
     });
 

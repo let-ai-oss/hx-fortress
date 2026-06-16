@@ -49,3 +49,23 @@ export interface BuildMainScreenModelParams {
   installedModules: InstalledModuleRecord[];
   updates: ModuleUpdateMap;
 }
+
+export type DetailsScreenAction =
+  | { kind: "update"; enabled: boolean; version: string }
+  | { kind: "uninstall"; enabled: boolean; reason: string | null }
+  | { kind: "back"; enabled: boolean };
+
+export interface DetailsScreenModel {
+  id: MainScreenRowId;
+  label: string;
+  installedVersion: string | null;
+  availableVersion: string | null;
+  isBundledCore: boolean;
+  actions: DetailsScreenAction[];
+}
+
+export interface BuildDetailsScreenModelParams {
+  id: MainScreenRowId;
+  installedVersion: string | null;
+  availableVersion: string | null;
+}
