@@ -7,7 +7,8 @@ import {
 import type { WsCloudConnectionDeps } from "../cloud";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
-import { ensureDefaultConfig, FileConfigStore } from "./config";
+import { readVaultCredentials } from "../modules/session-vault/credentials.js";
+import { ensureCoreModulesEnabled, ensureDefaultConfig, FileConfigStore } from "./config";
 import { FileLogSink } from "./file-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
@@ -42,6 +43,9 @@ export async function runFortressHost(
   if (pendingEnrollment) {
     await ensureDefaultConfig(paths, pendingEnrollment.cloudUrl);
   }
+  await ensureCoreModulesEnabled(paths);
+
+  const vaultCreds = await readVaultCredentials();
 
   const connectionDependencies: WsCloudConnectionDeps = {
     dispatcher: registry,
@@ -49,6 +53,9 @@ export async function runFortressHost(
     identity: {
       version,
       protocolVersion: SUPPORTED_PROTOCOL_VERSION,
+      storageKind: vaultCreds?.store ?? undefined,
+      bucketRegion: vaultCreds?.region ?? undefined,
+      bucket: vaultCreds?.bucket ?? undefined,
     },
     logger,
     enrollToken: pendingEnrollment?.token,

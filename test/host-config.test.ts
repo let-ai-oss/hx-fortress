@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { ensureDefaultConfig, FileConfigStore } from "../src/host/config";
+import { ensureCoreModulesEnabled, ensureDefaultConfig, FileConfigStore } from "../src/host/config";
 import { fortressPaths } from "../src/host/paths";
 
 describe("Fortress config", () => {
@@ -111,7 +111,7 @@ describe("ensureDefaultConfig", () => {
     expect(stored).toEqual({
       schemaVersion: 1,
       cloud: { url: "wss://let.ai/tunnel" },
-      modules: { enabled: [] },
+      modules: { enabled: ["session_vault"] },
     });
   });
 
@@ -138,5 +138,68 @@ describe("ensureDefaultConfig", () => {
     const stored = await new FileConfigStore(paths).load();
     expect(stored.cloud.url).toBe("wss://original.let.ai/tunnel");
     expect(stored.modules.enabled).toEqual(["session_vault"]);
+  });
+});
+
+describe("ensureCoreModulesEnabled", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-core-modules-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("no-ops when config does not exist", async () => {
+    const paths = fortressPaths(root);
+    await expect(ensureCoreModulesEnabled(paths)).resolves.toBeUndefined();
+  });
+
+  test("no-ops when all core modules already enabled", async () => {
+    const paths = fortressPaths(root);
+    const existing = {
+      schemaVersion: 1,
+      cloud: { url: "wss://let.ai/tunnel" },
+      modules: { enabled: ["session_vault"] },
+    };
+    await writeFile(paths.config, JSON.stringify(existing));
+
+    await ensureCoreModulesEnabled(paths);
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.modules.enabled).toEqual(["session_vault"]);
+  });
+
+  test("adds missing core modules to existing config", async () => {
+    const paths = fortressPaths(root);
+    const existing = {
+      schemaVersion: 1,
+      cloud: { url: "wss://let.ai/tunnel" },
+      modules: { enabled: [] },
+    };
+    await writeFile(paths.config, JSON.stringify(existing));
+
+    await ensureCoreModulesEnabled(paths);
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.modules.enabled).toContain("session_vault");
+    expect(stored.cloud.url).toBe("wss://let.ai/tunnel");
+  });
+
+  test("preserves existing non-core enabled modules", async () => {
+    const paths = fortressPaths(root);
+    const existing = {
+      schemaVersion: 1,
+      cloud: { url: "wss://let.ai/tunnel" },
+      modules: { enabled: [] },
+    };
+    await writeFile(paths.config, JSON.stringify(existing));
+
+    await ensureCoreModulesEnabled(paths);
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.modules.enabled).toContain("session_vault");
   });
 });

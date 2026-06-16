@@ -38,7 +38,7 @@ describe("runFortressHost", () => {
       throw new Error("expected capturedDeps");
     }
     const dependencies = capturedDeps as WsCloudConnectionDeps;
-    expect(dependencies.identity).toEqual({
+    expect(dependencies.identity).toMatchObject({
       version: "0.0.0-test",
       protocolVersion: 1,
     });
