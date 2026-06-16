@@ -21,6 +21,13 @@ describe("project skeleton", () => {
     });
   });
 
+  test("defines local dev and build scripts", () => {
+    expect(packageJson.scripts).toMatchObject({
+      dev: "bun --watch src/cli.ts",
+      build: "mkdir -p ./dist && bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
+    });
+  });
+
   test("exposes the host lifecycle through one public boundary", () => {
     expect(host).toMatchObject({
       FileConfigStore: expect.any(Function),
