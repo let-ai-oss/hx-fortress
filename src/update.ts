@@ -22,7 +22,11 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { dirname } from "node:path";
-import { FORTRESS_VERSION } from "./version.js";
+import {
+  compareStableSemver,
+  FORTRESS_VERSION,
+  parseStableSemver,
+} from "./version.js";
 
 export interface UpdateProgress {
   phase: "download" | "unpack" | "verify";
@@ -49,8 +53,8 @@ export interface UpdateResult {
   sha256: string | null;
   installedPath: string;
   alreadyLatest: boolean;
-  localVersion: number;
-  remoteVersion: number | null;
+  localVersion: string;
+  remoteVersion: string | null;
 }
 
 /**
@@ -80,11 +84,23 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
   const target = detectTarget();
   const asset = `hx-fortress-${target}`;
   const localVersion = FORTRESS_VERSION;
+  const localStableVersion = parseStableSemver(localVersion);
+  if (!localStableVersion) {
+    throw new Error(`invalid local Fortress version: ${localVersion}`);
+  }
 
   // Cheap version pre-check: skip the ~24 MB download when already current.
-  const remoteVersion = await fetchRemoteVersion(downloadBase);
-  if (remoteVersion !== null && remoteVersion <= localVersion) {
-    return alreadyLatest(asset, binPath, localVersion, remoteVersion);
+  const remoteVersionCheck = await fetchRemoteVersion(downloadBase);
+  if (remoteVersionCheck.kind === "unsafe") {
+    return alreadyLatest(asset, binPath, localVersion, null);
+  }
+  const remoteVersion =
+    remoteVersionCheck.kind === "stable" ? remoteVersionCheck.version : null;
+  if (
+    remoteVersion &&
+    compareStableSemver(remoteVersion.parsed, localStableVersion) <= 0
+  ) {
+    return alreadyLatest(asset, binPath, localVersion, remoteVersion.raw);
   }
 
   const binUrl = `${downloadBase}/${asset}.gz`;
@@ -114,7 +130,7 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
   // Fallback no-op guard: if the downloaded binary is byte-identical to the
   // installed one (version pre-check was inconclusive), skip the swap.
   if ((await sha256OfFile(binPath)) === actual) {
-    return alreadyLatest(asset, binPath, localVersion, remoteVersion);
+    return alreadyLatest(asset, binPath, localVersion, remoteVersion?.raw ?? null);
   }
 
   await mkdir(dirname(binPath), { recursive: true });
@@ -132,15 +148,15 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
     installedPath: binPath,
     alreadyLatest: false,
     localVersion,
-    remoteVersion,
+    remoteVersion: remoteVersion?.raw ?? null,
   };
 }
 
 function alreadyLatest(
   asset: string,
   binPath: string,
-  localVersion: number,
-  remoteVersion: number | null,
+  localVersion: string,
+  remoteVersion: string | null,
 ): UpdateResult {
   return {
     asset,
@@ -152,17 +168,25 @@ function alreadyLatest(
   };
 }
 
-async function fetchRemoteVersion(downloadBase: string): Promise<number | null> {
+async function fetchRemoteVersion(downloadBase: string): Promise<
+  | { kind: "stable"; version: { raw: string; parsed: NonNullable<ReturnType<typeof parseStableSemver>> } }
+  | { kind: "unsafe" }
+  | { kind: "unavailable" }
+> {
   try {
     const res = await fetch(`${downloadBase}/hx-fortress-version`, {
       headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
       redirect: "follow",
     });
-    if (!res.ok) return null;
-    const n = Number.parseInt((await res.text()).trim(), 10);
-    return Number.isInteger(n) && n >= 0 ? n : null;
+    if (!res.ok) return { kind: "unavailable" };
+    const raw = (await res.text()).trim();
+    const parsed = parseStableSemver(raw);
+    if (!parsed) {
+      return { kind: "unsafe" };
+    }
+    return { kind: "stable", version: { raw, parsed } };
   } catch {
-    return null;
+    return { kind: "unavailable" };
   }
 }
 

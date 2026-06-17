@@ -163,8 +163,8 @@ describe("runCli update", () => {
       sha256: null,
       installedPath: "/usr/local/bin/hx-fortress",
       alreadyLatest: true,
-      localVersion: 1,
-      remoteVersion: 1,
+      localVersion: "0.1.1",
+      remoteVersion: "0.1.1",
     };
 
     const exitCode = await runCli(["update"], {
@@ -182,7 +182,7 @@ describe("runCli update", () => {
       "https://workbench.let.ai/_api/hx-gateway/download",
     );
     expect(lines).toContain(
-      "hx-fortress is already on the latest version (v1). Nothing to do. 🎉",
+      "hx-fortress is already on the latest version (v0.1.1). Nothing to do. 🎉",
     );
   });
 
@@ -195,8 +195,8 @@ describe("runCli update", () => {
       sha256: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
       installedPath: "/usr/local/bin/hx-fortress",
       alreadyLatest: false,
-      localVersion: 1,
-      remoteVersion: 2,
+      localVersion: "0.1.1",
+      remoteVersion: "0.1.2",
     };
 
     const exitCode = await runCli(["update"], {
@@ -208,7 +208,7 @@ describe("runCli update", () => {
 
     expect(exitCode).toBe(0);
     expect(lines[0]).toMatch(/hx-fortress updated to latest \(hx-fortress-darwin-arm64, sha256 abcdef123456…\)/);
-    expect(lines[lines.length - 1]).toBe("hx-fortress version: 2.0.0");
+    expect(lines[lines.length - 1]).toBe("hx-fortress version: 0.1.2");
   });
 
   test("restarts the service when it was running before the update", async () => {
@@ -221,8 +221,8 @@ describe("runCli update", () => {
       sha256: "a".repeat(64),
       installedPath: "/home/user/.let/bin/hx-fortress",
       alreadyLatest: false,
-      localVersion: 1,
-      remoteVersion: 3,
+      localVersion: "0.1.1",
+      remoteVersion: "0.1.3",
     };
 
     const exitCode = await runCli(["update"], {
@@ -248,8 +248,8 @@ describe("runCli update", () => {
       sha256: "b".repeat(64),
       installedPath: "/home/user/.let/bin/hx-fortress",
       alreadyLatest: false,
-      localVersion: 1,
-      remoteVersion: 2,
+      localVersion: "0.1.1",
+      remoteVersion: "0.1.2",
     };
 
     const exitCode = await runCli(["update"], {
