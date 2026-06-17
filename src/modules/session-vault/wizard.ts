@@ -26,6 +26,12 @@ import {
 } from "./credentials.js";
 import { buildStore } from "./store.js";
 import { FilePendingEnrollmentStore } from "../../cloud/credentials.js";
+import {
+  assertGatewayPublicUrl,
+  DEFAULT_GATEWAY_PUBLIC_URL,
+  ensureDefaultConfig,
+  ensureGatewayPublicUrlConfigured,
+} from "../../host/config.js";
 import { fortressPaths } from "../../host/paths.js";
 
 type Log = (m: string) => void;
@@ -39,6 +45,13 @@ export interface WizardOpts {
   fortressRoot?: string;
 }
 
+export function resolveGatewayPublicUrlInput(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return DEFAULT_GATEWAY_PUBLIC_URL;
+  assertGatewayPublicUrl(trimmed);
+  return trimmed;
+}
+
 export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
   const { log } = opts;
   log("");
@@ -46,13 +59,16 @@ export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
   log("Transcripts rest in the organization's own bucket, under its own keys; the");
   log("storage credentials never leave this host.");
   log("");
+
+  const gatewayPublicUrl = await promptGatewayPublicUrl(log);
+  await ensureGatewayConfig(opts, gatewayPublicUrl);
+
   const store = await selectPrompt<"gcs" | "s3">("Storage backend for session transcripts:", [
     { label: "Google Cloud Storage", value: "gcs" },
     { label: "Amazon S3", value: "s3" },
   ]);
   if (store === "gcs") return enrollGcs(opts);
   return enrollS3(opts);
-
 }
 
 async function enrollGcs(opts: WizardOpts): Promise<void> {
@@ -74,7 +90,15 @@ async function enrollGcs(opts: WizardOpts): Promise<void> {
   );
   const bucket = await requireBucketName(log);
 
-  const ctx: TemplateContext = { store: "gcs", bucket, region: location, projectId: project, cloudUrl, token };
+  const ctx: TemplateContext = {
+    store: "gcs",
+    bucket,
+    region: location,
+    projectId: project,
+    cloudUrl,
+    token,
+    fortressRoot: opts.fortressRoot,
+  };
 
   // No usable gcloud → can't auto-provision; offer paste, else template.
   if (!boot.ready) {
@@ -125,7 +149,14 @@ async function enrollS3(opts: WizardOpts): Promise<void> {
     { filter: true, defaultIndex: indexOf(AWS_REGIONS, state.region) },
   );
   const bucket = await requireBucketName(log);
-  const ctx: TemplateContext = { store: "s3", bucket, region, cloudUrl: opts.cloudUrl, token: opts.token };
+  const ctx: TemplateContext = {
+    store: "s3",
+    bucket,
+    region,
+    cloudUrl: opts.cloudUrl,
+    token: opts.token,
+    fortressRoot: opts.fortressRoot,
+  };
 
   const method = await selectPrompt<"create" | "paste">("Credentials:", [
     { label: "Create a least-privilege IAM user (requires an aws admin login)", value: "create" },
@@ -270,4 +301,23 @@ function indexOf(list: { value: string }[], value: string | null): number {
   if (!value) return 0;
   const i = list.findIndex((r) => r.value === value);
   return i >= 0 ? i : 0;
+}
+
+async function promptGatewayPublicUrl(log: Log): Promise<string> {
+  const input = await textPrompt(
+    "Gateway public URL for direct hx uploads (Enter to use this machine's localhost default):",
+    { default: DEFAULT_GATEWAY_PUBLIC_URL },
+  );
+  try {
+    return resolveGatewayPublicUrlInput(input);
+  } catch (error) {
+    log(error instanceof Error ? error.message : String(error));
+    process.exit(2);
+  }
+}
+
+async function ensureGatewayConfig(opts: WizardOpts, gatewayPublicUrl: string): Promise<void> {
+  const paths = fortressPaths(opts.fortressRoot);
+  await ensureDefaultConfig(paths, opts.cloudUrl, gatewayPublicUrl);
+  await ensureGatewayPublicUrlConfigured(paths, gatewayPublicUrl);
 }

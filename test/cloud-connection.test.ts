@@ -13,6 +13,7 @@ const IDENTITY = { version: "0.0.0-test", protocolVersion: SUPPORTED_PROTOCOL_VE
 const CONFIG: FortressConfig = {
   schemaVersion: 1,
   cloud: { url: "" }, // overridden per-test
+  gateway: { publicUrl: "http://localhost:8787" },
   modules: { enabled: [] },
 };
 

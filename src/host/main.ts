@@ -11,6 +11,7 @@ import { readVaultCredentials } from "../modules/session-vault/credentials.js";
 import {
   ensureCoreModulesEnabled,
   ensureDefaultConfig,
+  ensureGatewayPublicUrlConfigured,
   FileConfigStore,
   resolveGatewayConfig,
 } from "./config";
@@ -46,14 +47,22 @@ export async function runFortressHost(
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
   const signingKeyStore = new FileSigningKeyStore(paths.signingKey);
-  const gateway = resolveGatewayConfig(process.env);
 
   const pendingEnrollment = await pendingEnrollmentStore.load().catch(() => null);
 
   if (pendingEnrollment) {
     await ensureDefaultConfig(paths, pendingEnrollment.cloudUrl);
   }
+  await ensureGatewayPublicUrlConfigured(paths);
   await ensureCoreModulesEnabled(paths);
+
+  let configuredGatewayUrl: string | undefined;
+  try {
+    configuredGatewayUrl = (await new FileConfigStore(paths).load()).gateway.publicUrl;
+  } catch {
+    configuredGatewayUrl = undefined;
+  }
+  const gateway = resolveGatewayConfig(process.env, configuredGatewayUrl);
 
   const vaultCreds = await readVaultCredentials();
 
