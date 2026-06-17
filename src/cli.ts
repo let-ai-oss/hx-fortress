@@ -209,7 +209,7 @@ export async function runCli(
           writeLine(`Fortress restarted (${manager.name}).`);
         }
 
-        writeLine(`hx-fortress version: ${result.remoteVersion ?? result.localVersion}.0.0`);
+        writeLine(`hx-fortress version: ${result.remoteVersion ?? result.localVersion}`);
         return 0;
       }
       case "help":

@@ -1,9 +1,30 @@
-// The one source of truth for "which build of hx-fortress is this": a single
-// monotonically increasing integer. `hx-fortress version` prints it as "hx-fortress version: <N>.0.0".
-//
-// Bumping
-// -------
-// Increment whenever a change to the fortress binary is something a user could
-// observe — a new or changed command, a fixed bug, a behavior change. The number
-// must only ever increase.
-export const FORTRESS_VERSION = 1;
+import packageJson from "../package.json";
+
+export interface StableSemver {
+  major: number;
+  minor: number;
+  patch: number;
+  raw: string;
+}
+
+// The one source of truth for "which build of hx-fortress is this" is the
+// package version. Auto-update intentionally accepts only plain X.Y.Z strings;
+// prereleases such as 0.2.0-rc.1 are ignored by the update mechanism.
+export const FORTRESS_VERSION = packageJson.version;
+
+export function parseStableSemver(version: string): StableSemver | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!match) return null;
+  return {
+    major: Number.parseInt(match[1]!, 10),
+    minor: Number.parseInt(match[2]!, 10),
+    patch: Number.parseInt(match[3]!, 10),
+    raw: version.trim(),
+  };
+}
+
+export function compareStableSemver(a: StableSemver, b: StableSemver): number {
+  if (a.major !== b.major) return a.major - b.major;
+  if (a.minor !== b.minor) return a.minor - b.minor;
+  return a.patch - b.patch;
+}

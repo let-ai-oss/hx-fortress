@@ -49,6 +49,17 @@ describe("runFortressUpdate", () => {
     expect(result.sha256).toBeNull();
   });
 
+  test("ignores prerelease remote versions during the pre-check", async () => {
+    const result = await runFortressUpdate({
+      downloadBaseUrl: mockDownloadBase({ remoteVersion: "0.1.2-rc.1" }),
+      binPath,
+    });
+
+    expect(result.alreadyLatest).toBe(true);
+    expect(result.localVersion).toBe(FORTRESS_VERSION);
+    expect(result.remoteVersion).toBeNull();
+  });
+
   test("downloads and installs a newer binary", async () => {
     const newBinary = Buffer.from("new fortress binary content");
     const sha256 = createHash("sha256").update(newBinary).digest("hex");
@@ -100,7 +111,7 @@ describe("runFortressUpdate", () => {
 // ── test helpers ──────────────────────────────────────────────────────────────
 
 interface MockDownloadBaseOpts {
-  remoteVersion?: number;
+  remoteVersion?: string;
   binary?: Buffer;
   sha256?: string;
 }
