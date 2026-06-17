@@ -9,6 +9,9 @@ export interface FortressConfig {
   cloud: {
     url: string;
   };
+  gateway: {
+    publicUrl: string;
+  };
   modules: {
     enabled: string[];
   };

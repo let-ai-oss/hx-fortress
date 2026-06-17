@@ -27,6 +27,7 @@ const IDENTITY = { version: "0.0.0-test", protocolVersion: SUPPORTED_PROTOCOL_VE
 const SESSION_KEY = { userId: "u1", family: "f1", sessionId: "s1" };
 const BASE_CONFIG: Omit<FortressConfig, "cloud"> = {
   schemaVersion: 1,
+  gateway: { publicUrl: "http://localhost:8787" },
   modules: { enabled: ["session_vault"] },
 };
 const TEST_TIMEOUT = 5_000;
