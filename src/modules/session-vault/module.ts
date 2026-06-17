@@ -8,12 +8,22 @@ import { readVaultCredentials } from "./credentials.js";
 import { buildStore } from "./store.js";
 import type { Module, ModuleContext, ScopedLogger } from "../../host/types.js";
 
-export default function createModule(): Module {
+/** The session_vault module plus a getter for its live store, so the ingest
+ *  gateway can presign against the same store the tunnel RPCs already use. */
+export interface SessionVaultModule extends Module {
+  getStore(): SessionStore | null;
+}
+
+export default function createModule(): SessionVaultModule {
   let store: SessionStore | null = null;
   let logger: ScopedLogger | null = null;
 
   return {
     id: "session_vault",
+
+    getStore(): SessionStore | null {
+      return store;
+    },
 
     async init(context: ModuleContext): Promise<void> {
       logger = context.logger;
