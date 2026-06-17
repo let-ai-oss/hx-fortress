@@ -8,7 +8,12 @@ import type { WsCloudConnectionDeps } from "../cloud";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
 import { readVaultCredentials } from "../modules/session-vault/credentials.js";
-import { ensureCoreModulesEnabled, ensureDefaultConfig, FileConfigStore } from "./config";
+import {
+  ensureCoreModulesEnabled,
+  ensureDefaultConfig,
+  FileConfigStore,
+  resolveGatewayConfig,
+} from "./config";
 import { FileLogSink } from "./file-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
@@ -17,6 +22,8 @@ import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
 import type { CloudConnection } from "./types";
+import { FileSigningKeyStore } from "../gateway/signing-key-store";
+import { startGatewayServer, type GatewayHandle } from "../gateway/server";
 
 export interface HostMainDependencies {
   root?: string;
@@ -34,9 +41,12 @@ export async function runFortressHost(
   const bus = new LogBus(new FileLogSink(paths.log));
   const logger = new BusHostLogger(bus);
   const registry = new ModuleRegistry(bus);
-  registry.register(createSessionVaultModule());
+  const vaultModule = createSessionVaultModule();
+  registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
+  const signingKeyStore = new FileSigningKeyStore(paths.signingKey);
+  const gateway = resolveGatewayConfig(process.env);
 
   const pendingEnrollment = await pendingEnrollmentStore.load().catch(() => null);
 
@@ -56,8 +66,10 @@ export async function runFortressHost(
       storageKind: vaultCreds?.store ?? undefined,
       bucketRegion: vaultCreds?.region ?? undefined,
       bucket: vaultCreds?.bucket ?? undefined,
+      gatewayUrl: gateway.gatewayUrl,
     },
     logger,
+    signingKeyStore,
     enrollToken: pendingEnrollment?.token,
     async onEnrolled(cred) {
       await pendingEnrollmentStore.clear().catch((err) => {
@@ -84,5 +96,23 @@ export async function runFortressHost(
     },
   });
 
-  await (dependencies.run ?? runHost)(runtime);
+  // Start the direct-ingest gateway alongside the tunnel when the operator has
+  // exposed a public URL. It presigns against the same live session_vault store
+  // the tunnel RPCs use, and verifies capability tokens with the org public key
+  // the hub pushes over the tunnel (cached on disk for offline restarts).
+  let gatewayHandle: GatewayHandle | null = null;
+  if (gateway.enabled) {
+    gatewayHandle = startGatewayServer({
+      port: gateway.port,
+      logger: bus.scopeFor("gateway"),
+      signingKey: () => signingKeyStore.load(),
+      store: () => vaultModule.getStore(),
+    });
+  }
+
+  try {
+    await (dependencies.run ?? runHost)(runtime);
+  } finally {
+    gatewayHandle?.stop();
+  }
 }

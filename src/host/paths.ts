@@ -10,6 +10,11 @@ export function assertModuleId(moduleId: string): void {
 }
 
 export function defaultFortressRoot(): string {
+  // FORTRESS_ROOT lets a container mount all persisted state (config.json,
+  // credentials.json, signing-key) on a single volume; otherwise default to the
+  // operator's home directory.
+  const fromEnv = process.env.FORTRESS_ROOT?.trim();
+  if (fromEnv) return fromEnv;
   return path.join(os.homedir(), ".let", "fortress");
 }
 
@@ -21,6 +26,7 @@ export function fortressPaths(root = defaultFortressRoot()) {
     config: path.join(root, "config.json"),
     credentials: path.join(root, "identity", "credentials.json"),
     pendingEnrollment: path.join(root, "identity", "pending-enrollment.json"),
+    signingKey: path.join(root, "identity", "signing-key"),
     moduleInventory: path.join(modules, "inventory.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
     serviceLog: path.join(root, "logs", "service.log"),

@@ -17,13 +17,14 @@ export type FortressToHubFrame =
   | { t: "moduleRemoveResult"; moduleId: string; ok: false; error: string };
 
 export type HubToFortressFrame =
-  | { t: "welcome"; orgId: string; protocolVersion: number }
+  | { t: "welcome"; orgId: string; protocolVersion: number; signingPublicKey?: string }
   | {
       t: "enrolled";
       orgId: string;
       fortressId: string;
       credential: string;
       protocolVersion: number;
+      signingPublicKey?: string;
     }
   | { t: "moduleMessage"; data: MsgData }
   | { t: "rpc"; id: string; req: unknown }

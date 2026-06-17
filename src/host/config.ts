@@ -88,6 +88,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown validation error";
 }
 
+// ── Ingest gateway ──────────────────────────────────────────────────────────
+
+export interface GatewayConfig {
+  enabled: boolean;
+  gatewayUrl?: string;
+  port: number;
+}
+
+const DEFAULT_GATEWAY_PORT = 8787;
+
+/** Resolve the direct-ingest gateway settings from the environment. The gateway
+ *  is enabled only when the operator exposes a public HTTPS base URL via
+ *  FORTRESS_PUBLIC_URL; FORTRESS_GATEWAY_PORT overrides the listen port. */
+export function resolveGatewayConfig(env: Record<string, string | undefined>): GatewayConfig {
+  const gatewayUrl = env.FORTRESS_PUBLIC_URL?.trim();
+  const port = Number(env.FORTRESS_GATEWAY_PORT) || DEFAULT_GATEWAY_PORT;
+  return { enabled: Boolean(gatewayUrl), gatewayUrl: gatewayUrl || undefined, port };
+}
+
 /** Migrate an existing config.json to include any core modules not yet listed
  *  in modules.enabled. No-op if config doesn't exist yet or is already up to date. */
 export async function ensureCoreModulesEnabled(paths: FortressPaths): Promise<void> {

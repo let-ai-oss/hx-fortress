@@ -16,6 +16,9 @@ export interface WsCloudConnectionDeps {
   logger: HostLogger;
   identity: FortressIdentity;
   moduleLoader?: ModuleLifecycleHandler;
+  /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled,
+   *  so the gateway can verify capability tokens offline. */
+  signingKeyStore?: { save(key: string): Promise<void> };
   enrollToken?: string;
   /** Called once immediately after a successful enrollment and credential save.
    *  Use to clear the pending enrollment token and propagate identity to modules. */
@@ -185,6 +188,7 @@ export class WsCloudConnection implements CloudConnection {
           this.ws?.close();
           return;
         }
+        await this.persistSigningKey(frame.signingPublicKey);
         const cred: CloudCredential = {
           orgId: frame.orgId,
           fortressId: frame.fortressId,
@@ -215,6 +219,7 @@ export class WsCloudConnection implements CloudConnection {
           this.ws?.close();
           return;
         }
+        await this.persistSigningKey(frame.signingPublicKey);
         this._state = "connected";
         settle();
         break;
@@ -281,6 +286,15 @@ export class WsCloudConnection implements CloudConnection {
         this.ws?.close();
         break;
       }
+    }
+  }
+
+  private async persistSigningKey(signingPublicKey?: string): Promise<void> {
+    if (!signingPublicKey) return;
+    try {
+      await this.deps.signingKeyStore?.save(signingPublicKey);
+    } catch (err) {
+      this.deps.logger.error("Failed to persist org signing key", err);
     }
   }
 
