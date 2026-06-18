@@ -10,9 +10,14 @@ import {
   handleAgentCommit,
   handleCanonicalDownload,
   handleArtifactRead,
+  handleListSessionMetadata,
 } from "./handlers";
 import { verifyCapabilityToken, type CapabilityClaims } from "./capability-token";
 import type { SessionStore } from "../modules/session-vault/store/types";
+import {
+  parseSessionMetadata,
+  SESSION_METADATA_ARTIFACT,
+} from "../modules/session-vault/store/session-metadata";
 
 export interface GatewayLogger {
   info(msg: string, fields?: Record<string, unknown>): void;
@@ -56,6 +61,18 @@ function str(v: unknown, fallback = ""): string {
   return typeof v === "string" ? v : fallback;
 }
 
+function num(v: unknown, fallback = 0): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+function optionalString(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+function metaRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
 export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
   const server = Bun.serve({
     port: deps.port,
@@ -87,15 +104,54 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                 }),
               );
             case "/sessions/commit":
-              return json(
-                await handleCommit(store, {
+              {
+                const commit = await handleCommit(store, {
                   userId: str(body.userId, userId),
                   family: str(body.family),
                   sessionId: str(body.sessionId),
                   chunkId: str(body.chunkId),
                   replace: body.replace === true,
-                }),
-              );
+                });
+                const key = {
+                  userId: str(body.userId, userId),
+                  family: str(body.family),
+                  sessionId: str(body.sessionId),
+                };
+                const meta = metaRecord(body.meta);
+                const existing = parseSessionMetadata(
+                  JSON.parse((await store.readArtifactText(key, SESSION_METADATA_ARTIFACT).catch(() => null)) ?? "null"),
+                );
+                const now = new Date().toISOString();
+                await store.writeArtifact(
+                  key,
+                  SESSION_METADATA_ARTIFACT,
+                  JSON.stringify({
+                    family: key.family,
+                    sessionId: key.sessionId,
+                    title: optionalString(meta?.title) ?? existing?.title ?? null,
+                    titleSource:
+                      meta?.titleSource === "user" ||
+                      meta?.titleSource === "ai" ||
+                      meta?.titleSource === "fallback"
+                        ? meta.titleSource
+                        : (existing?.titleSource ?? null),
+                    bytesUploaded: commit.totalBytes,
+                    eventCount: num(meta?.eventCount, existing?.eventCount ?? 0),
+                    userTextCount: num(meta?.userTextCount, existing?.userTextCount ?? 0),
+                    assistantCount: num(meta?.assistantCount, existing?.assistantCount ?? 0),
+                    lastActivityAt:
+                      optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now,
+                    firstSeenAt: existing?.firstSeenAt ?? now,
+                    updatedAt: now,
+                    cwd: optionalString(meta?.cwd) ?? existing?.cwd ?? null,
+                    gitBranch: optionalString(meta?.gitBranch) ?? existing?.gitBranch ?? null,
+                    sourcePath: optionalString(meta?.sourcePath) ?? existing?.sourcePath ?? null,
+                    repoSlug: optionalString(meta?.repoSlug) ?? existing?.repoSlug ?? null,
+                    deviceName: existing?.deviceName ?? null,
+                  }),
+                );
+                return json(commit);
+              }
             case "/sessions/agent-append-url":
               return json(
                 await handleAgentAppendUrl(store, {
@@ -135,6 +191,9 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                 }),
               );
           }
+        }
+        if (req.method === "GET" && url.pathname === "/sessions") {
+          return json(await handleListSessionMetadata(store, { userId }));
         }
       } catch (err) {
         deps.logger.error("gateway handler failed", {

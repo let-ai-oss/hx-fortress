@@ -3,7 +3,7 @@
 // pipeline with only a base-URL swap. No PG bookkeeping lives here: in
 // fortress-direct mode the customer's Fortress owns storage; let.ai keeps only
 // discovery + auth.
-import type { SessionStore, SessionKey } from "../modules/session-vault/store/types";
+import type { SessionMetadata, SessionStore, SessionKey } from "../modules/session-vault/store/types";
 
 export interface AppendUrlInput {
   userId: string;
@@ -54,6 +54,10 @@ export interface CanonicalDownloadOutput {
 
 export interface ArtifactReadInput extends CanonicalDownloadInput {
   name: string;
+}
+
+export interface ListSessionMetadataInput {
+  userId: string;
 }
 
 function keyOf(i: { userId: string; family: string; sessionId: string }): SessionKey {
@@ -126,4 +130,11 @@ export async function handleArtifactRead(
 ): Promise<{ name: string; content: string | null }> {
   const content = await store.readArtifactText(keyOf(input), input.name);
   return { name: input.name, content };
+}
+
+export async function handleListSessionMetadata(
+  store: SessionStore,
+  input: ListSessionMetadataInput,
+): Promise<{ sessions: SessionMetadata[] }> {
+  return { sessions: await store.listSessionMetadata(input.userId) };
 }

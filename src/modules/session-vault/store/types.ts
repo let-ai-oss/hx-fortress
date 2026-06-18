@@ -41,6 +41,25 @@ export interface AppendOptions {
   replace?: boolean;
 }
 
+export interface SessionMetadata {
+  family: string;
+  sessionId: string;
+  title: string | null;
+  titleSource: "user" | "ai" | "fallback" | null;
+  bytesUploaded: number;
+  eventCount: number;
+  userTextCount: number;
+  assistantCount: number;
+  lastActivityAt: string | null;
+  firstSeenAt: string;
+  updatedAt: string;
+  cwd: string | null;
+  gitBranch: string | null;
+  sourcePath: string | null;
+  repoSlug: string | null;
+  deviceName: string | null;
+}
+
 export interface SessionStore {
   /** Mint a signed PUT URL for a staging chunk. The caller PUTs raw NDJSON bytes. */
   signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload>;
@@ -63,6 +82,9 @@ export interface SessionStore {
   writeArtifact(key: SessionKey, name: string, text: string): Promise<void>;
   /** Read a sidecar artifact as UTF-8 text, or null if it doesn't exist. */
   readArtifactText(key: SessionKey, name: string): Promise<string | null>;
+  /** List lightweight session metadata for one user without reading every
+   *  canonical transcript. */
+  listSessionMetadata(userId: string): Promise<SessionMetadata[]>;
   /** Prove the bucket + credentials actually work: write→read→delete a
    *  throwaway probe object. Throws on any failure. Run at enroll time (so a
    *  bad bucket/permission surfaces immediately, not at the first session) and
