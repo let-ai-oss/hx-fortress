@@ -16,10 +16,16 @@ import type {
   AppendOptions,
   ComposeResult,
   SessionKey,
+  SessionMetadata,
   SessionStore,
   SignedDownload,
   SignedUpload,
 } from "./types.js";
+import {
+  metadataFromCanonicalObjectName,
+  parseSessionMetadata,
+  SESSION_METADATA_ARTIFACT,
+} from "./session-metadata.js";
 
 export interface GcsStoreConfig {
   projectId: string;
@@ -174,6 +180,39 @@ export class GcsStore implements SessionStore {
     } catch {
       return null;
     }
+  }
+
+  async listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
+    const [files] = await this.bucket().getFiles({ prefix: `${userId}/` });
+    const out: SessionMetadata[] = [];
+    const seen = new Set<string>();
+    const canonicalFallbacks: SessionMetadata[] = [];
+    for (const file of files) {
+      if (file.name.endsWith(`/${SESSION_METADATA_ARTIFACT}`)) {
+        const raw = await file.download().catch(() => null);
+        if (!raw) continue;
+        const parsed = parseSessionMetadata(JSON.parse(raw[0].toString("utf8")));
+        if (parsed) {
+          seen.add(`${parsed.family}/${parsed.sessionId}`);
+          out.push(parsed);
+        }
+        continue;
+      }
+      const [metadata] = await file.getMetadata().catch(() => []);
+      const updatedAt =
+        typeof metadata?.updated === "string" ? metadata.updated : new Date().toISOString();
+      const fallback = metadataFromCanonicalObjectName(
+        userId,
+        file.name,
+        Number(metadata?.size ?? 0),
+        updatedAt,
+      );
+      if (fallback) canonicalFallbacks.push(fallback);
+    }
+    for (const fallback of canonicalFallbacks) {
+      if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
+    }
+    return out;
   }
 
   async selfTest(): Promise<void> {

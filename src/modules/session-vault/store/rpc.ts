@@ -7,6 +7,7 @@
 import type {
   ComposeResult,
   SessionKey,
+  SessionMetadata,
   SessionStore,
   SignedDownload,
   SignedUpload,
@@ -26,6 +27,7 @@ export type VaultRpcRequest =
   | { method: "statCanonical"; key: SessionKey }
   | { method: "writeArtifact"; key: SessionKey; name: string; text: string }
   | { method: "readArtifactText"; key: SessionKey; name: string }
+  | { method: "listSessionMetadata"; userId: string }
   | { method: "selfTest" };
 
 export type VaultRpcResult =
@@ -37,6 +39,7 @@ export type VaultRpcResult =
   | { method: "statCanonical"; value: number | null }
   | { method: "writeArtifact"; value: { ok: true } }
   | { method: "readArtifactText"; value: string | null }
+  | { method: "listSessionMetadata"; value: SessionMetadata[] }
   | { method: "selfTest"; value: { ok: true } };
 
 export interface VaultRpcError {
@@ -78,6 +81,8 @@ export async function handleVaultRpc(
       return { method: req.method, value: { ok: true } };
     case "readArtifactText":
       return { method: req.method, value: await store.readArtifactText(req.key, req.name) };
+    case "listSessionMetadata":
+      return { method: req.method, value: await store.listSessionMetadata(req.userId) };
     case "selfTest":
       await store.selfTest();
       return { method: req.method, value: { ok: true } };

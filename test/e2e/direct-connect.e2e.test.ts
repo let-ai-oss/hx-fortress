@@ -75,6 +75,7 @@ describe("hx → Fortress gateway → bucket", () => {
         readCanonicalText: async () => composed.join(""),
         writeArtifact: async () => {},
         readArtifactText: async () => null,
+        listSessionMetadata: async () => [],
         selfTest: async () => {},
       };
 
@@ -119,6 +120,90 @@ describe("hx → Fortress gateway → bucket", () => {
       const commit = (await commitRes.json()) as { ok: boolean; totalBytes: number };
       expect(commit.ok).toBe(true);
       expect(commit.totalBytes).toBe("line-1\nline-2\n".length);
+    },
+    10_000,
+  );
+
+  test(
+    "lists lightweight session metadata for the authenticated user",
+    async () => {
+      const store: SessionStore = {
+        signStagingUpload: async () => ({
+          url: "http://127.0.0.1/upload",
+          objectName: "staging/c1",
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        }),
+        readChunkText: async () => "",
+        appendChunkToCanonical: async () => ({ totalBytes: 0, componentCount: 1 }),
+        statCanonical: async () => null,
+        signCanonicalDownload: async () => ({ url: "http://127.0.0.1/download", expiresAt: "z" }),
+        readCanonicalText: async () => "",
+        writeArtifact: async () => {},
+        readArtifactText: async () => null,
+        listSessionMetadata: async (userId) => [
+          {
+            family: "codex-cli",
+            sessionId: "sess-1",
+            title: "Fix merged session list",
+            titleSource: "user",
+            bytesUploaded: 321,
+            eventCount: 14,
+            userTextCount: 4,
+            assistantCount: 5,
+            lastActivityAt: "2026-06-18T10:00:00.000Z",
+            firstSeenAt: "2026-06-18T09:00:00.000Z",
+            updatedAt: "2026-06-18T10:00:00.000Z",
+            cwd: "/work/app",
+            gitBranch: "feat/mc-2324",
+            sourcePath: "/tmp/session.jsonl",
+            repoSlug: "let-ai/let-forge",
+            deviceName: "MacBook Pro",
+          },
+        ],
+        selfTest: async () => {},
+      };
+
+      const { publicKeyB64url, token } = await mintKeyAndToken({
+        org: "org_1",
+        repo: "acme/app",
+        sub: "u1",
+      });
+
+      const port = 8100 + Math.floor(Math.random() * 1000);
+      gateway = startGatewayServer({
+        port,
+        logger: silentLogger,
+        signingKey: async () => publicKeyB64url,
+        store: () => store,
+      });
+
+      const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        sessions: [
+          {
+            family: "codex-cli",
+            sessionId: "sess-1",
+            title: "Fix merged session list",
+            titleSource: "user",
+            bytesUploaded: 321,
+            eventCount: 14,
+            userTextCount: 4,
+            assistantCount: 5,
+            lastActivityAt: "2026-06-18T10:00:00.000Z",
+            firstSeenAt: "2026-06-18T09:00:00.000Z",
+            updatedAt: "2026-06-18T10:00:00.000Z",
+            cwd: "/work/app",
+            gitBranch: "feat/mc-2324",
+            sourcePath: "/tmp/session.jsonl",
+            repoSlug: "let-ai/let-forge",
+            deviceName: "MacBook Pro",
+          },
+        ],
+      });
     },
     10_000,
   );

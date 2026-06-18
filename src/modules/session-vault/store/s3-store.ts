@@ -26,6 +26,7 @@ import {
   UploadPartCopyCommand,
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
+  ListObjectsV2Command,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -33,10 +34,16 @@ import type {
   AppendOptions,
   ComposeResult,
   SessionKey,
+  SessionMetadata,
   SessionStore,
   SignedDownload,
   SignedUpload,
 } from "./types.js";
+import {
+  metadataFromCanonicalObjectName,
+  parseSessionMetadata,
+  SESSION_METADATA_ARTIFACT,
+} from "./session-metadata.js";
 
 export interface S3StoreConfig {
   region: string;
@@ -195,6 +202,47 @@ export class S3Store implements SessionStore {
       if (isNotFound(err)) return null;
       throw err;
     }
+  }
+
+  async listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
+    const out: SessionMetadata[] = [];
+    const seen = new Set<string>();
+    const canonicalFallbacks: SessionMetadata[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: `${userId}/`,
+          ContinuationToken: token,
+        }),
+      );
+      for (const obj of page.Contents ?? []) {
+        const key = obj.Key ?? "";
+        if (key.endsWith(`/${SESSION_METADATA_ARTIFACT}`)) {
+          const raw = await this.getBytes(key).catch(() => null);
+          if (!raw) continue;
+          const parsed = parseSessionMetadata(JSON.parse(raw.toString("utf8")));
+          if (parsed) {
+            seen.add(`${parsed.family}/${parsed.sessionId}`);
+            out.push(parsed);
+          }
+          continue;
+        }
+        const fallback = metadataFromCanonicalObjectName(
+          userId,
+          key,
+          Number(obj.Size ?? 0),
+          (obj.LastModified ?? new Date()).toISOString(),
+        );
+        if (fallback) canonicalFallbacks.push(fallback);
+      }
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    for (const fallback of canonicalFallbacks) {
+      if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
+    }
+    return out;
   }
 
   async selfTest(): Promise<void> {
