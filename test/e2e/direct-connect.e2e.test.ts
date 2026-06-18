@@ -13,7 +13,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { startGatewayServer, type GatewayHandle } from "../../src/gateway/server";
 import type { SessionStore } from "../../src/modules/session-vault/store/types";
 
-const silentLogger = { info() {}, error() {} };
+const silentLogger = { info() { }, error() { } };
 
 async function mintKeyAndToken(claims: Record<string, unknown>) {
   const { publicKey, privateKey } = await generateKeyPair("EdDSA", { extractable: true });
@@ -73,10 +73,10 @@ describe("hx → Fortress gateway → bucket", () => {
         statCanonical: async () => null,
         signCanonicalDownload: async () => ({ url: `${bucketBase}/canonical`, expiresAt: "z" }),
         readCanonicalText: async () => composed.join(""),
-        writeArtifact: async () => {},
+        writeArtifact: async () => { },
         readArtifactText: async () => null,
         listSessionMetadata: async () => [],
-        selfTest: async () => {},
+        selfTest: async () => { },
       };
 
       const { publicKeyB64url, token } = await mintKeyAndToken({
@@ -138,9 +138,9 @@ describe("hx → Fortress gateway → bucket", () => {
         statCanonical: async () => null,
         signCanonicalDownload: async () => ({ url: "http://127.0.0.1/download", expiresAt: "z" }),
         readCanonicalText: async () => "",
-        writeArtifact: async () => {},
+        writeArtifact: async () => { },
         readArtifactText: async () => null,
-        listSessionMetadata: async (userId) => [
+        listSessionMetadata: async () => [
           {
             family: "codex-cli",
             sessionId: "sess-1",
@@ -160,7 +160,7 @@ describe("hx → Fortress gateway → bucket", () => {
             deviceName: "MacBook Pro",
           },
         ],
-        selfTest: async () => {},
+        selfTest: async () => { },
       };
 
       const { publicKeyB64url, token } = await mintKeyAndToken({
