@@ -26,4 +26,17 @@ describe("release workflow", () => {
     expect(workflow).toContain('gh release create "$tag" dist/hx-fortress-*');
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
   });
+
+  test("publishes GHCR tags and dispatches let-forge after a successful image push", () => {
+    expect(workflow).toContain("packages: write");
+    expect(workflow).toContain("docker/setup-buildx-action");
+    expect(workflow).toContain("docker/metadata-action");
+    expect(workflow).toContain("docker/build-push-action");
+    expect(workflow).toContain("ghcr.io/let-ai-oss/hx-fortress");
+    expect(workflow).toContain("type=raw,value=latest");
+    expect(workflow).toContain("type=raw,value=${{ steps.version.outputs.value }}");
+    expect(workflow).toContain("type=raw,value=sha-");
+    expect(workflow).toContain("LET_FORGE_REPO_DISPATCH_TOKEN");
+    expect(workflow).toContain("event-type: hx-fortress-image-published");
+  });
 });
