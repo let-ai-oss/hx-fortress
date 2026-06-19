@@ -1,49 +1,125 @@
 // Minimal interactive prompt kit for the Session Vault enroll wizard.
-// Opens /dev/tty directly for all prompts — this works even when the process
-// is exec'd with `</dev/tty` by the install script (curl … | sh), where
-// Bun compiled binaries do not reliably expose setRawMode on process.stdin.
-//
-// Cooked-mode prompts (text, confirm) use readline; raw-mode prompts (select,
-// password) drive the terminal directly. Every prompt closes its /dev/tty fd
-// on exit, so they compose in sequence.
+// Drives /dev/tty through low-level fd reads/writes because Bun's tty stream
+// wrappers can throw ENXIO when reading a manually-opened terminal.
 
-import { createInterface } from "node:readline";
-import { stdout } from "node:process";
-import { ReadStream } from "node:tty";
-import { openSync, closeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, openSync, readSync, writeSync } from "node:fs";
 
 const ESC = "\x1b";
 
+export interface PromptIo {
+  close: () => void;
+  readChar: () => string;
+  setRawMode: (enabled: boolean) => void;
+  write: (chunk: string) => void;
+}
+
 /** True when /dev/tty is accessible — the wizard only prompts when this holds. */
 export function ttyAvailable(): boolean {
-  try {
-    closeSync(openSync("/dev/tty", "r"));
-    return true;
-  } catch {
-    return false;
+  return spawnSync("sh", ["-c", "(: </dev/tty) 2>/dev/null"]).status === 0;
+}
+
+function sttyDeviceFlag(): "-f" | "-F" {
+  return process.platform === "darwin" || process.platform.endsWith("bsd") ? "-f" : "-F";
+}
+
+function runStty(args: string[]): string {
+  const result = spawnSync("stty", [sttyDeviceFlag(), "/dev/tty", ...args], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `stty ${args.join(" ")} failed`);
   }
+  return result.stdout;
 }
 
-function write(s: string): void {
-  stdout.write(s);
+function openPromptIo(): PromptIo {
+  const fd = openSync("/dev/tty", "r+");
+  let restoreState: string | null = null;
+
+  return {
+    close: () => {
+      try {
+        if (restoreState !== null) {
+          runStty([restoreState]);
+          restoreState = null;
+        }
+      } finally {
+        closeSync(fd);
+      }
+    },
+    readChar: () => {
+      const buf = Buffer.alloc(1);
+      const bytes = readSync(fd, buf, 0, 1, null);
+      if (bytes <= 0) {
+        throw new Error("Failed to read from /dev/tty");
+      }
+      return buf.toString("utf8", 0, bytes);
+    },
+    setRawMode: (enabled: boolean) => {
+      if (enabled) {
+        if (restoreState !== null) return;
+        restoreState = runStty(["-g"]).trim();
+        runStty(["raw", "-echo"]);
+        return;
+      }
+      if (restoreState === null) return;
+      runStty([restoreState]);
+      restoreState = null;
+    },
+    write: (chunk: string) => {
+      writeSync(fd, Buffer.from(chunk));
+    },
+  };
 }
 
-function openTty(): ReadStream {
-  return new ReadStream(openSync("/dev/tty", "r+"));
+function readEscapeSequence(io: PromptIo): string {
+  const next = io.readChar();
+  if (next !== "[" && next !== "O") return ESC + next;
+  return ESC + next + io.readChar();
 }
 
 /** Free-text input with an optional default (Enter accepts the default). */
 export function textPrompt(message: string, opts: { default?: string } = {}): Promise<string> {
-  const tty = openTty();
-  const rl = createInterface({ input: tty, output: stdout });
+  return runTextPrompt(message, opts, openPromptIo());
+}
+
+export async function runTextPrompt(
+  message: string,
+  opts: { default?: string } = {},
+  io: PromptIo,
+): Promise<string> {
   const suffix = opts.default ? ` [${opts.default}]` : "";
-  return new Promise((resolve) => {
-    rl.question(`${message}${suffix} `, (answer) => {
-      rl.close();
-      tty.destroy();
-      resolve(answer.trim() || opts.default || "");
-    });
-  });
+  let buf = "";
+
+  io.write(`${message}${suffix} `);
+  io.setRawMode(true);
+  try {
+    while (true) {
+      const ch = io.readChar();
+      if (ch === "\r" || ch === "\n") {
+        io.write("\r\n");
+        return buf.trim() || opts.default || "";
+      }
+      if (ch === "\x03") {
+        io.write("\r\n");
+        process.exit(130);
+      }
+      if (ch === "\x7f" || ch === "\b") {
+        if (buf.length > 0) {
+          buf = buf.slice(0, -1);
+          io.write("\b \b");
+        }
+        continue;
+      }
+      if (ch >= " " && ch !== "\x7f") {
+        buf += ch;
+        io.write(ch);
+      }
+    }
+  } finally {
+    io.close();
+  }
 }
 
 /** Yes/no with a default selected by Enter. */
@@ -58,37 +134,32 @@ export async function confirmPrompt(
 }
 
 /** Hidden input for secrets — characters are not echoed. */
-export function passwordPrompt(message: string): Promise<string> {
-  return new Promise((resolve) => {
-    write(`${message} `);
-    const tty = openTty();
-    tty.setRawMode(true);
-    tty.resume();
-    let buf = "";
-    const cleanup = (): void => {
-      tty.off("data", onData);
-      tty.setRawMode(false);
-      tty.destroy();
-    };
-    const onData = (d: Buffer): void => {
-      for (const ch of d.toString("utf8")) {
-        if (ch === "\r" || ch === "\n") {
-          cleanup();
-          write("\n");
-          resolve(buf);
-          return;
-        }
-        if (ch === "\x03") {
-          cleanup();
-          write("\n");
-          process.exit(130);
-        }
-        if (ch === "\x7f" || ch === "\b") buf = buf.slice(0, -1);
-        else buf += ch;
+export async function passwordPrompt(message: string): Promise<string> {
+  const io = openPromptIo();
+  let buf = "";
+
+  io.write(`${message} `);
+  io.setRawMode(true);
+  try {
+    while (true) {
+      const ch = io.readChar();
+      if (ch === "\r" || ch === "\n") {
+        io.write("\r\n");
+        return buf;
       }
-    };
-    tty.on("data", onData);
-  });
+      if (ch === "\x03") {
+        io.write("\r\n");
+        process.exit(130);
+      }
+      if (ch === "\x7f" || ch === "\b") {
+        buf = buf.slice(0, -1);
+        continue;
+      }
+      buf += ch;
+    }
+  } finally {
+    io.close();
+  }
 }
 
 export interface Choice<T> {
@@ -97,86 +168,89 @@ export interface Choice<T> {
   hint?: string;
 }
 
-/** Arrow-key select with optional type-to-filter and 1–9 number shortcuts.
+/** Arrow-key select with optional type-to-filter and 1-9 number shortcuts.
  *  In non-filter mode pressing a digit immediately picks that option.
  *  Returns the chosen value. */
-export function selectPrompt<T>(
+export async function selectPrompt<T>(
   message: string,
   choices: Choice<T>[],
   opts: { filter?: boolean; defaultIndex?: number } = {},
 ): Promise<T> {
-  return new Promise((resolve) => {
-    const tty = openTty();
-    let filter = "";
-    let index = opts.defaultIndex ?? 0;
-    let lastLines = 0;
+  return runSelectPrompt(message, choices, opts, openPromptIo());
+}
 
-    const visible = (): Choice<T>[] =>
-      opts.filter && filter
-        ? choices.filter((c) => c.label.toLowerCase().includes(filter.toLowerCase()))
-        : choices;
+export async function runSelectPrompt<T>(
+  message: string,
+  choices: Choice<T>[],
+  opts: { filter?: boolean; defaultIndex?: number } = {},
+  io: PromptIo,
+): Promise<T> {
+  let filter = "";
+  let index = opts.defaultIndex ?? 0;
+  let lastLines = 0;
 
-    const render = (): void => {
-      if (lastLines > 0) write(`${ESC}[${lastLines}A`);
-      write(`${ESC}[0J`);
-      const list = visible();
-      if (index >= list.length) index = Math.max(0, list.length - 1);
-      const out: string[] = [
-        `${message}${opts.filter ? (filter ? `  (filter: ${filter})` : "  (type to filter)") : ""}`,
-      ];
-      if (list.length === 0) out.push("  (no matches)");
-      list.forEach((c, i) => {
-        const prefix = i === index ? "❯ " : "  ";
-        out.push(`${prefix}${i + 1}) ${c.label}${c.hint ? `  ${c.hint}` : ""}`);
-      });
-      write(`${out.join("\n")}\n`);
-      lastLines = out.length;
-    };
+  const visible = (): Choice<T>[] =>
+    opts.filter && filter
+      ? choices.filter((c) => c.label.toLowerCase().includes(filter.toLowerCase()))
+      : choices;
 
-    const cleanup = (): void => {
-      tty.off("data", onData);
-      tty.setRawMode(false);
-      tty.destroy();
-    };
+  const render = (): void => {
+    if (lastLines > 0) {
+      io.write(`${ESC}[${lastLines}A\r`);
+      io.write(`${ESC}[0J`);
+    } else {
+      io.write(`\r\n${ESC}[0J`);
+    }
+    const list = visible();
+    if (index >= list.length) index = Math.max(0, list.length - 1);
+    const out: string[] = [
+      `${message}${opts.filter ? (filter ? `  (filter: ${filter})` : "  (type to filter)") : ""}`,
+    ];
+    if (list.length === 0) out.push("  (no matches)");
+    list.forEach((c, i) => {
+      const prefix = i === index ? "❯ " : "  ";
+      out.push(`${prefix}${i + 1}) ${c.label}${c.hint ? `  ${c.hint}` : ""}`);
+    });
+    io.write(`${out.join("\r\n")}\r\n`);
+    lastLines = out.length;
+  };
 
-    const onData = (d: Buffer): void => {
-      const s = d.toString("utf8");
+  io.setRawMode(true);
+  try {
+    render();
+    while (true) {
+      const ch = io.readChar();
+      const s = ch === ESC ? readEscapeSequence(io) : ch;
       const list = visible();
       const n = Math.max(1, list.length);
+
       if (s === `${ESC}[A` || s === `${ESC}OA`) {
         index = (index - 1 + n) % n;
         render();
-        return;
+        continue;
       }
       if (s === `${ESC}[B` || s === `${ESC}OB`) {
         index = (index + 1) % n;
         render();
-        return;
+        continue;
       }
       if (s === "\r" || s === "\n") {
         const choice = list[index];
         if (choice) {
-          cleanup();
-          write("\n");
-          resolve(choice.value);
+          io.write("\r\n");
+          return choice.value;
         }
-        return;
+        continue;
       }
       if (s === "\x03") {
-        cleanup();
-        write("\n");
+        io.write("\r\n");
         process.exit(130);
       }
-      // Digit shortcuts: only in non-filter mode to avoid conflicting with typing.
       if (!opts.filter && s >= "1" && s <= "9") {
         const pick = list[Number(s) - 1];
         if (pick) {
-          index = Number(s) - 1;
-          render();
-          cleanup();
-          write("\n");
-          resolve(pick.value);
-          return;
+          io.write("\r\n");
+          return pick.value;
         }
       }
       if (opts.filter) {
@@ -190,11 +264,8 @@ export function selectPrompt<T>(
           render();
         }
       }
-    };
-
-    tty.setRawMode(true);
-    tty.resume();
-    render();
-    tty.on("data", onData);
-  });
+    }
+  } finally {
+    io.close();
+  }
 }

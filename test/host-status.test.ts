@@ -55,6 +55,8 @@ function snapshot(
     },
     connection: {
       state: state === "running" ? "connected" : "connecting",
+      reason: null,
+      message: null,
     },
     modules: [
       {

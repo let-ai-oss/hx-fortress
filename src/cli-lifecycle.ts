@@ -104,13 +104,23 @@ export async function statusFortress(
   }
 
   dependencies.writeLine(
-    `Connection: ${connectionLabel(snapshot.connection.state)}`,
+    `Connection: ${connectionLabel(snapshot.connection)}`,
   );
+  if (snapshot.connection.reason === "invalid_credential" && snapshot.connection.message) {
+    dependencies.writeLine(`Detail:     ${snapshot.connection.message}`);
+  }
   writeModules(snapshot.modules, dependencies.writeLine);
 }
 
-function connectionLabel(state: ConnectionState): string {
-  switch (state) {
+function connectionLabel(connection: {
+  state: ConnectionState;
+  reason: string | null;
+}): string {
+  if (connection.reason === "invalid_credential") {
+    return "invalid credential";
+  }
+
+  switch (connection.state) {
     case "connected":
       return "connected";
     case "connecting":

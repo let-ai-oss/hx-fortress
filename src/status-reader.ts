@@ -78,6 +78,8 @@ function parseStatus(value: unknown): HostStatusSnapshot {
     if (!CONNECTION_STATES.has(value.connection.state as ConnectionState)) {
       throw new Error("connection.state is invalid");
     }
+    assertNullableString(value.connection.reason, "connection.reason");
+    assertNullableString(value.connection.message, "connection.message");
     if (!Array.isArray(value.modules)) {
       throw new Error("modules must be an array");
     }
@@ -94,6 +96,8 @@ function parseStatus(value: unknown): HostStatusSnapshot {
       },
       connection: {
         state: value.connection.state as ConnectionState,
+        reason: value.connection.reason as string | null,
+        message: value.connection.message as string | null,
       },
       modules,
     };

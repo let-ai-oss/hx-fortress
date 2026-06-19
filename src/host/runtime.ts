@@ -105,9 +105,7 @@ export class HostRuntime {
         updatedAt,
         error: this.error,
       },
-      connection: {
-        state: this.dependencies.connection.state(),
-      },
+      connection: this.dependencies.connection.status(),
       modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
     };
     try {
