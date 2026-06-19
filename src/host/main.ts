@@ -7,7 +7,11 @@ import {
 import type { WsCloudConnectionDeps } from "../cloud";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
-import { readVaultCredentials } from "../modules/session-vault/credentials.js";
+import {
+  readVaultCredentials,
+  writeVaultCredentials,
+} from "../modules/session-vault/credentials.js";
+import { applyHeadlessBootstrap } from "./headless-bootstrap";
 import {
   ensureCoreModulesEnabled,
   ensureDefaultConfig,
@@ -47,6 +51,18 @@ export async function runFortressHost(
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
   const signingKeyStore = new FileSigningKeyStore(paths.signingKey);
+
+  // Cloud-service run mode: materialize storage credentials + a pending
+  // enrollment from the environment before reading them off disk, so a fresh
+  // container enrolls with zero interaction. No-op when the headless env is
+  // absent (e.g. a normal operator install driven by the enroll wizard).
+  await applyHeadlessBootstrap({
+    env: process.env,
+    credentialStore,
+    pendingEnrollmentStore,
+    writeVaultCredentials,
+    logger: bus.scopeFor("fortress"),
+  });
 
   const pendingEnrollment = await pendingEnrollmentStore.load().catch(() => null);
 
