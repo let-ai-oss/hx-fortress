@@ -45,6 +45,10 @@ export class WsCloudConnection implements CloudConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private backoff: number;
+  // The pending enrollment token, consumed on the first successful enroll and
+  // then cleared so later reconnects authenticate with the saved credential
+  // (the token is one-time — re-sending a consumed one would be rejected).
+  private activeEnrollToken: string | null;
   private readonly heartbeatMs: number;
   private readonly reconnectMinMs: number;
   private readonly reconnectMaxMs: number;
@@ -55,6 +59,7 @@ export class WsCloudConnection implements CloudConnection {
     this.reconnectMaxMs = deps.reconnectMaxMs ?? RECONNECT_MAX_MS;
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS;
     this.backoff = this.reconnectMinMs;
+    this.activeEnrollToken = deps.enrollToken ?? null;
   }
 
   state(): ConnectionState {
@@ -126,7 +131,7 @@ export class WsCloudConnection implements CloudConnection {
       return;
     }
 
-    if (!cred && !this.deps.enrollToken) {
+    if (!cred && !this.activeEnrollToken) {
       this._state = "offline";
       settle(new Error("No Fortress credentials and no enrollment token — cannot connect"));
       return;
@@ -141,15 +146,20 @@ export class WsCloudConnection implements CloudConnection {
 
     ws.addEventListener("open", () => {
       this.backoff = this.reconnectMinMs;
-      if (cred) {
+      // A pending enrollment token only survives on disk until enrollment
+      // succeeds (onEnrolled clears it), so its presence is the operator's fresh
+      // (re-)bootstrap intent and must win over any leftover credentials.json
+      // from a previous install — otherwise a stale credential shadows the token
+      // and the hub rejects the stale `hello` with `invalid_credential`.
+      if (this.activeEnrollToken) {
+        send({ t: "enroll", enrollToken: this.activeEnrollToken, ...this.deps.identity });
+      } else if (cred) {
         send({
           t: "hello",
           fortressId: cred.fortressId,
           credential: cred.credential,
           ...this.deps.identity,
         });
-      } else {
-        send({ t: "enroll", enrollToken: this.deps.enrollToken!, ...this.deps.identity });
       }
       this.heartbeatTimer = setInterval(() => send({ t: "heartbeat" }), this.heartbeatMs);
     });
@@ -209,6 +219,9 @@ export class WsCloudConnection implements CloudConnection {
           return;
         }
         await this.persistSigningKey(frame.signingPublicKey);
+        // The one-time token is now spent; reconnects must authenticate with the
+        // saved credential via hello, never re-send the consumed token.
+        this.activeEnrollToken = null;
         const cred: CloudCredential = {
           orgId: frame.orgId,
           fortressId: frame.fortressId,

@@ -39,7 +39,7 @@ describe("runTextPrompt", () => {
     ).resolves.toBe("http://localhost:8787");
 
     expect(output()).toBe(
-      "Gateway public URL for direct hx uploads: [http://localhost:8787] \n",
+      "Gateway public URL for direct hx uploads: [http://localhost:8787] \r\n",
     );
     expect(rawHistory()).toEqual([true]);
   });
@@ -49,7 +49,7 @@ describe("runTextPrompt", () => {
 
     await expect(runTextPrompt("Bucket name:", {}, io)).resolves.toBe("abd");
 
-    expect(output()).toBe("Bucket name: abc\b \bd\n");
+    expect(output()).toBe("Bucket name: abc\b \bd\r\n");
   });
 });
 
@@ -70,7 +70,7 @@ describe("runSelectPrompt", () => {
     ).resolves.toBe("gcs");
 
     expect(output()).toBe(
-      "\n\x1b[0JStorage backend for session transcripts:\n❯ 1) Google Cloud Storage\n  2) Amazon S3\n\n",
+      "\r\n\x1b[0JStorage backend for session transcripts:\r\n❯ 1) Google Cloud Storage\r\n  2) Amazon S3\r\n\r\n",
     );
   });
 });

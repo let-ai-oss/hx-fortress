@@ -122,6 +122,37 @@ describe("WsCloudConnection", () => {
     await conn.close();
   });
 
+  test("prefers enroll over a stale stored credential when an enrollToken is present", async () => {
+    // A pending enrollment token only survives on disk until enrollment succeeds
+    // (onEnrolled clears it), so its presence means a leftover credentials.json
+    // from a previous install must not shadow the operator's fresh enroll intent.
+    const stale: CloudCredential = {
+      orgId: "old-org",
+      fortressId: "old-fortress",
+      credential: "stale-cred",
+    };
+    const store = makeCredentialStore(stale);
+    const conn = new WsCloudConnection({
+      dispatcher: noopDispatcher(),
+      credentialStore: store,
+      logger: silentLogger(),
+      identity: IDENTITY,
+      enrollToken: "tok-fresh",
+      ...TEST_TIMING,
+    });
+
+    await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+    expect(conn.state()).toBe("connected");
+    expect(hub.received().find((f) => f.t === "hello")).toBeUndefined();
+    const enroll = hub.received().find((f) => f.t === "enroll");
+    expect(enroll).toBeDefined();
+    if (enroll?.t !== "enroll") throw new Error("expected enroll");
+    expect(enroll.enrollToken).toBe("tok-fresh");
+
+    await conn.close();
+  });
+
   test("rejects open when no credentials and no enrollToken", async () => {
     const conn = new WsCloudConnection({
       dispatcher: noopDispatcher(),
