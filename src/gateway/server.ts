@@ -79,9 +79,19 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
     fetch: async (req) => {
       const url = new URL(req.url);
 
-      // Unauthenticated liveness probe for the customer's ingress.
+      // Unauthenticated liveness probe — proves the process is up. Used by the
+      // platform health check; returns 200 as soon as the gateway is listening,
+      // before enrollment completes, so the deploy is marked alive immediately.
       if (req.method === "GET" && url.pathname === "/healthz") {
         return json({ ok: true });
+      }
+
+      // Unauthenticated readiness probe — 200 only once the session_vault store
+      // is live (enrolled, connected, credentials valid), otherwise 503. Use
+      // this to gate traffic; /healthz to gate liveness.
+      if (req.method === "GET" && url.pathname === "/readyz") {
+        const ready = deps.store() !== null;
+        return json({ ok: ready, ready }, ready ? 200 : 503);
       }
 
       const claims = await authed(req, deps);
@@ -206,6 +216,7 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
       return json({ error: "not_found" }, 404);
     },
   });
-  deps.logger.info("gateway listening", { port: deps.port });
-  return { stop: () => server.stop(true), port: deps.port };
+  const boundPort = server.port ?? deps.port;
+  deps.logger.info("gateway listening", { port: boundPort });
+  return { stop: () => server.stop(true), port: boundPort };
 }
