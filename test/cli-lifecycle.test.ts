@@ -120,6 +120,27 @@ describe("statusFortress", () => {
       "  session_vault  running",
     ]);
   });
+
+  test("reports invalid credential failures directly", async () => {
+    const lines: string[] = [];
+    await statusFortress({
+      manager: fakeManager([{ loaded: true, pid: 1234 }]),
+      statusReader: reader(snapshot(1234, "offline", {
+        reason: "invalid_credential",
+        message: "Hub rejected connection: invalid_credential",
+      })),
+      writeLine: (line) => lines.push(line),
+    });
+
+    expect(lines).toEqual([
+      "Fortress:   running (launchd, pid 1234)",
+      "Connection: invalid credential",
+      "Detail:     Hub rejected connection: invalid_credential",
+      "Modules:",
+      "  analytics      stopped",
+      "  session_vault  running",
+    ]);
+  });
 });
 
 function deps(manager: FakeManager, lines: string[]) {
@@ -168,6 +189,7 @@ function reader(value: HostStatusSnapshot | null): StatusReader {
 function snapshot(
   pid: number,
   connectionState: HostStatusSnapshot["connection"]["state"],
+  override?: Partial<HostStatusSnapshot["connection"]>,
 ): HostStatusSnapshot {
   return {
     schemaVersion: 1,
@@ -178,7 +200,12 @@ function snapshot(
       updatedAt: "2026-06-15T10:00:01.000Z",
       error: null,
     },
-    connection: { state: connectionState },
+    connection: {
+      state: connectionState,
+      reason: null,
+      message: null,
+      ...override,
+    },
     modules: [
       { id: "session_vault", state: "running", error: null },
       { id: "analytics", state: "stopped", error: null },

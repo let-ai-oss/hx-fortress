@@ -1,7 +1,15 @@
 import { decodeFrame, encodeFrame } from "../protocol/codec";
 import type { FortressToHubFrame, HubToFortressFrame } from "../protocol/frames";
 import type { FortressIdentity } from "../protocol/identity";
-import type { CloudConnection, ConnectionState, FortressConfig, HostLogger, MessageDispatcher, ModuleLifecycleHandler } from "../host/types";
+import type {
+  CloudConnection,
+  ConnectionState,
+  ConnectionStatusSnapshot,
+  FortressConfig,
+  HostLogger,
+  MessageDispatcher,
+  ModuleLifecycleHandler,
+} from "../host/types";
 import type { CloudCredential, CredentialStore } from "./credentials";
 
 export const SUPPORTED_PROTOCOL_VERSION = 1;
@@ -30,6 +38,8 @@ export interface WsCloudConnectionDeps {
 
 export class WsCloudConnection implements CloudConnection {
   private _state: ConnectionState = "offline";
+  private _reason: string | null = null;
+  private _message: string | null = null;
   private ws: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -51,8 +61,18 @@ export class WsCloudConnection implements CloudConnection {
     return this._state;
   }
 
+  status(): ConnectionStatusSnapshot {
+    return {
+      state: this._state,
+      reason: this._reason,
+      message: this._message,
+    };
+  }
+
   open(config: FortressConfig): Promise<void> {
     this._state = "connecting";
+    this._reason = null;
+    this._message = null;
     this.stopped = false;
     this.backoff = this.reconnectMinMs;
     return new Promise<void>((resolve, reject) => {
@@ -204,6 +224,8 @@ export class WsCloudConnection implements CloudConnection {
         } catch (err) {
           this.deps.logger.error("onEnrolled hook failed", err);
         }
+        this._reason = null;
+        this._message = null;
         this._state = "connected";
         settle();
         break;
@@ -220,6 +242,8 @@ export class WsCloudConnection implements CloudConnection {
           return;
         }
         await this.persistSigningKey(frame.signingPublicKey);
+        this._reason = null;
+        this._message = null;
         this._state = "connected";
         settle();
         break;
@@ -280,9 +304,11 @@ export class WsCloudConnection implements CloudConnection {
         break;
       }
       case "fatal": {
+        this._reason = frame.reason;
+        this._message = `Hub rejected connection: ${frame.reason}`;
         this.deps.logger.error(`Fortress hub rejected connection: ${frame.reason}`);
         this.stopped = true;
-        settle(new Error(`Hub rejected connection: ${frame.reason}`));
+        settle(new Error(this._message));
         this.ws?.close();
         break;
       }

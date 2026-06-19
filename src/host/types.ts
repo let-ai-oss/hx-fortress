@@ -23,6 +23,12 @@ export interface ConfigStore {
 
 export type ConnectionState = "offline" | "connecting" | "connected" | "closing";
 
+export interface ConnectionStatusSnapshot {
+  state: ConnectionState;
+  reason: string | null;
+  message: string | null;
+}
+
 export type ModuleState = "stopped" | "starting" | "running" | "stopping" | "failed";
 
 export interface ModuleRuntimeStatus {
@@ -44,6 +50,8 @@ export interface HostStatusSnapshot {
   };
   connection: {
     state: ConnectionState;
+    reason: string | null;
+    message: string | null;
   };
   modules: ModuleRuntimeStatus[];
 }
@@ -62,6 +70,7 @@ export type ModuleStopResult =
 
 export interface CloudConnection {
   state(): ConnectionState;
+  status(): ConnectionStatusSnapshot;
   open(config: FortressConfig): Promise<void>;
   close(): Promise<void>;
 }

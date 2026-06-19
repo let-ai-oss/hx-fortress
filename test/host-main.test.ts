@@ -21,6 +21,11 @@ describe("runFortressHost", () => {
         capturedDeps = dependencies;
         capturedConnection = {
           state: () => "offline",
+          status: () => ({
+            state: "offline",
+            reason: null,
+            message: null,
+          }),
           open: async () => {},
           close: async () => {},
         };

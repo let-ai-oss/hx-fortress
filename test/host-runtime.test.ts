@@ -43,7 +43,7 @@ describe("HostRuntime", () => {
         updatedAt: "2026-06-15T10:00:01.000Z",
         error: null,
       },
-      connection: { state: "connected" },
+      connection: { state: "connected", reason: null, message: null },
       modules: [
         { id: "session_vault", state: "running", error: null },
         { id: "analytics", state: "running", error: null },
@@ -189,6 +189,11 @@ function createHarness(options: HarnessOptions = {}) {
   };
   const connection: CloudConnection = {
     state: () => connectionState,
+    status: () => ({
+      state: connectionState,
+      reason: null,
+      message: null,
+    }),
     async open() {
       events.push("connection:open");
       connectionState = "connecting";

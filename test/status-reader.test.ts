@@ -91,6 +91,8 @@ function snapshot(): HostStatusSnapshot {
     },
     connection: {
       state: "connected",
+      reason: null,
+      message: null,
     },
     modules: [
       {

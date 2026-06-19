@@ -227,6 +227,34 @@ describe("WsCloudConnection", () => {
       "Hub rejected connection: unauthorized",
     );
     expect(conn.state()).toBe("offline");
+    expect(conn.status()).toMatchObject({
+      state: "offline",
+      reason: "unauthorized",
+      message: "Hub rejected connection: unauthorized",
+    });
+
+    await rejectedHub.stop();
+  });
+
+  test("records invalid credential failures in connection status", async () => {
+    const rejectedHub = await FakeHub.create({ rejectWith: "invalid_credential" });
+    const cred: CloudCredential = { orgId: "o", fortressId: "f", credential: "c" };
+    const conn = new WsCloudConnection({
+      dispatcher: noopDispatcher(),
+      credentialStore: makeCredentialStore(cred),
+      logger: silentLogger(),
+      identity: IDENTITY,
+      ...TEST_TIMING,
+    });
+
+    await expect(conn.open({ ...CONFIG, cloud: { url: rejectedHub.url } })).rejects.toThrow(
+      "Hub rejected connection: invalid_credential",
+    );
+    expect(conn.status()).toMatchObject({
+      state: "offline",
+      reason: "invalid_credential",
+      message: "Hub rejected connection: invalid_credential",
+    });
 
     await rejectedHub.stop();
   });

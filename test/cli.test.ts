@@ -33,7 +33,7 @@ describe("runCli", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(lines).toContain("commands: enroll start stop status logs update");
+    expect(lines).toContain("commands: enroll credentials start stop status logs update");
   });
 
   test("dispatches enroll with the token and cloud URL", async () => {
@@ -55,6 +55,35 @@ describe("runCli", () => {
     expect(captured?.cloudUrl).toBe("wss://let.ai/_api/hx-gateway/vault-tunnel");
     captured?.log("wizard output");
     expect(lines).toEqual(["wizard output"]);
+  });
+
+  test("updates the saved Fortress credential", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-cli-root-"));
+    const lines: string[] = [];
+    try {
+      await mkdir(path.join(root, "identity"), { recursive: true });
+      await writeFile(
+        path.join(root, "identity", "credentials.json"),
+        `${JSON.stringify({
+          orgId: "org-1",
+          fortressId: "fortress-1",
+          credential: "vlc_old",
+        }, null, 2)}\n`,
+      );
+
+      const exitCode = await runCli(["credentials", "set", "vlc_new"], {
+        fortressRoot: root,
+        writeLine: (line) => lines.push(line),
+      });
+
+      expect(exitCode).toBe(0);
+      expect(lines).toEqual([
+        "Fortress credential updated.",
+        "Restart Fortress or reconnect it to use the new credential.",
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("rejects enroll without a token", async () => {

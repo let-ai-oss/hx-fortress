@@ -1,4 +1,5 @@
 import { startFortress, statusFortress, stopFortress } from "./cli-lifecycle";
+import { setFortressCredential } from "./cli-credentials";
 import {
   createProductionLogsDeps,
   logsCommand,
@@ -63,6 +64,15 @@ export async function runCli(
           cloudUrl,
           log: writeLine,
         });
+        return 0;
+      }
+      case "credentials": {
+        if (args[1] !== "set" || !args[2] || args[3]) {
+          throw new Error("usage: hx-fortress credentials set <key>");
+        }
+        await setFortressCredential(args[2], { root: dependencies.fortressRoot });
+        writeLine("Fortress credential updated.");
+        writeLine("Restart Fortress or reconnect it to use the new credential.");
         return 0;
       }
       case "start":
@@ -228,7 +238,7 @@ export async function runCli(
 
 function printHelp(writeLine: (line: string) => void): void {
   writeLine("hx-fortress");
-  writeLine("commands: enroll start stop status logs update");
+  writeLine("commands: enroll credentials start stop status logs update");
 }
 
 if (import.meta.main) {
