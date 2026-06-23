@@ -62,11 +62,23 @@ jobs:
             out_name="hx-fortress-${target#bun-}"
             out_path="dist/${out_name}"
 
-            echo "::group::Build $out_name"
+            # x64 artifacts compile against Bun's -baseline runtime so they run
+            # on CPUs without AVX2. The default x64 build embeds an AVX2-only
+            # runtime; on older / virtualized CPUs it warns "CPU lacks AVX
+            # support" and crashes (MC-2366). Cross-compiled binaries can't
+            # auto-detect the target CPU, so we pick the widely-compatible
+            # variant. arm64 has no such split. The asset name keeps the plain
+            # x64 suffix so the installer + download proxy are unchanged.
+            build_target="$target"
+            case "$target" in
+              *-x64) build_target="${target}-baseline" ;;
+            esac
+
+            echo "::group::Build $out_name ($build_target)"
             bun build \
               --compile \
               --minify \
-              --target="$target" \
+              --target="$build_target" \
               ./src/cli.ts \
               --outfile "$out_path"
             sha256sum "$out_path" | awk -v name="$out_name" '{print $1"  "name}' \

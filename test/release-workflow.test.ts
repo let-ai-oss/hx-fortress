@@ -16,6 +16,10 @@ describe("release workflow", () => {
 
     expect(workflow).toContain("hx-fortress-${target#bun-}");
     expect(workflow).toContain("./src/cli.ts");
+    // x64 builds must use the -baseline runtime so they run on CPUs without
+    // AVX2 (MC-2366); the build target is derived from $target at runtime.
+    expect(workflow).toContain('*-x64) build_target="${target}-baseline" ;;');
+    expect(workflow).toContain('--target="$build_target"');
     expect(workflow).toContain('> "${out_path}.sha256"');
     expect(workflow).toContain('gzip -9 -f "$out_path"');
     expect(workflow).toContain("dist/hx-fortress-version");
