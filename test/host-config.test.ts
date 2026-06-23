@@ -7,6 +7,7 @@ import {
   DEFAULT_GATEWAY_PUBLIC_URL,
   ensureCoreModulesEnabled,
   ensureDefaultConfig,
+  ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
 } from "../src/host/config";
@@ -199,6 +200,77 @@ describe("ensureDefaultConfig", () => {
     expect(stored.cloud.url).toBe("wss://original.let.ai/tunnel");
     expect(stored.gateway.publicUrl).toBe("https://original.example");
     expect(stored.modules.enabled).toEqual(["session_vault"]);
+  });
+});
+
+describe("ensureEnrollmentConfig", () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-enrollment-config-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("creates config.json when absent", async () => {
+    const paths = fortressPaths(root);
+    await ensureEnrollmentConfig(paths, "wss://fresh.let.ai/tunnel");
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored).toEqual({
+      schemaVersion: 1,
+      cloud: { url: "wss://fresh.let.ai/tunnel" },
+      gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
+      modules: { enabled: ["session_vault"] },
+    });
+  });
+
+  test("updates the enrollment target while preserving existing modules and gateway by default", async () => {
+    const paths = fortressPaths(root);
+    await writeFile(
+      paths.config,
+      JSON.stringify({
+        schemaVersion: 1,
+        cloud: { url: "wss://old.let.ai/tunnel" },
+        gateway: { publicUrl: "https://fortress.example" },
+        modules: { enabled: ["session_vault", "extra_module"] },
+      }),
+    );
+
+    await ensureEnrollmentConfig(paths, "wss://fresh.let.ai/tunnel");
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored).toEqual({
+      schemaVersion: 1,
+      cloud: { url: "wss://fresh.let.ai/tunnel" },
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: ["session_vault", "extra_module"] },
+    });
+  });
+
+  test("updates the gateway URL when the installer collected a new one", async () => {
+    const paths = fortressPaths(root);
+    await writeFile(
+      paths.config,
+      JSON.stringify({
+        schemaVersion: 1,
+        cloud: { url: "wss://old.let.ai/tunnel" },
+        gateway: { publicUrl: "https://old.example" },
+        modules: { enabled: ["session_vault"] },
+      }),
+    );
+
+    await ensureEnrollmentConfig(
+      paths,
+      "wss://fresh.let.ai/tunnel",
+      "https://fresh.example",
+    );
+
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.cloud.url).toBe("wss://fresh.let.ai/tunnel");
+    expect(stored.gateway.publicUrl).toBe("https://fresh.example");
   });
 });
 
