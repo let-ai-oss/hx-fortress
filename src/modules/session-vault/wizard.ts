@@ -25,12 +25,13 @@ import {
   type S3Credentials,
 } from "./credentials.js";
 import { buildStore } from "./store.js";
-import { FilePendingEnrollmentStore } from "../../cloud/credentials.js";
+import { FileCredentialStore, FilePendingEnrollmentStore } from "../../cloud/credentials.js";
 import {
   assertGatewayPublicUrl,
   DEFAULT_GATEWAY_PUBLIC_URL,
   ensureDefaultConfig,
   ensureGatewayPublicUrlConfigured,
+  FileConfigStore,
 } from "../../host/config.js";
 import { fortressPaths } from "../../host/paths.js";
 
@@ -52,6 +53,27 @@ export function resolveGatewayPublicUrlInput(input: string): string {
   return trimmed;
 }
 
+type Confirm = typeof confirmPrompt;
+
+export async function maybeKeepExistingVaultConfig(
+  opts: WizardOpts,
+  confirm: Confirm = confirmPrompt,
+): Promise<boolean> {
+  const paths = fortressPaths(opts.fortressRoot);
+  const config = await new FileConfigStore(paths).load().catch(() => null);
+  if (!config) return false;
+
+  const credential = await new FileCredentialStore(paths.credentials).load().catch(() => null);
+  if (!credential) return false;
+
+  opts.log(`Existing Fortress config found for ${config.cloud.url}.`);
+  const keep = await confirm("Keep the existing vault config?", { default: true });
+  if (!keep) return false;
+
+  opts.log("Keeping the existing vault config. Start Fortress to reconnect:  hx-fortress start");
+  return true;
+}
+
 export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
   const { log } = opts;
   log("");
@@ -59,6 +81,8 @@ export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
   log("Transcripts rest in the organization's own bucket, under its own keys; the");
   log("storage credentials never leave this host.");
   log("");
+
+  if (await maybeKeepExistingVaultConfig(opts)) return;
 
   const gatewayPublicUrl = await promptGatewayPublicUrl(log);
   await ensureGatewayConfig(opts, gatewayPublicUrl);

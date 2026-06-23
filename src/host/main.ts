@@ -4,7 +4,7 @@ import {
   SUPPORTED_PROTOCOL_VERSION,
   WsCloudConnection,
 } from "../cloud";
-import type { WsCloudConnectionDeps } from "../cloud";
+import type { PendingEnrollment, WsCloudConnectionDeps } from "../cloud";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
 import {
@@ -37,6 +37,20 @@ export interface HostMainDependencies {
   run?: (runtime: HostLifecycle) => Promise<void>;
 }
 
+export async function resolvePendingEnrollmentForStartup(
+  pendingEnrollmentStore: FilePendingEnrollmentStore,
+  credentialStore: FileCredentialStore,
+): Promise<PendingEnrollment | null> {
+  const pendingEnrollment = await pendingEnrollmentStore.load().catch(() => null);
+  if (!pendingEnrollment) return null;
+
+  const credential = await credentialStore.load().catch(() => null);
+  if (!credential) return pendingEnrollment;
+
+  await pendingEnrollmentStore.clear();
+  return null;
+}
+
 export async function runFortressHost(
   dependencies: HostMainDependencies = {},
 ): Promise<void> {
@@ -64,7 +78,10 @@ export async function runFortressHost(
     logger: bus.scopeFor("fortress"),
   });
 
-  const pendingEnrollment = await pendingEnrollmentStore.load().catch(() => null);
+  const pendingEnrollment = await resolvePendingEnrollmentForStartup(
+    pendingEnrollmentStore,
+    credentialStore,
+  );
 
   if (pendingEnrollment) {
     await ensureDefaultConfig(paths, pendingEnrollment.cloudUrl);
