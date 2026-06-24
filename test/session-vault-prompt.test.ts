@@ -35,11 +35,11 @@ describe("runTextPrompt", () => {
     const { io, output, rawHistory } = fakeIo("\r");
 
     await expect(
-      runTextPrompt("Gateway public URL for direct hx uploads:", { default: "http://localhost:8787" }, io),
-    ).resolves.toBe("http://localhost:8787");
+      runTextPrompt("GCP project (holds the bucket and service account):", { default: "acme-prod" }, io),
+    ).resolves.toBe("acme-prod");
 
     expect(output()).toBe(
-      "Gateway public URL for direct hx uploads: [http://localhost:8787] \r\n",
+      "GCP project (holds the bucket and service account): [acme-prod] \r\n",
     );
     expect(rawHistory()).toEqual([true]);
   });
