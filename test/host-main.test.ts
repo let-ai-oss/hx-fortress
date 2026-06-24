@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { resolvePendingEnrollmentForStartup, runFortressHost } from "../src/host/main";
-import { FileCredentialStore, FilePendingEnrollmentStore, type WsCloudConnectionDeps } from "../src/cloud";
+import { FilePendingEnrollmentStore, type WsCloudConnectionDeps } from "../src/cloud";
 import type { ModuleRegistry } from "../src/host/module-registry";
 import type { CloudConnection } from "../src/host/types";
 import { fortressPaths } from "../src/host/paths";
@@ -68,7 +68,7 @@ describe("runFortressHost", () => {
       await rm(root, { recursive: true, force: true });
     });
 
-    test("ignores and clears a stale pending enrollment when credentials already exist", async () => {
+    test("keeps a pending enrollment when credentials already exist", async () => {
       const paths = fortressPaths(root);
       await mkdir(path.dirname(paths.credentials), { recursive: true });
       await writeFile(
@@ -82,18 +82,20 @@ describe("runFortressHost", () => {
       await writeFile(
         paths.pendingEnrollment,
         JSON.stringify({
-          token: "expired-token",
+          token: "fresh-token",
           cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
         }),
       );
 
       const pendingEnrollment = await resolvePendingEnrollmentForStartup(
         new FilePendingEnrollmentStore(paths.pendingEnrollment),
-        new FileCredentialStore(paths.credentials),
       );
 
-      expect(pendingEnrollment).toBeNull();
-      await expect(readFile(paths.pendingEnrollment, "utf8")).rejects.toThrow();
+      expect(pendingEnrollment).toEqual({
+        token: "fresh-token",
+        cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+      });
+      await expect(readFile(paths.pendingEnrollment, "utf8")).resolves.toContain("fresh-token");
     });
   });
 });

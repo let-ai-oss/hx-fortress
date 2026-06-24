@@ -29,7 +29,7 @@ import { FileCredentialStore, FilePendingEnrollmentStore } from "../../cloud/cre
 import {
   assertGatewayPublicUrl,
   DEFAULT_GATEWAY_PUBLIC_URL,
-  ensureDefaultConfig,
+  ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
 } from "../../host/config.js";
@@ -70,6 +70,7 @@ export async function maybeKeepExistingVaultConfig(
   const keep = await confirm("Keep the existing vault config?", { default: true });
   if (!keep) return false;
 
+  await new FilePendingEnrollmentStore(paths.pendingEnrollment).clear();
   opts.log("Keeping the existing vault config. Start Fortress to reconnect:  hx-fortress start");
   return true;
 }
@@ -342,6 +343,6 @@ async function promptGatewayPublicUrl(log: Log): Promise<string> {
 
 async function ensureGatewayConfig(opts: WizardOpts, gatewayPublicUrl: string): Promise<void> {
   const paths = fortressPaths(opts.fortressRoot);
-  await ensureDefaultConfig(paths, opts.cloudUrl, gatewayPublicUrl);
+  await ensureEnrollmentConfig(paths, opts.cloudUrl, gatewayPublicUrl);
   await ensureGatewayPublicUrlConfigured(paths, gatewayPublicUrl);
 }

@@ -14,7 +14,7 @@ import {
 import { applyHeadlessBootstrap } from "./headless-bootstrap";
 import {
   ensureCoreModulesEnabled,
-  ensureDefaultConfig,
+  ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
   resolveGatewayConfig,
@@ -39,16 +39,8 @@ export interface HostMainDependencies {
 
 export async function resolvePendingEnrollmentForStartup(
   pendingEnrollmentStore: FilePendingEnrollmentStore,
-  credentialStore: FileCredentialStore,
 ): Promise<PendingEnrollment | null> {
-  const pendingEnrollment = await pendingEnrollmentStore.load().catch(() => null);
-  if (!pendingEnrollment) return null;
-
-  const credential = await credentialStore.load().catch(() => null);
-  if (!credential) return pendingEnrollment;
-
-  await pendingEnrollmentStore.clear();
-  return null;
+  return pendingEnrollmentStore.load().catch(() => null);
 }
 
 export async function runFortressHost(
@@ -80,11 +72,10 @@ export async function runFortressHost(
 
   const pendingEnrollment = await resolvePendingEnrollmentForStartup(
     pendingEnrollmentStore,
-    credentialStore,
   );
 
   if (pendingEnrollment) {
-    await ensureDefaultConfig(paths, pendingEnrollment.cloudUrl);
+    await ensureEnrollmentConfig(paths, pendingEnrollment.cloudUrl);
   }
   await ensureGatewayPublicUrlConfigured(paths);
   await ensureCoreModulesEnabled(paths);

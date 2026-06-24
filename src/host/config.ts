@@ -218,6 +218,28 @@ export async function ensureDefaultConfig(
   await writeConfig(paths, config);
 }
 
+/** Creates or updates config.json for an explicit enrollment attempt.
+ *  A pending enrollment is the operator's current install intent, so the cloud
+ *  URL must point at that enrollment even when an old config already exists. */
+export async function ensureEnrollmentConfig(
+  paths: FortressPaths,
+  cloudUrl: string,
+  gatewayPublicUrl?: string,
+): Promise<void> {
+  if (gatewayPublicUrl) assertGatewayPublicUrl(gatewayPublicUrl);
+
+  const existing = await new FileConfigStore(paths).load().catch(() => null);
+
+  const config: FortressConfig = {
+    schemaVersion: 1,
+    cloud: { url: cloudUrl },
+    gateway: { publicUrl: gatewayPublicUrl ?? existing?.gateway.publicUrl ?? DEFAULT_GATEWAY_PUBLIC_URL },
+    modules: existing?.modules ?? { enabled: [...CORE_MODULE_IDS] },
+  };
+
+  await writeConfig(paths, config);
+}
+
 async function writeConfig(paths: FortressPaths, config: FortressConfig): Promise<void> {
   await mkdir(path.dirname(paths.config), { recursive: true });
   const tmp = `${paths.config}.${process.pid}.tmp`;

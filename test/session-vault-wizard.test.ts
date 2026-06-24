@@ -51,6 +51,13 @@ describe("maybeKeepExistingVaultConfig", () => {
           credential: "credential-1",
         }),
       );
+      await writeFile(
+        paths.pendingEnrollment,
+        JSON.stringify({
+          token: "stale-token",
+          cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+        }),
+      );
 
       const kept = await maybeKeepExistingVaultConfig(
         {
