@@ -80,13 +80,15 @@ export async function runFortressHost(
   await ensureGatewayPublicUrlConfigured(paths);
   await ensureCoreModulesEnabled(paths);
 
-  let configuredGatewayUrl: string | undefined;
-  try {
-    configuredGatewayUrl = (await new FileConfigStore(paths).load()).gateway.publicUrl;
-  } catch {
-    configuredGatewayUrl = undefined;
-  }
-  const gateway = resolveGatewayConfig(process.env, configuredGatewayUrl);
+  // let configuredGatewayUrl: string | undefined;
+  // try {
+  //   configuredGatewayUrl = (await new FileConfigStore(paths).load()).gateway.publicUrl;
+  // } catch {
+  //   configuredGatewayUrl = undefined;
+  // }
+  const gateway = resolveGatewayConfig(process.env,
+    //configuredGatewayUrl
+  );
 
   const vaultCreds = await readVaultCredentials();
 

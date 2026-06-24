@@ -7,7 +7,7 @@ import type { ConfigStore, FortressConfig } from "./types";
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
 export class FileConfigStore implements ConfigStore {
-  constructor(private readonly paths: FortressPaths) {}
+  constructor(private readonly paths: FortressPaths) { }
 
   async load(): Promise<FortressConfig> {
     let contents: string;
@@ -125,14 +125,17 @@ export interface GatewayConfig {
   port: number;
 }
 
-/** Resolve the direct-ingest gateway settings from the environment. The gateway
- *  prefers FORTRESS_PUBLIC_URL at runtime, then the persisted config value;
+/** Resolve the direct-ingest ("fortress-direct") gateway settings. MC-2382
+ *  retired this path: by default hx uploads relay over the reverse tunnel, so the
+ *  fortress advertises no public URL and the local gateway server stays off. A
+ *  public URL is advertised ONLY when the operator opts in via FORTRESS_PUBLIC_URL
+ *  (the persisted localhost default is local-only, never advertised).
  *  FORTRESS_GATEWAY_PORT overrides the listen port. */
 export function resolveGatewayConfig(
   env: Record<string, string | undefined>,
-  persistedGatewayUrl?: string,
+  // _persistedGatewayUrl?: string,
 ): GatewayConfig {
-  const gatewayUrl = env.FORTRESS_PUBLIC_URL?.trim() || persistedGatewayUrl?.trim();
+  const gatewayUrl = env.FORTRESS_PUBLIC_URL?.trim();
   const port = Number(env.FORTRESS_GATEWAY_PORT) || DEFAULT_GATEWAY_PORT;
   return { enabled: Boolean(gatewayUrl), gatewayUrl: gatewayUrl || undefined, port };
 }

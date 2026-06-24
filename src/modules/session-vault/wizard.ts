@@ -85,8 +85,11 @@ export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
 
   if (await maybeKeepExistingVaultConfig(opts)) return;
 
-  const gatewayPublicUrl = await promptGatewayPublicUrl(log);
-  await ensureGatewayConfig(opts, gatewayPublicUrl);
+  // MC-2382: hx uploads relay over the reverse tunnel, so the fortress needs no
+  // public URL — we no longer ask for one. The gateway URL stays at its
+  // local-only default; operators wanting the dormant fortress-direct path set
+  // FORTRESS_PUBLIC_URL instead (see resolveGatewayConfig).
+  await ensureGatewayConfig(opts);
 
   const store = await selectPrompt<"gcs" | "s3">("Storage backend for session transcripts:", [
     { label: "Google Cloud Storage", value: "gcs" },
@@ -328,20 +331,10 @@ function indexOf(list: { value: string }[], value: string | null): number {
   return i >= 0 ? i : 0;
 }
 
-async function promptGatewayPublicUrl(log: Log): Promise<string> {
-  const input = await textPrompt(
-    "Gateway public URL for direct hx uploads (Enter to use this machine's localhost default):",
-    { default: DEFAULT_GATEWAY_PUBLIC_URL },
-  );
-  try {
-    return resolveGatewayPublicUrlInput(input);
-  } catch (error) {
-    log(error instanceof Error ? error.message : String(error));
-    process.exit(2);
-  }
-}
-
-async function ensureGatewayConfig(opts: WizardOpts, gatewayPublicUrl: string): Promise<void> {
+async function ensureGatewayConfig(
+  opts: WizardOpts,
+  gatewayPublicUrl: string = DEFAULT_GATEWAY_PUBLIC_URL,
+): Promise<void> {
   const paths = fortressPaths(opts.fortressRoot);
   await ensureEnrollmentConfig(paths, opts.cloudUrl, gatewayPublicUrl);
   await ensureGatewayPublicUrlConfigured(paths, gatewayPublicUrl);
