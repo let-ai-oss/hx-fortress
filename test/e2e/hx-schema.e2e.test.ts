@@ -8,6 +8,11 @@ import { makeMigrationExec, startCluster, type Cluster } from "./_cluster";
 // (first run downloads + extracts the zonky binaries).
 const RUN = process.env.FORTRESS_PG_E2E === "1";
 
+// NOTE: these tests share ONE booted cluster and run in source order. Earlier
+// tests seed rows (user `u-sess`, session `s1`, a seq-0 turn) that later tests
+// read and depend on — do not reorder them or insert a mutating test in the
+// middle. Each behavioural feature still owns its assertion; only the fixture
+// rows are shared.
 describe.if(RUN)("hx schema migrations", () => {
   let cluster: Cluster;
   beforeAll(async () => {

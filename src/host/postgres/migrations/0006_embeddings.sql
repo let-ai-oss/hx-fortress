@@ -18,3 +18,7 @@ CREATE TABLE hx.embeddings (
 );
 CREATE INDEX hx_embeddings_owner_idx ON hx.embeddings (owner_kind, owner_id);
 CREATE INDEX hx_embeddings_hnsw_idx ON hx.embeddings USING hnsw (embedding vector_cosine_ops);
+
+-- This table is created after 0005's blanket grant, so grant the read-only
+-- role explicitly rather than relying on ALTER DEFAULT PRIVILEGES semantics.
+GRANT SELECT ON hx.embeddings TO hx_readonly;

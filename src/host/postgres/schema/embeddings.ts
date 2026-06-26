@@ -5,7 +5,7 @@ import { hxSchema } from "./namespace";
 
 // NOTE: deliberately NOT re-exported from ./index (the drizzle-kit generate
 // barrel). pgvector isn't in the stock zonky bundle, so this table ships via a
-// hand-authored, gated migration (0900_embeddings) rather than `generate`.
+// hand-authored, gated migration (0006_embeddings) rather than `generate`.
 // The Drizzle definition here is for query typing once vectors are populated.
 
 export type HxEmbeddingOwnerKind = "turn" | "session_summary";
