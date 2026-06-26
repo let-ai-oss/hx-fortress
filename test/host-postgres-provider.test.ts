@@ -22,6 +22,9 @@ describe("embedded provider", () => {
       ensureDbSchema: async () => {
         order.push("schema");
       },
+      migrate: async () => {
+        order.push("migrate");
+      },
       stopServer: async () => {
         order.push("stop");
       },
@@ -30,7 +33,7 @@ describe("embedded provider", () => {
     expect(provider.status().phase).toBe("ready");
     expect(provider.isReady()).toBe(true);
     expect(provider.dsn()).toBe(DSN);
-    expect(order).toEqual(["acquire", "cluster", "start", "schema"]);
+    expect(order).toEqual(["acquire", "cluster", "start", "schema", "migrate"]);
     await provider.stop();
     expect(order.at(-1)).toBe("stop");
   });
@@ -44,6 +47,7 @@ describe("embedded provider", () => {
       ensureCluster: async () => {},
       startServer: async () => {},
       ensureDbSchema: async () => {},
+      migrate: async () => {},
       stopServer: async () => {},
     });
     await provider.start();

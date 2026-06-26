@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { buildPostgresProvider } from "../../src/host/postgres";
+import { makeMigrationExec } from "../../src/host/postgres/sql-exec";
 import { fortressPaths } from "../../src/host/paths";
-import type { MigrationExec } from "../../src/host/postgres/migrate";
 import type { FortressConfig } from "../../src/host/types";
+
+export { makeMigrationExec };
 
 const config: FortressConfig = {
   schemaVersion: 1,
@@ -44,30 +46,6 @@ export async function startCluster(): Promise<Cluster> {
     stop: async () => {
       await provider.stop();
       await rm(root, { recursive: true, force: true });
-    },
-  };
-}
-
-/** A MigrationExec over a DSN. `exec` uses simple-query mode so multi-statement
- *  migration files (and BEGIN/COMMIT wrappers) run in a single round-trip. */
-export function makeMigrationExec(dsn: string): MigrationExec {
-  return {
-    async exec(statement) {
-      const client = new Bun.SQL(dsn);
-      try {
-        await client.unsafe(statement).simple();
-      } finally {
-        await client.end();
-      }
-    },
-    async query<T = Record<string, unknown>>(statement: string): Promise<T[]> {
-      const client = new Bun.SQL(dsn);
-      try {
-        const rows = await client.unsafe(statement);
-        return rows as T[];
-      } finally {
-        await client.end();
-      }
     },
   };
 }

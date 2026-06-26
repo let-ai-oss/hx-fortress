@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { buildPostgresProvider } from "../../src/host/postgres";
+import { makeMigrationExec } from "../../src/host/postgres/sql-exec";
 import { fortressPaths } from "../../src/host/paths";
 import type { FortressConfig } from "../../src/host/types";
 
@@ -30,7 +31,13 @@ describe.if(RUN)("postgres e2e", () => {
       const first = buildPostgresProvider({ env: {}, config, paths });
       await first.start();
       expect(first.status().phase).toBe("ready");
-      expect(first.dsn()).toContain("hx-db");
+      const dsn = first.dsn();
+      expect(dsn).toContain("hx-db");
+      // Boot must have applied the hx migrations: a base table is queryable.
+      const rows = await makeMigrationExec(dsn ?? "").query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM hx.sessions",
+      );
+      expect(rows[0].n).toBe(0);
       await first.stop();
 
       const second = buildPostgresProvider({ env: {}, config, paths });

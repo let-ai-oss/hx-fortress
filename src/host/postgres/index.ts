@@ -5,9 +5,12 @@ import { acquireBinaries } from "./acquire";
 import { detectMusl, resolveZonkyClassifier } from "./classifier";
 import { ensureCluster, ensureDatabaseAndSchema, PG_DATABASE, PG_ROLE, type ClusterSql } from "./cluster";
 import { makeExtractor } from "./extract";
+import { runMigrations } from "./migrate";
+import { migrations } from "./migrations/manifest";
 import { createEmbeddedPostgres, createExternalPostgres } from "./provider";
 import { resolvePostgresConfig } from "./resolve";
 import { defaultSpawner, type Spawner } from "./spawn";
+import { makeMigrationExec } from "./sql-exec";
 import type { fortressPaths } from "../paths";
 import type { FortressConfig, PostgresProvider } from "../types";
 
@@ -26,7 +29,9 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
 
   if (resolved.mode === "external" && resolved.externalUrl) {
     const url = resolved.externalUrl;
-    return createExternalPostgres(url, () => probe(url));
+    return createExternalPostgres(url, () => probe(url), async () => {
+      await runMigrations(makeMigrationExec(url), migrations);
+    });
   }
 
   const classifier = resolveZonkyClassifier(
@@ -92,6 +97,9 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       await spawner.run([path.join(binDir, "pg_ctl"), "-D", dataDir, "-m", "fast", "stop"]);
     },
     ensureDbSchema: () => ensureDatabaseAndSchema(sql),
+    migrate: async () => {
+      await runMigrations(makeMigrationExec(dsnFor(PG_DATABASE)), migrations);
+    },
   });
 }
 

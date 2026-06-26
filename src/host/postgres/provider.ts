@@ -11,6 +11,8 @@ export interface EmbeddedDeps {
   stopServer: (binDir: string) => Promise<void>;
   /** Create the hx-db database and hx schema over a live connection. */
   ensureDbSchema: () => Promise<void>;
+  /** Apply the hx schema migrations over a live connection. */
+  migrate: () => Promise<void>;
   /** Connection string handed to modules once ready. */
   dsn: string;
 }
@@ -29,6 +31,7 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
         await deps.ensureCluster(binDir);
         await deps.startServer(binDir);
         await deps.ensureDbSchema();
+        await deps.migrate();
         phase = "ready";
         reason = null;
       } catch (error) {
@@ -61,6 +64,7 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
 export function createExternalPostgres(
   url: string,
   probeReady: () => Promise<boolean>,
+  migrate?: () => Promise<void>,
 ): PostgresProvider {
   let phase: PostgresPhase = "initializing";
   let reason: string | null = null;
@@ -68,6 +72,7 @@ export function createExternalPostgres(
     async start() {
       try {
         if (!(await probeReady())) throw new Error("external postgres unreachable");
+        if (migrate) await migrate();
         phase = "ready";
         reason = null;
       } catch (error) {
