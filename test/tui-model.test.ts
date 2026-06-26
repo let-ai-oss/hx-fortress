@@ -146,6 +146,7 @@ function runningSnapshot(): HostStatusSnapshot {
       reason: null,
       message: null,
     },
+    postgres: { phase: "ready", reason: null },
     modules: [
       {
         id: "session_vault",

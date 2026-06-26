@@ -206,6 +206,7 @@ function snapshot(
       message: null,
       ...override,
     },
+    postgres: { phase: "ready", reason: null },
     modules: [
       { id: "session_vault", state: "running", error: null },
       { id: "analytics", state: "stopped", error: null },

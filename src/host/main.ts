@@ -13,6 +13,7 @@ import {
 } from "../modules/session-vault/credentials.js";
 import { applyHeadlessBootstrap } from "./headless-bootstrap";
 import {
+  DEFAULT_GATEWAY_PUBLIC_URL,
   ensureCoreModulesEnabled,
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
@@ -23,6 +24,7 @@ import { FileLogSink } from "./file-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
+import { buildPostgresProvider } from "./postgres";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
@@ -90,6 +92,21 @@ export async function runFortressHost(
     //configuredGatewayUrl
   );
 
+  // Read the persisted config (if any) only to pick up postgres overrides;
+  // a fresh install has no config.json yet, so fall back to defaults. The
+  // runtime reloads and validates the full config itself on start().
+  const hostConfig = await new FileConfigStore(paths).load().catch(() => null);
+  const postgres = buildPostgresProvider({
+    env: process.env,
+    config: hostConfig ?? {
+      schemaVersion: 1,
+      cloud: { url: "" },
+      gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
+      modules: { enabled: [] },
+    },
+    paths,
+  });
+
   const vaultCreds = await readVaultCredentials();
 
   const connectionDependencies: WsCloudConnectionDeps = {
@@ -119,6 +136,7 @@ export async function runFortressHost(
   const runtime = new HostRuntime({
     configStore: new FileConfigStore(paths),
     connection,
+    postgres,
     supervisor: registry,
     statusStore: new FileStatusStore(paths),
     logger,
@@ -142,6 +160,7 @@ export async function runFortressHost(
       logger: bus.scopeFor("gateway"),
       signingKey: () => signingKeyStore.load(),
       store: () => vaultModule.getStore(),
+      postgresReady: () => postgres.isReady(),
     });
   }
 
