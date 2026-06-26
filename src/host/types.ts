@@ -4,6 +4,13 @@ export interface MessageDispatcher {
   dispatch(data: MsgData): Promise<MsgReply | undefined>;
 }
 
+export interface FortressPostgresConfig {
+  version?: string;
+  binariesUrl?: string;
+  dataDir?: string;
+  externalUrl?: string;
+}
+
 export interface FortressConfig {
   schemaVersion: 1;
   cloud: {
@@ -15,6 +22,7 @@ export interface FortressConfig {
   modules: {
     enabled: string[];
   };
+  postgres?: FortressPostgresConfig;
 }
 
 export interface ConfigStore {
