@@ -22,6 +22,13 @@
       "when": 1782503358124,
       "tag": "0002_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782503467813,
+      "tag": "0003_transcript",
+      "breakpoints": true
     }
   ]
 }

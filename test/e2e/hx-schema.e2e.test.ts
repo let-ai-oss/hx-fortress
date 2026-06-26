@@ -83,4 +83,40 @@ describe.if(RUN)("hx schema migrations", () => {
     expect(rows[0].event_count).toBe(0);
     expect(Number(rows[0].bytes_uploaded)).toBe(0);
   });
+
+  test("turn full-text and trigram search both work", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    await db.exec(
+      "INSERT INTO hx.turns (session_id, seq, role, text) " +
+        "SELECT id, 0, 'assistant', 'the quick brown fox' FROM hx.sessions WHERE session_id = 's1'",
+    );
+    const fts = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM hx.turns WHERE text_tsv @@ plainto_tsquery('english','quick fox')",
+    );
+    expect(fts[0].n).toBe(1);
+    // Substring search — the case the gin_trgm_ops index on `text` accelerates.
+    const sub = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM hx.turns WHERE text ILIKE '%brown%'",
+    );
+    expect(sub[0].n).toBe(1);
+    // similarity() proves pg_trgm itself is wired (function is extension-provided).
+    const sim = await db.query<{ ok: boolean }>(
+      "SELECT similarity('the quick brown fox','quick brown fix') > 0.3 AS ok",
+    );
+    expect(sim[0].ok).toBe(true);
+  });
+
+  test("NULLS NOT DISTINCT blocks a duplicate parent-lane seq", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    let threw = false;
+    try {
+      await db.exec(
+        "INSERT INTO hx.turns (session_id, seq, role, text) " +
+          "SELECT id, 0, 'user', 'dup' FROM hx.sessions WHERE session_id = 's1'",
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
 });
