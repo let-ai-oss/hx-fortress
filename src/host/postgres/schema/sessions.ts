@@ -1,2 +1,2 @@
-import { hxSchema } from "./index";
+import { hxSchema } from "./namespace";
 void hxSchema;

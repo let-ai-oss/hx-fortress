@@ -25,9 +25,19 @@ export async function runMigrations(db: MigrationExec, migrations: Migration[]):
   const applied = new Set(rows.map((r) => r.name));
   const ran: string[] = [];
   for (const migration of migrations) {
+    // Names are interpolated into the tracking INSERT below; constrain them to
+    // the journal-tag charset so a manifest entry can never inject SQL.
+    if (!/^[0-9a-z_]+$/.test(migration.name)) {
+      throw new Error(`invalid migration name: ${migration.name}`);
+    }
     if (applied.has(migration.name)) continue;
+    // A multi-statement simple-query batch runs as one implicit transaction in
+    // Postgres (no explicit BEGIN/COMMIT — Bun.SQL rejects those on a pooled
+    // connection). So the migration and its tracking row commit or roll back
+    // together. Every statement we emit is transaction-safe (no CREATE INDEX
+    // CONCURRENTLY / CREATE DATABASE / VACUUM).
     await db.exec(
-      `BEGIN;\n${migration.sql}\nINSERT INTO hx.schema_migrations (name) VALUES ('${migration.name}');\nCOMMIT;`,
+      `${migration.sql}\nINSERT INTO hx.schema_migrations (name) VALUES ('${migration.name}');`,
     );
     ran.push(migration.name);
   }

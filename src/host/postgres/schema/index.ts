@@ -1,10 +1,8 @@
-import { pgSchema } from "drizzle-orm/pg-core";
+// Aggregating barrel for the hx Drizzle schema. The `hx` namespace lives in
+// ./namespace (no re-exports there) so group modules import it without a
+// circular dependency through this file.
+export { hxSchema } from "./namespace";
 
-/** Every hx table is namespaced under the `hx` schema. */
-export const hxSchema = pgSchema("hx");
-
-// Group modules re-export their tables; index.ts aggregates them for the
-// post-migration parity assertion (every Drizzle table must exist in the DB).
 export * from "./dimensions";
 export * from "./sessions";
 export * from "./transcript";
