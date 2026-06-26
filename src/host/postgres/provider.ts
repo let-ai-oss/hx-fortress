@@ -1,30 +1,34 @@
-import { PG_DATABASE, PG_ROLE } from "./cluster";
 import type { PostgresPhase, PostgresProvider } from "../types";
 
 export interface EmbeddedDeps {
+  /** Download/extract the binaries; resolves to the `bin/` directory. */
   acquire: () => Promise<string>;
+  /** Run `initdb` if the data directory is fresh. */
   ensureCluster: (binDir: string) => Promise<void>;
-  ensureDbSchema: (binDir: string) => Promise<void>;
-  launch: (binDir: string) => { kill: () => void; exited: Promise<number> };
-  probeReady: () => Promise<boolean>;
-  socketDir: string;
+  /** Start the server and block until it accepts connections (`pg_ctl -w`). */
+  startServer: (binDir: string) => Promise<void>;
+  /** Stop the server (`pg_ctl -m fast stop`). */
+  stopServer: (binDir: string) => Promise<void>;
+  /** Create the hx-db database and hx schema over a live connection. */
+  ensureDbSchema: () => Promise<void>;
+  /** Connection string handed to modules once ready. */
+  dsn: string;
 }
 
 export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
   let phase: PostgresPhase = "acquiring";
   let reason: string | null = null;
-  let handle: { kill: () => void; exited: Promise<number> } | null = null;
+  let binDir: string | null = null;
 
   return {
     async start() {
       try {
         phase = "acquiring";
-        const binDir = await deps.acquire();
+        binDir = await deps.acquire();
         phase = "initializing";
         await deps.ensureCluster(binDir);
-        handle = deps.launch(binDir);
-        await deps.ensureDbSchema(binDir);
-        if (!(await deps.probeReady())) throw new Error("postgres did not become ready");
+        await deps.startServer(binDir);
+        await deps.ensureDbSchema();
         phase = "ready";
         reason = null;
       } catch (error) {
@@ -33,9 +37,14 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
       }
     },
     async stop() {
-      handle?.kill();
-      if (handle) await handle.exited.catch(() => 0);
-      handle = null;
+      if (binDir) {
+        try {
+          await deps.stopServer(binDir);
+        } catch {
+          // best-effort shutdown; nothing else to do on the way down
+        }
+      }
+      binDir = null;
     },
     status() {
       return { phase, reason };
@@ -44,9 +53,7 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
       return phase === "ready";
     },
     dsn() {
-      return phase === "ready"
-        ? `postgresql://${PG_ROLE}@/${PG_DATABASE}?host=${deps.socketDir}`
-        : null;
+      return phase === "ready" ? deps.dsn : null;
     },
   };
 }

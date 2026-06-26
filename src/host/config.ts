@@ -94,6 +94,12 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
     if (typeof field !== "string") throw new Error(`postgres.${key} must be a string`);
     result[key] = field;
   }
+  if (typeof value.port !== "undefined") {
+    if (typeof value.port !== "number" || !Number.isInteger(value.port)) {
+      throw new Error("postgres.port must be an integer");
+    }
+    result.port = value.port;
+  }
   return result;
 }
 

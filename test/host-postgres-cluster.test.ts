@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { ensureCluster, ensureDatabaseAndSchema } from "../src/host/postgres/cluster";
+import {
+  ensureCluster,
+  ensureDatabaseAndSchema,
+  type ClusterSql,
+} from "../src/host/postgres/cluster";
 import type { Spawner } from "../src/host/postgres/spawn";
 
 function recorder(results: Array<{ code: number }> = []): {
@@ -24,6 +28,19 @@ function recorder(results: Array<{ code: number }> = []): {
   };
 }
 
+function fakeSql(present: boolean): { sql: ClusterSql; runs: Array<[string, string]> } {
+  const runs: Array<[string, string]> = [];
+  return {
+    runs,
+    sql: {
+      run: async (database, statement) => {
+        runs.push([database, statement]);
+      },
+      exists: async () => present,
+    },
+  };
+}
+
 describe("cluster", () => {
   let root: string;
   beforeEach(async () => {
@@ -35,7 +52,7 @@ describe("cluster", () => {
 
   test("runs initdb when the data dir is empty", async () => {
     const { spawner, calls } = recorder();
-    await ensureCluster({ spawner, binDir: "/bin", dataDir: path.join(root, "pgdata"), socketDir: "/sock" });
+    await ensureCluster({ spawner, binDir: "/bin", dataDir: path.join(root, "pgdata") });
     expect(calls[0][0]).toBe("/bin/initdb");
     expect(calls[0]).toContain("--auth=trust");
     expect(calls[0]).toContain("--username=fortress");
@@ -45,26 +62,21 @@ describe("cluster", () => {
     const dataDir = path.join(root, "pgdata");
     await Bun.write(path.join(dataDir, "PG_VERSION"), "18\n");
     const { spawner, calls } = recorder();
-    await ensureCluster({ spawner, binDir: "/bin", dataDir, socketDir: "/sock" });
+    await ensureCluster({ spawner, binDir: "/bin", dataDir });
     expect(calls.length).toBe(0);
   });
 
-  test("creates database (when absent) and schema with psql", async () => {
-    // First call = existence probe returns code 1 (absent) → CREATE DATABASE runs, then CREATE SCHEMA.
-    const { spawner, calls } = recorder([{ code: 1 }]);
-    await ensureDatabaseAndSchema({ spawner, binDir: "/bin", dataDir: "/d", socketDir: "/sock" });
-    const joined = calls.map((c) => c.join(" "));
-    expect(joined.some((c) => c.includes("/bin/psql"))).toBe(true);
-    expect(joined.some((c) => c.includes('CREATE DATABASE "hx-db"'))).toBe(true);
-    expect(joined.some((c) => c.includes("CREATE SCHEMA IF NOT EXISTS hx"))).toBe(true);
+  test("creates database when absent, then schema", async () => {
+    const { sql, runs } = fakeSql(false);
+    await ensureDatabaseAndSchema(sql);
+    expect(runs[0]).toEqual(["postgres", 'CREATE DATABASE "hx-db"']);
+    expect(runs[1]).toEqual(["hx-db", "CREATE SCHEMA IF NOT EXISTS hx"]);
   });
 
-  test("skips CREATE DATABASE when it already exists", async () => {
-    // existence probe returns code 0 (present) → no CREATE DATABASE, still CREATE SCHEMA.
-    const { spawner, calls } = recorder([{ code: 0 }]);
-    await ensureDatabaseAndSchema({ spawner, binDir: "/bin", dataDir: "/d", socketDir: "/sock" });
-    const joined = calls.map((c) => c.join(" "));
-    expect(joined.some((c) => c.includes("CREATE DATABASE"))).toBe(false);
-    expect(joined.some((c) => c.includes("CREATE SCHEMA IF NOT EXISTS hx"))).toBe(true);
+  test("skips database creation when it already exists, still ensures schema", async () => {
+    const { sql, runs } = fakeSql(true);
+    await ensureDatabaseAndSchema(sql);
+    expect(runs.some(([, s]) => s.includes("CREATE DATABASE"))).toBe(false);
+    expect(runs).toContainEqual(["hx-db", "CREATE SCHEMA IF NOT EXISTS hx"]);
   });
 });

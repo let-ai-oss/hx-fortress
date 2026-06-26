@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { acquireBinaries } from "./acquire";
 import { detectMusl, resolveZonkyClassifier } from "./classifier";
-import { ensureCluster, ensureDatabaseAndSchema } from "./cluster";
+import { ensureCluster, ensureDatabaseAndSchema, PG_DATABASE, PG_ROLE, type ClusterSql } from "./cluster";
 import { makeExtractor } from "./extract";
 import { createEmbeddedPostgres, createExternalPostgres } from "./provider";
 import { resolvePostgresConfig } from "./resolve";
@@ -26,7 +26,7 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
 
   if (resolved.mode === "external" && resolved.externalUrl) {
     const url = resolved.externalUrl;
-    return createExternalPostgres(url, () => probeExternal(url));
+    return createExternalPostgres(url, () => probe(url));
   }
 
   const classifier = resolveZonkyClassifier(
@@ -35,17 +35,35 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
     detectMusl(),
   );
   const versionDir = deps.paths.postgresVersionDir(resolved.version);
-  const binDir = path.join(versionDir, "bin");
+  const dataDir = resolved.dataDir;
   const socketDir = deps.paths.postgresSocket;
-  const cluster = (resolvedBinDir: string) => ({
-    spawner,
-    binDir: resolvedBinDir,
-    dataDir: resolved.dataDir,
-    socketDir,
-  });
+  const port = resolved.port;
+  // Loopback only: the server binds 127.0.0.1, never an external interface.
+  const dsnFor = (database: string) =>
+    `postgresql://${PG_ROLE}@127.0.0.1:${port}/${database}`;
+
+  const sql: ClusterSql = {
+    run: async (database, statement) => {
+      const client = new Bun.SQL(dsnFor(database));
+      try {
+        await client.unsafe(statement);
+      } finally {
+        await client.end();
+      }
+    },
+    exists: async (database, query) => {
+      const client = new Bun.SQL(dsnFor(database));
+      try {
+        const rows = await client.unsafe(query);
+        return Array.isArray(rows) && rows.length > 0;
+      } finally {
+        await client.end();
+      }
+    },
+  };
 
   return createEmbeddedPostgres({
-    socketDir,
+    dsn: dsnFor(PG_DATABASE),
     acquire: () =>
       acquireBinaries({
         fetchImpl: fetch,
@@ -56,46 +74,32 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
         version: resolved.version,
         binariesUrl: resolved.binariesUrl,
       }),
-    ensureCluster: async (resolvedBinDir) => {
+    ensureCluster: (binDir) => ensureCluster({ spawner, binDir, dataDir }),
+    startServer: async (binDir) => {
       await mkdir(socketDir, { recursive: true });
-      await ensureCluster(cluster(resolvedBinDir));
+      const { code, stderr } = await spawner.run([
+        path.join(binDir, "pg_ctl"),
+        "-D",
+        dataDir,
+        "-w",
+        "-o",
+        `-k ${socketDir} -p ${port} -c listen_addresses=127.0.0.1`,
+        "start",
+      ]);
+      if (code !== 0) throw new Error(`pg_ctl start failed: ${stderr.trim()}`);
     },
-    ensureDbSchema: (resolvedBinDir) => ensureDatabaseAndSchema(cluster(resolvedBinDir)),
-    launch: (resolvedBinDir) => launchPostgres(resolvedBinDir, resolved.dataDir, socketDir),
-    probeReady: () => probeSocket(spawner, binDir, socketDir),
+    stopServer: async (binDir) => {
+      await spawner.run([path.join(binDir, "pg_ctl"), "-D", dataDir, "-m", "fast", "stop"]);
+    },
+    ensureDbSchema: () => ensureDatabaseAndSchema(sql),
   });
 }
 
-function launchPostgres(
-  binDir: string,
-  dataDir: string,
-  socketDir: string,
-): { kill: () => void; exited: Promise<number> } {
-  const proc = Bun.spawn(
-    [path.join(binDir, "postgres"), "-D", dataDir, "-k", socketDir, "-c", "listen_addresses="],
-    { stdout: "inherit", stderr: "inherit" },
-  );
-  return { kill: () => proc.kill("SIGTERM"), exited: proc.exited };
-}
-
-async function probeSocket(
-  spawner: Spawner,
-  binDir: string,
-  socketDir: string,
-): Promise<boolean> {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const res = await spawner.run([path.join(binDir, "pg_isready"), "-h", socketDir]);
-    if (res.code === 0) return true;
-    await Bun.sleep(500);
-  }
-  return false;
-}
-
-async function probeExternal(url: string): Promise<boolean> {
+async function probe(url: string): Promise<boolean> {
   try {
-    const sql = new Bun.SQL(url);
-    await sql`SELECT 1`;
-    await sql.end();
+    const client = new Bun.SQL(url);
+    await client`SELECT 1`;
+    await client.end();
     return true;
   } catch {
     return false;

@@ -8,6 +8,7 @@ export interface FortressPostgresConfig {
   version?: string;
   binariesUrl?: string;
   dataDir?: string;
+  port?: number;
   externalUrl?: string;
 }
 

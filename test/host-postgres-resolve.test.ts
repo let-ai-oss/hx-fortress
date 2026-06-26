@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { parseFortressConfig } from "../src/host/config";
 import {
   DEFAULT_PG_BINARIES_URL,
+  DEFAULT_PG_PORT,
   DEFAULT_PG_VERSION,
   resolvePostgresConfig,
 } from "../src/host/postgres/resolve";
@@ -35,8 +36,19 @@ describe("postgres config", () => {
       version: DEFAULT_PG_VERSION,
       binariesUrl: DEFAULT_PG_BINARIES_URL,
       dataDir: "/data/pgdata",
+      port: DEFAULT_PG_PORT,
       externalUrl: null,
     });
+  });
+
+  test("resolves the port from env over config over default", () => {
+    expect(resolvePostgresConfig({}, base, "/d").port).toBe(DEFAULT_PG_PORT);
+    expect(
+      resolvePostgresConfig({}, { ...base, postgres: { port: 5555 } }, "/d").port,
+    ).toBe(5555);
+    expect(
+      resolvePostgresConfig({ FORTRESS_PG_PORT: "6000" }, { ...base, postgres: { port: 5555 } }, "/d").port,
+    ).toBe(6000);
   });
 
   test("env overrides config which overrides defaults", () => {

@@ -2,12 +2,16 @@ import type { FortressConfig } from "../types";
 
 export const DEFAULT_PG_VERSION = "18.4.0";
 export const DEFAULT_PG_BINARIES_URL = "https://repo1.maven.org/maven2";
+// Non-default port: 5432 frequently collides with a system Postgres. The
+// embedded server binds 127.0.0.1 only (loopback), never an external interface.
+export const DEFAULT_PG_PORT = 54329;
 
 export interface ResolvedPostgresConfig {
   mode: "embedded" | "external";
   version: string;
   binariesUrl: string;
   dataDir: string;
+  port: number;
   externalUrl: string | null;
 }
 
@@ -23,8 +27,22 @@ export function resolvePostgresConfig(
     version: pick(env.FORTRESS_PG_VERSION, persisted.version, DEFAULT_PG_VERSION),
     binariesUrl: pick(env.FORTRESS_PG_BINARIES_URL, persisted.binariesUrl, DEFAULT_PG_BINARIES_URL),
     dataDir: pick(env.FORTRESS_PG_DATA, persisted.dataDir, defaultDataDir),
+    port: pickPort(env.FORTRESS_PG_PORT, persisted.port, DEFAULT_PG_PORT),
     externalUrl,
   };
+}
+
+function pickPort(
+  envValue: string | undefined,
+  configValue: number | undefined,
+  fallback: number,
+): number {
+  const fromEnv = Number(envValue?.trim());
+  if (envValue?.trim() && Number.isInteger(fromEnv) && fromEnv > 0) return fromEnv;
+  if (typeof configValue === "number" && Number.isInteger(configValue) && configValue > 0) {
+    return configValue;
+  }
+  return fallback;
 }
 
 function pick<T extends string | null>(

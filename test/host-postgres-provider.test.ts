@@ -2,39 +2,49 @@ import { describe, expect, test } from "bun:test";
 
 import { createEmbeddedPostgres, createExternalPostgres } from "../src/host/postgres/provider";
 
-function fakeLaunch() {
-  let resolveExit: (code: number) => void = () => {};
-  const exited = new Promise<number>((r) => (resolveExit = r));
-  return { kill: () => resolveExit(0), exited };
-}
+const DSN = "postgresql://fortress@127.0.0.1:54329/hx-db";
 
 describe("embedded provider", () => {
-  test("progresses to ready and exposes a socket DSN", async () => {
+  test("progresses to ready and exposes the dsn", async () => {
+    const order: string[] = [];
     const provider = createEmbeddedPostgres({
-      acquire: async () => "/bin",
-      ensureCluster: async () => {},
-      ensureDbSchema: async () => {},
-      launch: () => fakeLaunch(),
-      probeReady: async () => true,
-      socketDir: "/sock",
+      dsn: DSN,
+      acquire: async () => {
+        order.push("acquire");
+        return "/bin";
+      },
+      ensureCluster: async () => {
+        order.push("cluster");
+      },
+      startServer: async () => {
+        order.push("start");
+      },
+      ensureDbSchema: async () => {
+        order.push("schema");
+      },
+      stopServer: async () => {
+        order.push("stop");
+      },
     });
     await provider.start();
     expect(provider.status().phase).toBe("ready");
     expect(provider.isReady()).toBe(true);
-    expect(provider.dsn()).toBe("postgresql://fortress@/hx-db?host=/sock");
+    expect(provider.dsn()).toBe(DSN);
+    expect(order).toEqual(["acquire", "cluster", "start", "schema"]);
     await provider.stop();
+    expect(order.at(-1)).toBe("stop");
   });
 
   test("records failed phase without throwing when acquire fails", async () => {
     const provider = createEmbeddedPostgres({
+      dsn: DSN,
       acquire: async () => {
         throw new Error("network down");
       },
       ensureCluster: async () => {},
+      startServer: async () => {},
       ensureDbSchema: async () => {},
-      launch: () => ({ kill: () => {}, exited: Promise.resolve(0) }),
-      probeReady: async () => false,
-      socketDir: "/sock",
+      stopServer: async () => {},
     });
     await provider.start();
     expect(provider.status().phase).toBe("failed");
