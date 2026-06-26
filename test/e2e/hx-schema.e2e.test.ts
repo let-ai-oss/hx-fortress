@@ -119,4 +119,51 @@ describe.if(RUN)("hx schema migrations", () => {
     }
     expect(threw).toBe(true);
   });
+
+  test("0004 creates all analysis-core tables", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    const rows = await db.query<{ table_name: string }>(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'hx'",
+    );
+    const names = rows.map((r) => r.table_name);
+    for (const t of [
+      "ingest_events",
+      "analysis_definitions",
+      "analysis_runs",
+      "analysis_run_sessions",
+      "analysis_facts",
+      "usage_rollup",
+    ]) {
+      expect(names).toContain(t);
+    }
+  });
+
+  test("run<->session junction enforces both FKs", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    let threw = false;
+    try {
+      await db.exec(
+        "INSERT INTO hx.analysis_run_sessions (run_id, session_id) VALUES (gen_random_uuid(), gen_random_uuid())",
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+
+  test("every expected hx table exists (full parity)", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    const rows = await db.query<{ table_name: string }>(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'hx'",
+    );
+    const names = new Set(rows.map((r) => r.table_name));
+    for (const t of [
+      "users", "orgs", "projects", "repos", "devices", "models",
+      "sessions", "session_agents", "turns", "tool_calls",
+      "ingest_events", "analysis_definitions", "analysis_runs",
+      "analysis_run_sessions", "analysis_facts", "usage_rollup",
+    ]) {
+      expect(names.has(t)).toBe(true);
+    }
+  });
 });

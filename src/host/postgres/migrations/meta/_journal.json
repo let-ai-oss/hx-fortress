@@ -29,6 +29,13 @@
       "when": 1782503467813,
       "tag": "0003_transcript",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1782503650766,
+      "tag": "0004_analysis",
+      "breakpoints": true
     }
   ]
 }
