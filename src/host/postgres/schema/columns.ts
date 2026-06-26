@@ -1,4 +1,4 @@
-import { timestamp, uuid } from "drizzle-orm/pg-core";
+import { bigint, integer, timestamp, uuid } from "drizzle-orm/pg-core";
 
 // Shared column builders so every hx table follows the same conventions:
 // uuid PKs, timestamptz audit columns, soft-delete.
@@ -23,3 +23,10 @@ export const deletedAt = () => timestamp("deleted_at", { withTimezone: true, mod
 
 /** timestamptz column helper for the many nullable activity/seen timestamps. */
 export const ts = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
+
+/** Accumulated non-negative counter, `NOT NULL DEFAULT 0`. */
+export const counter = (name: string) => integer(name).notNull().default(0);
+
+/** Like `counter` but bigint, for byte totals that can exceed int range. */
+export const bigCounter = (name: string) =>
+  bigint(name, { mode: "number" }).notNull().default(0);

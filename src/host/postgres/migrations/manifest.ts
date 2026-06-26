@@ -8,8 +8,10 @@ import type { Migration } from "../migrate";
 // extensions/views/roles), then append one import + one array entry here.
 import sql0000Extensions from "./0000_extensions.sql" with { type: "text" };
 import sql0001Dimensions from "./0001_dimensions.sql" with { type: "text" };
+import sql0002Sessions from "./0002_sessions.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
   { name: "0001_dimensions", sql: sql0001Dimensions },
+  { name: "0002_sessions", sql: sql0002Sessions },
 ];

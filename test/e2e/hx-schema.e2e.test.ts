@@ -55,4 +55,32 @@ describe.if(RUN)("hx schema migrations", () => {
     }
     expect(threw).toBe(true);
   });
+
+  test("session natural key (user, family, session_id) is unique", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    await db.exec(
+      "INSERT INTO hx.users (id, external_id) VALUES ('11111111-1111-7111-8111-111111111111','u-sess')",
+    );
+    await db.exec(
+      "INSERT INTO hx.sessions (user_id, family, session_id) VALUES ('11111111-1111-7111-8111-111111111111','claude-cli','s1')",
+    );
+    let threw = false;
+    try {
+      await db.exec(
+        "INSERT INTO hx.sessions (user_id, family, session_id) VALUES ('11111111-1111-7111-8111-111111111111','claude-cli','s1')",
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+
+  test("session rollup counters default to 0", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    const rows = await db.query<{ event_count: number; bytes_uploaded: number }>(
+      "SELECT event_count, bytes_uploaded FROM hx.sessions WHERE session_id = 's1'",
+    );
+    expect(rows[0].event_count).toBe(0);
+    expect(Number(rows[0].bytes_uploaded)).toBe(0);
+  });
 });
