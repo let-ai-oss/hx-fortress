@@ -43,6 +43,13 @@
       "when": 1782503732638,
       "tag": "0005_views",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782504154604,
+      "tag": "0006_embeddings",
+      "breakpoints": true
     }
   ]
 }

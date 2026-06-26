@@ -190,4 +190,22 @@ describe.if(RUN)("hx schema migrations", () => {
     );
     expect(turns[0].n).toBeGreaterThanOrEqual(1);
   });
+
+  test("gated embeddings migration is skipped on a bundle without pgvector", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    // The stock zonky bundle has no pgvector, so 0006 must be skipped (not
+    // recorded) and the core schema must still be intact.
+    const vec = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = 'vector'",
+    );
+    expect(vec[0].n).toBe(0);
+    const tbl = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema='hx' AND table_name='embeddings'",
+    );
+    expect(tbl[0].n).toBe(0);
+    const recorded = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM hx.schema_migrations WHERE name='0006_embeddings'",
+    );
+    expect(recorded[0].n).toBe(0);
+  });
 });

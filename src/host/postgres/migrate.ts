@@ -7,6 +7,17 @@ export interface MigrationExec {
 export interface Migration {
   name: string;
   sql: string;
+  /** Gate the migration on a Postgres extension being installable. When the
+   *  extension is unavailable the migration is skipped (NOT recorded), so it
+   *  retries on a later boot once the binary is packaged. */
+  requires?: "vector";
+}
+
+async function extensionAvailable(db: MigrationExec, ext: string): Promise<boolean> {
+  const rows = await db.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = '${ext}'`,
+  );
+  return (rows[0]?.n ?? 0) > 0;
 }
 
 const TRACKING_DDL = `
@@ -31,6 +42,11 @@ export async function runMigrations(db: MigrationExec, migrations: Migration[]):
       throw new Error(`invalid migration name: ${migration.name}`);
     }
     if (applied.has(migration.name)) continue;
+    if (migration.requires && !(await extensionAvailable(db, migration.requires))) {
+      // Extension not packaged yet — skip without recording so a later boot
+      // (once it ships) applies this migration.
+      continue;
+    }
     // A multi-statement simple-query batch runs as one implicit transaction in
     // Postgres (no explicit BEGIN/COMMIT — Bun.SQL rejects those on a pooled
     // connection). So the migration and its tracking row commit or roll back
