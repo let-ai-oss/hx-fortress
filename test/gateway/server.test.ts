@@ -19,6 +19,7 @@ describe("gateway health endpoints", () => {
       logger: silentLogger,
       signingKey: async () => null,
       store: () => storeValue,
+      postgresReady: () => true,
     });
   });
 
