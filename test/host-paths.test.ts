@@ -31,6 +31,15 @@ describe("Fortress paths", () => {
     );
   });
 
+  test("exposes postgres paths under the fortress root", () => {
+    const paths = fortressPaths("/data");
+    expect(paths.postgresRoot).toBe("/data/postgres");
+    expect(paths.postgresCache).toBe("/data/postgres/cache");
+    expect(paths.postgresSocket).toBe("/data/postgres/socket");
+    expect(paths.defaultPgData).toBe("/data/pgdata");
+    expect(paths.postgresVersionDir("18.4.0")).toBe("/data/postgres/18.4.0");
+  });
+
   test.each(["", "../escape", "Session_Vault", "session/vault", "_private"])(
     "rejects invalid module id %p",
     (moduleId) => {
