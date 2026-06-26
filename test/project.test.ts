@@ -15,6 +15,7 @@ describe("project skeleton", () => {
     expect(packageJson.devDependencies).toEqual({
       "@eslint/js": "10.0.1",
       "@types/bun": "1.3.14",
+      "drizzle-kit": "^0.31.10",
       eslint: "10.5.0",
       typescript: "6.0.3",
       "typescript-eslint": "8.61.0",
