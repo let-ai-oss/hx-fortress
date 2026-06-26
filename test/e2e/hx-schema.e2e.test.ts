@@ -166,4 +166,28 @@ describe.if(RUN)("hx schema migrations", () => {
       expect(names.has(t)).toBe(true);
     }
   });
+
+  test("hx_readonly can SELECT but not INSERT", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    const granted = await db.query<{ has: boolean }>(
+      "SELECT has_table_privilege('hx_readonly','hx.sessions','SELECT') AS has",
+    );
+    expect(granted[0].has).toBe(true);
+    const denied = await db.query<{ has: boolean }>(
+      "SELECT has_table_privilege('hx_readonly','hx.sessions','INSERT') AS has",
+    );
+    expect(denied[0].has).toBe(false);
+  });
+
+  test("curated views resolve and read from base tables", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    const overview = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM hx.v_session_overview WHERE session_id = 's1'",
+    );
+    expect(overview[0].n).toBe(1);
+    const turns = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM hx.v_turn_search WHERE session_id IS NOT NULL",
+    );
+    expect(turns[0].n).toBeGreaterThanOrEqual(1);
+  });
 });

@@ -11,6 +11,7 @@ import sql0001Dimensions from "./0001_dimensions.sql" with { type: "text" };
 import sql0002Sessions from "./0002_sessions.sql" with { type: "text" };
 import sql0003Transcript from "./0003_transcript.sql" with { type: "text" };
 import sql0004Analysis from "./0004_analysis.sql" with { type: "text" };
+import sql0005Views from "./0005_views.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -18,4 +19,5 @@ export const migrations: Migration[] = [
   { name: "0002_sessions", sql: sql0002Sessions },
   { name: "0003_transcript", sql: sql0003Transcript },
   { name: "0004_analysis", sql: sql0004Analysis },
+  { name: "0005_views", sql: sql0005Views },
 ];

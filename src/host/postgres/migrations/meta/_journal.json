@@ -36,6 +36,13 @@
       "when": 1782503650766,
       "tag": "0004_analysis",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782503732638,
+      "tag": "0005_views",
+      "breakpoints": true
     }
   ]
 }
