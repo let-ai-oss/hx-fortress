@@ -31,4 +31,28 @@ describe.if(RUN)("hx schema migrations", () => {
     const applied = await runMigrations(makeMigrationExec(cluster.dsn), migrations);
     expect(applied).toEqual([]);
   });
+
+  test("0001 creates all dimension tables in the hx schema", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    const rows = await db.query<{ table_name: string }>(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'hx'",
+    );
+    const names = rows.map((r) => r.table_name);
+    for (const t of ["users", "orgs", "projects", "repos", "devices", "models"]) {
+      expect(names).toContain(t);
+    }
+  });
+
+  test("project FK rejects an org_id with no matching org", async () => {
+    const db = makeMigrationExec(cluster.dsn);
+    let threw = false;
+    try {
+      await db.exec(
+        "INSERT INTO hx.projects (org_id, external_id) VALUES (gen_random_uuid(), 'p1')",
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
 });
