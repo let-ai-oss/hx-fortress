@@ -6,12 +6,14 @@ import type {
   HostState,
   HostStatusSnapshot,
   ModuleSupervisor,
+  PostgresProvider,
   StatusStore,
 } from "./types";
 
 export interface HostRuntimeDependencies {
   configStore: ConfigStore;
   connection: CloudConnection;
+  postgres: PostgresProvider;
   supervisor: ModuleSupervisor;
   statusStore: StatusStore;
   logger: HostLogger;
@@ -46,6 +48,7 @@ export class HostRuntime {
 
     try {
       const config = await this.dependencies.configStore.load();
+      await this.dependencies.postgres.start();
       await this.dependencies.connection.open(config);
       await this.dependencies.afterConnect?.();
       await this.dependencies.supervisor.startAll(config.modules.enabled);
@@ -91,6 +94,13 @@ export class HostRuntime {
       }
     }
 
+    try {
+      await this.dependencies.postgres.stop();
+    } catch (error) {
+      this.error = errorMessage(error);
+      this.dependencies.logger.error("Failed to stop Fortress Postgres", error);
+    }
+
     this.state = "stopped";
     await this.writeStatus(this.clock().toISOString());
   }
@@ -106,6 +116,7 @@ export class HostRuntime {
         error: this.error,
       },
       connection: this.dependencies.connection.status(),
+      postgres: this.dependencies.postgres.status(),
       modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
     };
     try {

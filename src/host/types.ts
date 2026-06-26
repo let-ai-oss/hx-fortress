@@ -61,6 +61,10 @@ export interface HostStatusSnapshot {
     reason: string | null;
     message: string | null;
   };
+  postgres: {
+    phase: PostgresPhase;
+    reason: string | null;
+  };
   modules: ModuleRuntimeStatus[];
 }
 

@@ -11,6 +11,7 @@ import type {
   ModuleStartResult,
   ModuleStopResult,
   ModuleSupervisor,
+  PostgresProvider,
   StatusStore,
 } from "../src/host/types";
 
@@ -44,11 +45,20 @@ describe("HostRuntime", () => {
         error: null,
       },
       connection: { state: "connected", reason: null, message: null },
+      postgres: { phase: "ready", reason: null },
       modules: [
         { id: "session_vault", state: "running", error: null },
         { id: "analytics", state: "running", error: null },
       ],
     });
+  });
+
+  test("status snapshot carries the postgres phase", async () => {
+    const harness = createHarness({ postgresPhase: "failed" });
+
+    await harness.runtime.start();
+
+    expect(harness.snapshots.at(-1)?.postgres).toEqual({ phase: "failed", reason: "boom" });
   });
 
   test("keeps the host running when one module fails to start", async () => {
@@ -168,6 +178,7 @@ interface HarnessOptions {
   connectionOpenError?: Error;
   moduleStopError?: Error;
   failStatusStates?: HostStatusSnapshot["host"]["state"][];
+  postgresPhase?: "ready" | "failed";
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -242,9 +253,21 @@ function createHarness(options: HarnessOptions = {}) {
       ]);
     },
   };
+  const postgresPhase = options.postgresPhase ?? "ready";
+  const postgres: PostgresProvider = {
+    start: async () => {},
+    stop: async () => {},
+    status: () => ({
+      phase: postgresPhase,
+      reason: postgresPhase === "failed" ? "boom" : null,
+    }),
+    isReady: () => postgresPhase === "ready",
+    dsn: () => (postgresPhase === "ready" ? "postgresql://fortress@/hx-db?host=/sock" : null),
+  };
   const runtime = new HostRuntime({
     configStore,
     connection,
+    postgres,
     supervisor,
     statusStore,
     logger,

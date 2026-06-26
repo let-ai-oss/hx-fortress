@@ -67,6 +67,14 @@ describe("FileStatusReader", () => {
     await expect(new FileStatusReader(statusPath).read()).rejects.toThrow(
       "Invalid Fortress status: modules[0].id is invalid",
     );
+
+    await writeStatus({
+      ...snapshot(),
+      postgres: { phase: "bogus", reason: null },
+    });
+    await expect(new FileStatusReader(statusPath).read()).rejects.toThrow(
+      "Invalid Fortress status: postgres.phase is invalid",
+    );
   });
 
   async function writeStatus(value: unknown): Promise<void> {
@@ -93,6 +101,10 @@ function snapshot(): HostStatusSnapshot {
       state: "connected",
       reason: null,
       message: null,
+    },
+    postgres: {
+      phase: "ready",
+      reason: null,
     },
     modules: [
       {

@@ -7,6 +7,7 @@ import type {
   HostStatusSnapshot,
   ModuleRuntimeStatus,
   ModuleState,
+  PostgresPhase,
 } from "./host/types";
 
 export interface StatusReader {
@@ -31,6 +32,12 @@ const MODULE_STATES = new Set<ModuleState>([
   "starting",
   "running",
   "stopping",
+  "failed",
+]);
+const PG_PHASES = new Set<PostgresPhase>([
+  "acquiring",
+  "initializing",
+  "ready",
   "failed",
 ]);
 
@@ -80,6 +87,15 @@ function parseStatus(value: unknown): HostStatusSnapshot {
     }
     assertNullableString(value.connection.reason, "connection.reason");
     assertNullableString(value.connection.message, "connection.message");
+
+    if (!isRecord(value.postgres)) {
+      throw new Error("postgres must be an object");
+    }
+    if (!PG_PHASES.has(value.postgres.phase as PostgresPhase)) {
+      throw new Error("postgres.phase is invalid");
+    }
+    assertNullableString(value.postgres.reason, "postgres.reason");
+
     if (!Array.isArray(value.modules)) {
       throw new Error("modules must be an array");
     }
@@ -98,6 +114,10 @@ function parseStatus(value: unknown): HostStatusSnapshot {
         state: value.connection.state as ConnectionState,
         reason: value.connection.reason as string | null,
         message: value.connection.message as string | null,
+      },
+      postgres: {
+        phase: value.postgres.phase as PostgresPhase,
+        reason: value.postgres.reason as string | null,
       },
       modules,
     };
