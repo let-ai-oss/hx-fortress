@@ -64,17 +64,33 @@ re-`hello` with the saved credential instead of re-enrolling).
 | `FORTRESS_S3_SESSION_TOKEN` | no (s3) | S3 session token. |
 | `FORTRESS_S3_ENDPOINT` | no (s3) | S3-compatible endpoint (MinIO, R2, …). |
 | `FORTRESS_S3_FORCE_PATH_STYLE` | no (s3) | `true` for path-style addressing. |
+| `FORTRESS_DATABASE_URL` | no | Connect to an external Postgres instead of the embedded one. When set, the bundled Postgres is not downloaded or supervised. |
+| `FORTRESS_PG_VERSION` | no | Embedded Postgres version to acquire (default pinned in code). |
+| `FORTRESS_PG_BINARIES_URL` | no | Base URL for Postgres binary archives (default Maven Central); point at a mirror for air-gapped installs. |
+| `FORTRESS_PG_DATA` | no | Data directory for the embedded cluster (default `$FORTRESS_ROOT/pgdata`). |
+| `FORTRESS_PG_PORT` | no | Loopback port for the embedded server (default `54329`). Bound to `127.0.0.1` only. |
 
 `FORTRESS_ENROLL_TOKEN` + `FORTRESS_CLOUD_URL` are consumed only on the first
 boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key
 is a redeploy.
 
+### Embedded Postgres
+
+Fortress runs a local Postgres (database `hx-db`, schema `hx`) with no Docker, no
+root, and no prompts. On first boot it downloads a pinned Postgres build, runs
+`initdb` into `$FORTRESS_ROOT/pgdata`, and starts the server bound to `127.0.0.1`
+(loopback only) on `FORTRESS_PG_PORT`. Set `FORTRESS_DATABASE_URL` to use an
+external Postgres instead. Readiness (`/readyz` and `hx-fortress status`) reflects
+Postgres availability; a failed or unreachable database holds readiness down with
+a specific reason.
+
 ### Health checks
 
 - `GET /healthz` — liveness; `200 {"ok":true}` as soon as the gateway listens.
 - `GET /readyz` — readiness; `200 {"ok":true,"ready":true}` once the vault store
-  is live, otherwise `503`. Point the platform's traffic gate here.
+  is live and Postgres is accepting connections, otherwise `503`. Point the
+  platform's traffic gate here.
 
 ## Development
 
