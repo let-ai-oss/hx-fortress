@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { handleVaultRpc } from "../../src/modules/session-vault/store/rpc";
 import type { SessionStore } from "../../src/modules/session-vault/store/types";
 import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../../src/ingest/ingest";
+import { listSessionsForUser } from "../../src/query/list-sessions";
 import { createHxDb, type HxDb } from "../../src/host/postgres/db";
 import { runMigrations } from "../../src/host/postgres/migrate";
 import { migrations } from "../../src/host/postgres/migrations/manifest";
@@ -231,6 +232,49 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
         },
         null,
       ),
+    ).rejects.toThrow("postgres_not_ready");
+  });
+
+  // ── MC-2415: prepared "my sessions" read ──────────────────────────────────
+
+  test("listSessionsForUser returns the user's sessions newest-first with resolved names", async () => {
+    const rows = await listSessionsForUser(db, { userId: "user-ext-1" });
+    const ids = rows.map((r) => r.sessionId);
+    expect(ids).toContain("sess-1");
+    expect(ids).toContain("sess-rpc");
+    // Ordered by last_activity_at DESC: sess-rpc (12:00) lands before sess-1.
+    expect(ids.indexOf("sess-rpc")).toBeLessThan(ids.indexOf("sess-1"));
+    const s1 = rows.find((r) => r.sessionId === "sess-1")!;
+    expect(s1.title).toBe("My session");
+    expect(s1.family).toBe("claude-cli");
+    expect(s1.repoSlug).toBe("let-ai/let-forge");
+    expect(s1.model).toBe("claude-opus-4-8");
+    expect(s1.eventCount).toBe(3);
+    expect(s1.firstSeenAt).not.toBeNull();
+  });
+
+  test("listSessionsForUser is scoped to the external user id", async () => {
+    expect(await listSessionsForUser(db, { userId: "nobody-here" })).toEqual([]);
+  });
+
+  test("listSessionsForUser honors the limit (newest kept)", async () => {
+    const rows = await listSessionsForUser(db, { userId: "user-ext-1", limit: 1 });
+    expect(rows.length).toBe(1);
+    expect(rows[0].sessionId).toBe("sess-rpc");
+  });
+
+  test("the listSessions tunnel RPC returns prepared rows", async () => {
+    const noopStore = {} as SessionStore;
+    const res = await handleVaultRpc(noopStore, { method: "listSessions", userId: "user-ext-1" }, db);
+    expect(res.method).toBe("listSessions");
+    if (res.method !== "listSessions") throw new Error("unexpected method");
+    expect(res.value.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("listSessions RPC fails closed when Postgres is not ready", async () => {
+    const noopStore = {} as SessionStore;
+    await expect(
+      handleVaultRpc(noopStore, { method: "listSessions", userId: "user-ext-1" }, null),
     ).rejects.toThrow("postgres_not_ready");
   });
 });

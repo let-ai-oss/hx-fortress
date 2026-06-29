@@ -7,6 +7,7 @@ import type {
   ConnectionStatusSnapshot,
   FortressConfig,
   HostLogger,
+  HxIngestNotification,
   MessageDispatcher,
   ModuleLifecycleHandler,
 } from "../host/types";
@@ -83,6 +84,23 @@ export class WsCloudConnection implements CloudConnection {
     return new Promise<void>((resolve, reject) => {
       void this.dial(config, resolve, reject);
     });
+  }
+
+  notifyIngest(evt: HxIngestNotification): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(
+        encodeFrame({
+          t: "hxInvalidate",
+          userExternalId: evt.userExternalId,
+          orgExternalId: evt.orgExternalId,
+        }),
+      );
+    } catch {
+      // Best-effort: a transient send failure just misses one invalidation;
+      // the next ingest (or the client's own refetch) recovers the list.
+    }
   }
 
   close(): Promise<void> {

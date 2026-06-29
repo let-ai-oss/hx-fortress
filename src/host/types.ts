@@ -81,11 +81,24 @@ export type ModuleStopResult =
   | { id: string; ok: true }
   | { id: string; ok: false; error: string };
 
+/** Payload for the fortress→cloud realtime invalidation (MC-2415), carried up
+ *  the tunnel after an hx ingest so the cloud can refresh the user's live
+ *  "my sessions" queries. */
+export interface HxIngestNotification {
+  /** Cloud user id (hx_users.external_id) whose sessions changed. */
+  userExternalId: string;
+  /** Org the session is attributed to (cloud id), or null for personal. */
+  orgExternalId: string | null;
+}
+
 export interface CloudConnection {
   state(): ConnectionState;
   status(): ConnectionStatusSnapshot;
   open(config: FortressConfig): Promise<void>;
   close(): Promise<void>;
+  /** Best-effort push of an hx ingest notification to the cloud. No-op when the
+   *  tunnel isn't currently open. */
+  notifyIngest(evt: HxIngestNotification): void;
 }
 
 export interface ModuleSupervisor {

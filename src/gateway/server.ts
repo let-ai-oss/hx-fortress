@@ -16,6 +16,7 @@ import {
 import { verifyCapabilityToken, type CapabilityClaims } from "./capability-token";
 import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../ingest/ingest";
 import type { HxDb } from "../host/postgres/db";
+import type { HxIngestNotification } from "../host/types";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import {
   parseSessionMetadata,
@@ -36,6 +37,9 @@ export interface GatewayDeps {
   postgresReady: () => boolean;
   /** Resolves the Drizzle handle on the bundled hx-db, or null before it's ready. */
   db: () => HxDb | null;
+  /** Push a realtime invalidation to the cloud after a direct-gateway ingest the
+   *  cloud never relayed (MC-2415). Best-effort; optional. */
+  notify?: (evt: HxIngestNotification) => void;
   logger: GatewayLogger;
   port: number;
 }
@@ -123,6 +127,7 @@ async function ingestCommitMetadata(
       componentCount: commit.componentCount,
       meta,
     });
+    deps.notify?.({ userExternalId: key.userId, orgExternalId: claims.org ?? null });
   } catch (err) {
     deps.logger.error("hx metadata ingest failed", {
       sessionId: key.sessionId,
@@ -156,6 +161,7 @@ async function ingestAgentCommitMetadata(
       componentCount: commit.componentCount,
       meta,
     });
+    deps.notify?.({ userExternalId: key.userId, orgExternalId: claims.org ?? null });
   } catch (err) {
     deps.logger.error("hx agent metadata ingest failed", {
       sessionId: key.sessionId,

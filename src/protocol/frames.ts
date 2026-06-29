@@ -11,6 +11,10 @@ export type FortressToHubFrame =
   | { t: "moduleReply"; id: string; reply: MsgReply }
   | { t: "rpcResult"; id: string; result: unknown }
   | { t: "rpcError"; id: string; error: string }
+  // Fortress→cloud realtime invalidation (MC-2415): emitted after an hx ingest
+  // so the cloud refreshes the affected user's live "my sessions" queries —
+  // including fortress-direct writes the cloud never relayed.
+  | { t: "hxInvalidate"; userExternalId: string; orgExternalId: string | null }
   | { t: "moduleInstallResult"; moduleId: string; version: string; ok: true }
   | { t: "moduleInstallResult"; moduleId: string; version: string; ok: false; error: string }
   | { t: "moduleRemoveResult"; moduleId: string; ok: true }

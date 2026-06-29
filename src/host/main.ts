@@ -29,7 +29,7 @@ import { createHxDb, type HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
-import type { CloudConnection } from "./types";
+import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
 
@@ -66,7 +66,14 @@ export async function runFortressHost(
     hxDb = createHxDb(dsn);
     return hxDb;
   };
-  const vaultModule = createSessionVaultModule({ db: resolveHxDb });
+  // Fortress→cloud realtime bridge (MC-2415): ingest paths emit invalidations
+  // here; the closure is repointed at the live connection once it's built below
+  // (the connection is constructed after the module that needs to emit). A
+  // no-op until then, so any ingest before the tunnel is up is simply not
+  // signalled (the client's own refetch recovers the list).
+  const hubNotify: { send: (evt: HxIngestNotification) => void } = { send: () => {} };
+  const emitIngest = (evt: HxIngestNotification): void => hubNotify.send(evt);
+  const vaultModule = createSessionVaultModule({ db: resolveHxDb, notify: emitIngest });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
@@ -145,6 +152,8 @@ export async function runFortressHost(
   const connection =
     dependencies.createConnection?.(connectionDependencies) ??
     new WsCloudConnection(connectionDependencies);
+  // Now that the tunnel connection exists, route ingest notifications to it.
+  hubNotify.send = (evt) => connection.notifyIngest(evt);
   const runtime = new HostRuntime({
     configStore: new FileConfigStore(paths),
     connection,
@@ -174,6 +183,7 @@ export async function runFortressHost(
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
       db: resolveHxDb,
+      notify: emitIngest,
     });
   }
 
