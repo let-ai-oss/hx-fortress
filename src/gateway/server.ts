@@ -11,8 +11,11 @@ import {
   handleCanonicalDownload,
   handleArtifactRead,
   handleListSessionMetadata,
+  type CommitOutput,
 } from "./handlers";
 import { verifyCapabilityToken, type CapabilityClaims } from "./capability-token";
+import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../ingest/ingest";
+import type { HxDb } from "../host/postgres/db";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import {
   parseSessionMetadata,
@@ -31,6 +34,8 @@ export interface GatewayDeps {
   signingKey: () => Promise<string | null>;
   /** True once the local Postgres is accepting connections. */
   postgresReady: () => boolean;
+  /** Resolves the Drizzle handle on the bundled hx-db, or null before it's ready. */
+  db: () => HxDb | null;
   logger: GatewayLogger;
   port: number;
 }
@@ -75,6 +80,91 @@ function metaRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
+interface SessionKeyInput {
+  userId: string;
+  family: string;
+  sessionId: string;
+}
+
+// On the direct gateway the cloud already attributed the session inside the
+// capability token; map those claims to the ingest attribution shape.
+function attributionFromClaims(claims: CapabilityClaims): IngestAttribution {
+  return {
+    orgExternalId: claims.org ?? null,
+    repoSlug: claims.repo ?? null,
+    projectExternalId: claims.project ?? null,
+    deviceId: claims.deviceId ?? null,
+  };
+}
+
+// Metadata ingestion is best-effort: the bytes are already committed to the
+// vault, so a Postgres hiccup must not fail the upload — it's logged and the
+// chunk re-ingests idempotently on the next commit.
+async function ingestCommitMetadata(
+  deps: GatewayDeps,
+  claims: CapabilityClaims,
+  key: SessionKeyInput,
+  chunkId: string,
+  replace: boolean,
+  chunkText: string,
+  commit: CommitOutput,
+  meta: Record<string, unknown> | null,
+): Promise<void> {
+  const db = deps.db();
+  if (!db) return;
+  try {
+    await ingestCommit(db, {
+      attribution: attributionFromClaims(claims),
+      key,
+      chunkId,
+      replace,
+      chunkText,
+      totalBytes: commit.totalBytes,
+      componentCount: commit.componentCount,
+      meta,
+    });
+  } catch (err) {
+    deps.logger.error("hx metadata ingest failed", {
+      sessionId: key.sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+async function ingestAgentCommitMetadata(
+  deps: GatewayDeps,
+  claims: CapabilityClaims,
+  key: SessionKeyInput,
+  agentId: string,
+  chunkId: string,
+  replace: boolean,
+  chunkText: string,
+  commit: CommitOutput,
+  meta: Record<string, unknown> | null,
+): Promise<void> {
+  const db = deps.db();
+  if (!db) return;
+  try {
+    await ingestAgentCommit(db, {
+      attribution: attributionFromClaims(claims),
+      key,
+      agentId,
+      chunkId,
+      replace,
+      chunkText,
+      totalBytes: commit.totalBytes,
+      componentCount: commit.componentCount,
+      meta,
+    });
+  } catch (err) {
+    deps.logger.error("hx agent metadata ingest failed", {
+      sessionId: key.sessionId,
+      agentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
   const server = Bun.serve({
     port: deps.port,
@@ -117,19 +207,18 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
               );
             case "/sessions/commit":
               {
-                const commit = await handleCommit(store, {
-                  userId: str(body.userId, userId),
-                  family: str(body.family),
-                  sessionId: str(body.sessionId),
-                  chunkId: str(body.chunkId),
-                  replace: body.replace === true,
-                });
                 const key = {
                   userId: str(body.userId, userId),
                   family: str(body.family),
                   sessionId: str(body.sessionId),
                 };
+                const chunkId = str(body.chunkId);
+                const replace = body.replace === true;
+                // Read the staged chunk before composing — compose may clear staging.
+                const chunkText = await store.readChunkText(key, chunkId).catch(() => "");
+                const commit = await handleCommit(store, { ...key, chunkId, replace });
                 const meta = metaRecord(body.meta);
+                await ingestCommitMetadata(deps, claims, key, chunkId, replace, chunkText, commit, meta);
                 const existing = parseSessionMetadata(
                   JSON.parse((await store.readArtifactText(key, SESSION_METADATA_ARTIFACT).catch(() => null)) ?? "null"),
                 );
@@ -175,16 +264,32 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                 }),
               );
             case "/sessions/agent-commit":
-              return json(
-                await handleAgentCommit(store, {
+              {
+                const key = {
                   userId: str(body.userId, userId),
                   family: str(body.family),
                   sessionId: str(body.sessionId),
-                  agentId: str(body.agentId),
-                  chunkId: str(body.chunkId),
-                  replace: body.replace === true,
-                }),
-              );
+                };
+                const agentId = str(body.agentId);
+                const chunkId = str(body.chunkId);
+                const replace = body.replace === true;
+                // Child lanes are stored under the composite sessionId:a:agentId key.
+                const storeKey = { ...key, sessionId: `${key.sessionId}:a:${agentId}` };
+                const chunkText = await store.readChunkText(storeKey, chunkId).catch(() => "");
+                const commit = await handleAgentCommit(store, { ...key, agentId, chunkId, replace });
+                await ingestAgentCommitMetadata(
+                  deps,
+                  claims,
+                  key,
+                  agentId,
+                  chunkId,
+                  replace,
+                  chunkText,
+                  commit,
+                  metaRecord(body.meta),
+                );
+                return json(commit);
+              }
             case "/sessions/canonical-url":
               return json(
                 await handleCanonicalDownload(store, {

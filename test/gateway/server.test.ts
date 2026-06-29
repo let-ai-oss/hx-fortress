@@ -20,6 +20,7 @@ describe("gateway health endpoints", () => {
       signingKey: async () => null,
       store: () => storeValue,
       postgresReady: () => true,
+      db: () => null,
     });
   });
 

@@ -17,6 +17,7 @@ function start(storeReady: boolean, pgReady: boolean): GatewayHandle {
     signingKey: async () => null,
     store: () => (storeReady ? fakeStore : null),
     postgresReady: () => pgReady,
+    db: () => null,
   });
 }
 

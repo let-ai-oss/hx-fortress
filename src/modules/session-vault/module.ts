@@ -6,6 +6,7 @@ import { handleVaultRpc, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials } from "./credentials.js";
 import { buildStore } from "./store.js";
+import type { HxDb } from "../../host/postgres/db.js";
 import type { Module, ModuleContext, ScopedLogger } from "../../host/types.js";
 
 /** The session_vault module plus a getter for its live store, so the ingest
@@ -14,7 +15,13 @@ export interface SessionVaultModule extends Module {
   getStore(): SessionStore | null;
 }
 
-export default function createModule(): SessionVaultModule {
+export interface SessionVaultDeps {
+  /** Resolves the hx-db handle so tunnel-relayed commits can be mirrored into
+   *  the fortress Postgres. Null until Postgres is ready. */
+  db?: () => HxDb | null;
+}
+
+export default function createModule(deps: SessionVaultDeps = {}): SessionVaultModule {
   let store: SessionStore | null = null;
   let logger: ScopedLogger | null = null;
 
@@ -55,7 +62,7 @@ export default function createModule(): SessionVaultModule {
       }
       const req = data.payload as VaultRpcRequest;
       try {
-        const result = await handleVaultRpc(store, req);
+        const result = await handleVaultRpc(store, req, deps.db?.() ?? null);
         return { ok: true, payload: result };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

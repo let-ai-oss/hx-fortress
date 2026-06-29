@@ -25,6 +25,7 @@ import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { buildPostgresProvider } from "./postgres";
+import { createHxDb, type HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
@@ -54,7 +55,18 @@ export async function runFortressHost(
   const bus = new LogBus(new FileLogSink(paths.log));
   const logger = new BusHostLogger(bus);
   const registry = new ModuleRegistry(bus);
-  const vaultModule = createSessionVaultModule();
+  // Lazily built once Postgres is ready (the cluster boots after modules are
+  // wired). Shared by the tunnel module (relayed commits) and the direct
+  // gateway so both ingest into the same hx-db handle.
+  let hxDb: HxDb | null = null;
+  const resolveHxDb = (): HxDb | null => {
+    if (hxDb) return hxDb;
+    const dsn = postgres.dsn();
+    if (!dsn) return null;
+    hxDb = createHxDb(dsn);
+    return hxDb;
+  };
+  const vaultModule = createSessionVaultModule({ db: resolveHxDb });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
@@ -161,6 +173,7 @@ export async function runFortressHost(
       signingKey: () => signingKeyStore.load(),
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
+      db: resolveHxDb,
     });
   }
 
