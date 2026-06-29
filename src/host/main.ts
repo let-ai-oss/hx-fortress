@@ -25,6 +25,7 @@ import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { buildPostgresProvider } from "./postgres";
+import { createHxDb, type HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
@@ -155,12 +156,23 @@ export async function runFortressHost(
   // the hub pushes over the tunnel (cached on disk for offline restarts).
   let gatewayHandle: GatewayHandle | null = null;
   if (gateway.enabled) {
+    // Lazily build (and memoize) the Drizzle handle the first time Postgres is
+    // ready — the gateway starts before the cluster finishes booting.
+    let hxDb: HxDb | null = null;
+    const resolveHxDb = (): HxDb | null => {
+      if (hxDb) return hxDb;
+      const dsn = postgres.dsn();
+      if (!dsn) return null;
+      hxDb = createHxDb(dsn);
+      return hxDb;
+    };
     gatewayHandle = startGatewayServer({
       port: gateway.port,
       logger: bus.scopeFor("gateway"),
       signingKey: () => signingKeyStore.load(),
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
+      db: resolveHxDb,
     });
   }
 
