@@ -2,21 +2,46 @@
 // Created buckets block public access by default — transcripts must never be
 // world-readable.
 
-import { capture } from "./exec.js";
+import { capture, type RunResult } from "./exec.js";
 
 type Log = (m: string) => void;
 
 // ── GCS ──────────────────────────────────────────────────────────────────────
 
-export async function gcsBucketExists(bucket: string): Promise<boolean> {
-  const r = await capture("gcloud", [
+export interface BucketProbe {
+  exists: boolean;
+  /** Set when the describe failed for a reason *other* than the bucket being
+   *  absent — auth, missing permissions, or a wrong quota/billing project. The
+   *  wizard surfaces this instead of misreporting the bucket as "not found". */
+  error?: string;
+}
+
+/** Args for the existence probe. `--project` scopes the request to the project
+ *  the operator chose; without it gcloud uses the active config project as the
+ *  quota project, so a bucket living elsewhere is misreported as missing
+ *  (MC-2412). */
+export function gcsDescribeArgs(bucket: string, project: string): string[] {
+  return [
     "storage",
     "buckets",
     "describe",
     `gs://${bucket}`,
+    `--project=${project}`,
     "--format=value(name)",
-  ]);
-  return r.ok;
+  ];
+}
+
+/** A genuinely-missing bucket surfaces as a 404 / "not found". Any other failure
+ *  (401/403/quota-project) is a distinct problem we must not relabel as
+ *  not-found — that conflation is what made an accessible bucket look missing. */
+export function classifyBucketProbe(r: RunResult): BucketProbe {
+  if (r.ok) return { exists: true };
+  if (/\b404\b|not found|does not exist/i.test(r.stderr)) return { exists: false };
+  return { exists: false, error: r.stderr || "gcloud storage buckets describe failed" };
+}
+
+export async function gcsBucketExists(bucket: string, project: string): Promise<BucketProbe> {
+  return classifyBucketProbe(await capture("gcloud", gcsDescribeArgs(bucket, project)));
 }
 
 export interface GcsBucketOpts {
