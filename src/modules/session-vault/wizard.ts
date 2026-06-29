@@ -133,7 +133,12 @@ async function enrollGcs(opts: WizardOpts): Promise<void> {
     return pasteKeyOrDefer(ctx, opts);
   }
 
-  if (!(await gcsBucketExists(bucket))) {
+  const probe = await gcsBucketExists(bucket, project);
+  if (probe.error) {
+    log(`Could not verify gs://${bucket} in ${project}: ${probe.error}`);
+    return defer(ctx, log);
+  }
+  if (!probe.exists) {
     log(`Bucket ${bucket} not found in ${project}.`);
     if (
       await confirmPrompt("Create it (public access blocked, uniform access, versioning)?", {
