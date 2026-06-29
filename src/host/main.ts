@@ -55,7 +55,18 @@ export async function runFortressHost(
   const bus = new LogBus(new FileLogSink(paths.log));
   const logger = new BusHostLogger(bus);
   const registry = new ModuleRegistry(bus);
-  const vaultModule = createSessionVaultModule();
+  // Lazily built once Postgres is ready (the cluster boots after modules are
+  // wired). Shared by the tunnel module (relayed commits) and the direct
+  // gateway so both ingest into the same hx-db handle.
+  let hxDb: HxDb | null = null;
+  const resolveHxDb = (): HxDb | null => {
+    if (hxDb) return hxDb;
+    const dsn = postgres.dsn();
+    if (!dsn) return null;
+    hxDb = createHxDb(dsn);
+    return hxDb;
+  };
+  const vaultModule = createSessionVaultModule({ db: resolveHxDb });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
@@ -156,16 +167,6 @@ export async function runFortressHost(
   // the hub pushes over the tunnel (cached on disk for offline restarts).
   let gatewayHandle: GatewayHandle | null = null;
   if (gateway.enabled) {
-    // Lazily build (and memoize) the Drizzle handle the first time Postgres is
-    // ready — the gateway starts before the cluster finishes booting.
-    let hxDb: HxDb | null = null;
-    const resolveHxDb = (): HxDb | null => {
-      if (hxDb) return hxDb;
-      const dsn = postgres.dsn();
-      if (!dsn) return null;
-      hxDb = createHxDb(dsn);
-      return hxDb;
-    };
     gatewayHandle = startGatewayServer({
       port: gateway.port,
       logger: bus.scopeFor("gateway"),

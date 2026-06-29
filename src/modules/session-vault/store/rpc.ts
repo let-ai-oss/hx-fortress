@@ -4,6 +4,12 @@
 // that runs one request against a local SessionStore. The reverse tunnel (P4)
 // carries these messages; nothing here knows about sockets.
 
+import type { HxDb } from "../../../host/postgres/db.js";
+import {
+  ingestAgentCommit,
+  ingestCommit,
+  type IngestAttribution,
+} from "../../../ingest/ingest.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -12,6 +18,21 @@ import type {
   SignedDownload,
   SignedUpload,
 } from "./types.js";
+
+/** Shared payload for the two metadata-ingest RPCs the cloud sends after a
+ *  commit so the fortress mirrors the session into its own hx schema. The
+ *  cloud passes the chunk text it already read plus the attribution it already
+ *  resolved; the fortress re-parses and writes rows locally. */
+export interface IngestCommitRpc {
+  key: SessionKey;
+  chunkId: string;
+  replace?: boolean;
+  chunkText: string;
+  totalBytes: number;
+  componentCount: number;
+  meta: Record<string, unknown> | null;
+  attribution: IngestAttribution;
+}
 
 export type VaultRpcRequest =
   | { method: "signStagingUpload"; key: SessionKey; chunkId: string }
@@ -28,6 +49,11 @@ export type VaultRpcRequest =
   | { method: "writeArtifact"; key: SessionKey; name: string; text: string }
   | { method: "readArtifactText"; key: SessionKey; name: string }
   | { method: "listSessionMetadata"; userId: string }
+  // Metadata-ingest RPCs (MC-2406) — written to the fortress hx schema. Honored
+  // by vaults built with the embedded/external Postgres; older binaries reject
+  // the unknown method, which the cloud treats as best-effort.
+  | ({ method: "ingestCommit" } & IngestCommitRpc)
+  | ({ method: "ingestAgentCommit"; agentId: string } & IngestCommitRpc)
   | { method: "selfTest" };
 
 export type VaultRpcResult =
@@ -40,6 +66,8 @@ export type VaultRpcResult =
   | { method: "writeArtifact"; value: { ok: true } }
   | { method: "readArtifactText"; value: string | null }
   | { method: "listSessionMetadata"; value: SessionMetadata[] }
+  | { method: "ingestCommit"; value: { ok: true } }
+  | { method: "ingestAgentCommit"; value: { ok: true } }
   | { method: "selfTest"; value: { ok: true } };
 
 export interface VaultRpcError {
@@ -54,6 +82,7 @@ export interface VaultRpcError {
 export async function handleVaultRpc(
   store: SessionStore,
   req: VaultRpcRequest,
+  db: HxDb | null = null,
 ): Promise<VaultRpcResult> {
   switch (req.method) {
     case "signStagingUpload":
@@ -83,6 +112,35 @@ export async function handleVaultRpc(
       return { method: req.method, value: await store.readArtifactText(req.key, req.name) };
     case "listSessionMetadata":
       return { method: req.method, value: await store.listSessionMetadata(req.userId) };
+    case "ingestCommit": {
+      if (!db) throw new Error("postgres_not_ready");
+      await ingestCommit(db, {
+        key: req.key,
+        chunkId: req.chunkId,
+        replace: req.replace === true,
+        chunkText: req.chunkText,
+        totalBytes: req.totalBytes,
+        componentCount: req.componentCount,
+        meta: req.meta,
+        attribution: req.attribution,
+      });
+      return { method: req.method, value: { ok: true } };
+    }
+    case "ingestAgentCommit": {
+      if (!db) throw new Error("postgres_not_ready");
+      await ingestAgentCommit(db, {
+        key: req.key,
+        agentId: req.agentId,
+        chunkId: req.chunkId,
+        replace: req.replace === true,
+        chunkText: req.chunkText,
+        totalBytes: req.totalBytes,
+        componentCount: req.componentCount,
+        meta: req.meta,
+        attribution: req.attribution,
+      });
+      return { method: req.method, value: { ok: true } };
+    }
     case "selfTest":
       await store.selfTest();
       return { method: req.method, value: { ok: true } };

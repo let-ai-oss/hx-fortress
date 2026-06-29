@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { costUsd, priceForModel } from "../../src/gateway/ingest/pricing";
+import { costUsd, priceForModel } from "../../src/ingest/pricing";
 
 describe("priceForModel", () => {
   test("matches a known model id exactly", () => {

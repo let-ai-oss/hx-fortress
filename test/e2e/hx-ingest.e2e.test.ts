@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import type { CapabilityClaims } from "../../src/gateway/capability-token";
-import { ingestAgentCommit, ingestCommit } from "../../src/gateway/ingest/ingest";
+import { handleVaultRpc } from "../../src/modules/session-vault/store/rpc";
+import type { SessionStore } from "../../src/modules/session-vault/store/types";
+import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../../src/ingest/ingest";
 import { createHxDb, type HxDb } from "../../src/host/postgres/db";
 import { runMigrations } from "../../src/host/postgres/migrate";
 import { migrations } from "../../src/host/postgres/migrations/manifest";
@@ -11,12 +12,11 @@ import { makeMigrationExec, startCluster, type Cluster } from "./_cluster";
 // (first run downloads + extracts the zonky binaries).
 const RUN = process.env.FORTRESS_PG_E2E === "1";
 
-const CLAIMS: CapabilityClaims = {
-  org: "org-ext-1",
-  project: "proj-ext-1",
-  repo: "let-ai/let-forge",
+const ATTR: IngestAttribution = {
+  orgExternalId: "org-ext-1",
+  projectExternalId: "proj-ext-1",
+  repoSlug: "let-ai/let-forge",
   deviceId: "device-ext-1",
-  sub: "user-ext-1",
 };
 const KEY = { userId: "user-ext-1", family: "claude-cli", sessionId: "sess-1" };
 
@@ -71,7 +71,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("first commit writes the session, turns, tool_calls, device, dimensions and ingest event", async () => {
     await ingestCommit(db, {
-      claims: CLAIMS,
+      attribution: ATTR,
       key: KEY,
       chunkId: "c1",
       replace: false,
@@ -114,7 +114,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("a second commit accumulates counts and bumps chunk_count", async () => {
     await ingestCommit(db, {
-      claims: CLAIMS,
+      attribution: ATTR,
       key: KEY,
       chunkId: "c2",
       replace: false,
@@ -135,7 +135,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("a replace commit resets counts and re-indexes the parent lane", async () => {
     await ingestCommit(db, {
-      claims: CLAIMS,
+      attribution: ATTR,
       key: KEY,
       chunkId: "c3",
       replace: true,
@@ -154,7 +154,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     const before = await session();
     const events = await count("SELECT count(*)::int n FROM hx.ingest_events");
     await ingestCommit(db, {
-      claims: CLAIMS,
+      attribution: ATTR,
       key: KEY,
       chunkId: "c3",
       replace: true,
@@ -170,7 +170,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("agent commit creates a child lane and indexes its turns", async () => {
     await ingestAgentCommit(db, {
-      claims: CLAIMS,
+      attribution: ATTR,
       key: KEY,
       agentId: "agent-1",
       chunkId: "ac1",
@@ -187,5 +187,50 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(agent[0].label).toBe("explorer");
     expect(agent[0].event_count).toBe(3);
     expect(await count("SELECT count(*)::int n FROM hx.turns WHERE agent_id IS NOT NULL")).toBe(2);
+  });
+
+  test("the ingestCommit tunnel RPC writes the same rows (cloud-relayed path)", async () => {
+    // The tunnel handler doesn't touch the store for ingest — it re-parses the
+    // chunk text the cloud forwarded — so a no-op store stand-in is enough.
+    const noopStore = {} as SessionStore;
+    const res = await handleVaultRpc(
+      noopStore,
+      {
+        method: "ingestCommit",
+        key: { userId: "user-ext-1", family: "claude-cli", sessionId: "sess-rpc" },
+        chunkId: "rc1",
+        replace: false,
+        chunkText: chunk("via tunnel", "relayed", "2026-06-29T12:00:00Z"),
+        totalBytes: 42,
+        componentCount: 1,
+        meta: { title: "Relayed", repoSlug: "let-ai/let-forge" },
+        attribution: ATTR,
+      },
+      db,
+    );
+    expect(res).toEqual({ method: "ingestCommit", value: { ok: true } });
+    expect(
+      await count("SELECT count(*)::int n FROM hx.sessions WHERE session_id='sess-rpc' AND event_count=3"),
+    ).toBe(1);
+  });
+
+  test("ingestCommit RPC fails closed when Postgres is not ready", async () => {
+    const noopStore = {} as SessionStore;
+    await expect(
+      handleVaultRpc(
+        noopStore,
+        {
+          method: "ingestCommit",
+          key: { userId: "u", family: "claude-cli", sessionId: "s" },
+          chunkId: "c",
+          chunkText: "",
+          totalBytes: 0,
+          componentCount: 0,
+          meta: null,
+          attribution: ATTR,
+        },
+        null,
+      ),
+    ).rejects.toThrow("postgres_not_ready");
   });
 });

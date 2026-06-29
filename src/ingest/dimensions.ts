@@ -4,8 +4,8 @@
 // and returns its local uuid for the session FKs. All run inside the commit
 // transaction (HxTx).
 
-import type { HxTx } from "../../host/postgres/db";
-import { hxDevices, hxModels, hxOrgs, hxProjects, hxRepos, hxUsers } from "../../host/postgres/schema";
+import type { HxTx } from "../host/postgres/db";
+import { hxDevices, hxModels, hxOrgs, hxProjects, hxRepos, hxUsers } from "../host/postgres/schema";
 import { priceForModel } from "./pricing";
 
 export async function upsertUser(tx: HxTx, externalId: string, now: string): Promise<string> {

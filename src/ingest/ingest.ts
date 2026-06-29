@@ -6,8 +6,7 @@
 
 import { and, eq, isNull, sql } from "drizzle-orm";
 
-import type { CapabilityClaims } from "../capability-token";
-import type { HxDb, HxTx } from "../../host/postgres/db";
+import type { HxDb, HxTx } from "../host/postgres/db";
 import {
   hxIngestEvents,
   hxSessionAgents,
@@ -16,13 +15,23 @@ import {
   hxTurns,
   type HxSessionAgentKind,
   type HxTitleSource,
-} from "../../host/postgres/schema";
-import type { SessionKey } from "../../modules/session-vault/store/types";
+} from "../host/postgres/schema";
+import type { SessionKey } from "../modules/session-vault/store/types";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { parseChunk, type ParsedChunk, type ParsedToolCall, type ParsedTurn } from "./parse";
 
+// Attribution resolved upstream (the cloud over the tunnel, or the capability
+// token on the direct gateway). All ids are the cloud-side "external" ids the
+// hx dimension tables reconcile on; null when the upstream didn't provide one.
+export interface IngestAttribution {
+  orgExternalId: string | null;
+  repoSlug: string | null;
+  projectExternalId: string | null;
+  deviceId: string | null;
+}
+
 export interface IngestCommitInput {
-  claims: CapabilityClaims;
+  attribution: IngestAttribution;
   key: SessionKey;
   chunkId: string;
   chunkText: string;
@@ -61,16 +70,19 @@ function kindOf(meta: Record<string, unknown> | null): HxSessionAgentKind {
 
 async function resolveDimensions(
   tx: HxTx,
-  claims: CapabilityClaims,
+  attribution: IngestAttribution,
   userExternalId: string,
   lastModel: string | null,
   now: string,
 ): Promise<ResolvedDimensions> {
   const userId = await upsertUser(tx, userExternalId, now);
-  const orgId = claims.org ? await upsertOrg(tx, claims.org, now) : null;
-  const projectId = orgId && claims.project ? await upsertProject(tx, orgId, claims.project, now) : null;
-  const repoId = claims.repo ? await upsertRepo(tx, claims.repo, projectId, now) : null;
-  const deviceId = claims.deviceId ? await upsertDevice(tx, userId, claims.deviceId, now) : null;
+  const orgId = attribution.orgExternalId ? await upsertOrg(tx, attribution.orgExternalId, now) : null;
+  const projectId =
+    orgId && attribution.projectExternalId
+      ? await upsertProject(tx, orgId, attribution.projectExternalId, now)
+      : null;
+  const repoId = attribution.repoSlug ? await upsertRepo(tx, attribution.repoSlug, projectId, now) : null;
+  const deviceId = attribution.deviceId ? await upsertDevice(tx, userId, attribution.deviceId, now) : null;
   const modelId = lastModel ? await upsertModel(tx, lastModel, now) : null;
   return { userId, orgId, projectId, repoId, deviceId, modelId };
 }
@@ -183,7 +195,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   await db.transaction(async (tx) => {
     if (await alreadyIngested(tx, dedupeKey)) return;
 
-    const dims = await resolveDimensions(tx, input.claims, userExternalId, parsed.lastModel, now);
+    const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now);
 
     const existing = (
       await tx
@@ -311,7 +323,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
   await db.transaction(async (tx) => {
     if (await alreadyIngested(tx, dedupeKey)) return;
 
-    const dims = await resolveDimensions(tx, input.claims, userExternalId, parsed.lastModel, now);
+    const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now);
 
     // Ensure the parent session row exists (a child chunk can arrive first).
     const parent = (

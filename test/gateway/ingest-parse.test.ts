@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseChunk } from "../../src/gateway/ingest/parse";
+import { parseChunk } from "../../src/ingest/parse";
 
 const CLAUDE_CHUNK = [
   JSON.stringify({

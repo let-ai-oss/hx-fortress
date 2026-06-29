@@ -14,7 +14,7 @@ import {
   type CommitOutput,
 } from "./handlers";
 import { verifyCapabilityToken, type CapabilityClaims } from "./capability-token";
-import { ingestAgentCommit, ingestCommit } from "./ingest/ingest";
+import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../ingest/ingest";
 import type { HxDb } from "../host/postgres/db";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import {
@@ -86,6 +86,17 @@ interface SessionKeyInput {
   sessionId: string;
 }
 
+// On the direct gateway the cloud already attributed the session inside the
+// capability token; map those claims to the ingest attribution shape.
+function attributionFromClaims(claims: CapabilityClaims): IngestAttribution {
+  return {
+    orgExternalId: claims.org ?? null,
+    repoSlug: claims.repo ?? null,
+    projectExternalId: claims.project ?? null,
+    deviceId: claims.deviceId ?? null,
+  };
+}
+
 // Metadata ingestion is best-effort: the bytes are already committed to the
 // vault, so a Postgres hiccup must not fail the upload — it's logged and the
 // chunk re-ingests idempotently on the next commit.
@@ -103,7 +114,7 @@ async function ingestCommitMetadata(
   if (!db) return;
   try {
     await ingestCommit(db, {
-      claims,
+      attribution: attributionFromClaims(claims),
       key,
       chunkId,
       replace,
@@ -135,7 +146,7 @@ async function ingestAgentCommitMetadata(
   if (!db) return;
   try {
     await ingestAgentCommit(db, {
-      claims,
+      attribution: attributionFromClaims(claims),
       key,
       agentId,
       chunkId,
