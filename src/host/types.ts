@@ -4,6 +4,14 @@ export interface MessageDispatcher {
   dispatch(data: MsgData): Promise<MsgReply | undefined>;
 }
 
+export interface FortressPostgresConfig {
+  version?: string;
+  binariesUrl?: string;
+  dataDir?: string;
+  port?: number;
+  externalUrl?: string;
+}
+
 export interface FortressConfig {
   schemaVersion: 1;
   cloud: {
@@ -15,6 +23,7 @@ export interface FortressConfig {
   modules: {
     enabled: string[];
   };
+  postgres?: FortressPostgresConfig;
 }
 
 export interface ConfigStore {
@@ -52,6 +61,10 @@ export interface HostStatusSnapshot {
     state: ConnectionState;
     reason: string | null;
     message: string | null;
+  };
+  postgres: {
+    phase: PostgresPhase;
+    reason: string | null;
   };
   modules: ModuleRuntimeStatus[];
 }
@@ -152,4 +165,19 @@ export interface ModuleInstallParams {
 export interface ModuleLifecycleHandler {
   install(params: ModuleInstallParams): Promise<void>;
   uninstall(moduleId: string): Promise<void>;
+}
+
+export type PostgresPhase = "acquiring" | "initializing" | "ready" | "failed";
+
+export interface PostgresStatusSnapshot {
+  phase: PostgresPhase;
+  reason: string | null;
+}
+
+export interface PostgresProvider {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  status(): PostgresStatusSnapshot;
+  isReady(): boolean;
+  dsn(): string | null;
 }

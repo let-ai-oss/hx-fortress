@@ -2,7 +2,7 @@ import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { assertModuleId, type fortressPaths } from "./paths";
-import type { ConfigStore, FortressConfig } from "./types";
+import type { ConfigStore, FortressConfig, FortressPostgresConfig } from "./types";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -57,11 +57,14 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       throw new Error("modules.enabled must contain unique module ids");
     }
 
+    const postgres = parsePostgresConfig(value.postgres);
+
     return {
       schemaVersion: 1,
       cloud: { url: value.cloud.url },
       gateway: { publicUrl: gatewayPublicUrl },
       modules: { enabled: [...enabled] },
+      ...(postgres ? { postgres } : {}),
     };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
@@ -79,6 +82,25 @@ function parseGatewayPublicUrl(value: unknown): string {
   }
   assertGatewayPublicUrl(value.publicUrl);
   return value.publicUrl;
+}
+
+function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("postgres must be an object");
+  const result: FortressPostgresConfig = {};
+  for (const key of ["version", "binariesUrl", "dataDir", "externalUrl"] as const) {
+    const field = value[key];
+    if (typeof field === "undefined") continue;
+    if (typeof field !== "string") throw new Error(`postgres.${key} must be a string`);
+    result[key] = field;
+  }
+  if (typeof value.port !== "undefined") {
+    if (typeof value.port !== "number" || !Number.isInteger(value.port)) {
+      throw new Error("postgres.port must be an integer");
+    }
+    result.port = value.port;
+  }
+  return result;
 }
 
 function assertCloudUrl(value: string): void {

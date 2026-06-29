@@ -29,6 +29,8 @@ export interface GatewayDeps {
   store: () => SessionStore | null;
   /** Cached org Ed25519 public key (base64url), or null before the hub pushes it. */
   signingKey: () => Promise<string | null>;
+  /** True once the local Postgres is accepting connections. */
+  postgresReady: () => boolean;
   logger: GatewayLogger;
   port: number;
 }
@@ -90,7 +92,7 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
       // is live (enrolled, connected, credentials valid), otherwise 503. Use
       // this to gate traffic; /healthz to gate liveness.
       if (req.method === "GET" && url.pathname === "/readyz") {
-        const ready = deps.store() !== null;
+        const ready = deps.store() !== null && deps.postgresReady();
         return json({ ok: ready, ready }, ready ? 200 : 503);
       }
 

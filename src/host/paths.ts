@@ -20,10 +20,18 @@ export function defaultFortressRoot(): string {
 
 export function fortressPaths(root = defaultFortressRoot()) {
   const modules = path.join(root, "modules");
+  const postgres = path.join(root, "postgres");
 
   return {
     root,
     config: path.join(root, "config.json"),
+    postgresRoot: postgres,
+    postgresCache: path.join(postgres, "cache"),
+    postgresSocket: path.join(postgres, "socket"),
+    defaultPgData: path.join(root, "pgdata"),
+    postgresVersionDir(version: string): string {
+      return path.join(postgres, version);
+    },
     credentials: path.join(root, "identity", "credentials.json"),
     pendingEnrollment: path.join(root, "identity", "pending-enrollment.json"),
     signingKey: path.join(root, "identity", "signing-key"),

@@ -91,6 +91,7 @@ describe("hx → Fortress gateway → bucket", () => {
         logger: silentLogger,
         signingKey: async () => publicKeyB64url,
         store: () => store,
+        postgresReady: () => true,
       });
       const base = `http://127.0.0.1:${port}`;
       const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -175,6 +176,7 @@ describe("hx → Fortress gateway → bucket", () => {
         logger: silentLogger,
         signingKey: async () => publicKeyB64url,
         store: () => store,
+        postgresReady: () => true,
       });
 
       const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
@@ -217,6 +219,7 @@ describe("hx → Fortress gateway → bucket", () => {
         logger: silentLogger,
         signingKey: async () => "anything",
         store: () => null,
+        postgresReady: () => true,
       });
       const res = await fetch(`http://127.0.0.1:${port}/sessions/append-url`, {
         method: "POST",

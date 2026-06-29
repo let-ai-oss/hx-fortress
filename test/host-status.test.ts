@@ -34,6 +34,7 @@ describe("Fortress runtime status", () => {
       "connection",
       "host",
       "modules",
+      "postgres",
       "schemaVersion",
     ]);
     expect(await readdir(path.dirname(paths.status))).toEqual(["status.json"]);
@@ -58,6 +59,7 @@ function snapshot(
       reason: null,
       message: null,
     },
+    postgres: { phase: "ready", reason: null },
     modules: [
       {
         id: "session_vault",
