@@ -10,6 +10,7 @@ import {
   ingestCommit,
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
+import { listSessionsForUser } from "../../../query/list-sessions.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -34,6 +35,38 @@ export interface IngestCommitRpc {
   attribution: IngestAttribution;
 }
 
+/** One prepared "my sessions" row, read from the fortress hx Postgres (MC-2415).
+ *  Names (org/project/repo/model/device) are resolved fortress-side from the
+ *  mirrored dimension tables, so the cloud needs no further joins to render the
+ *  list. Mirrors the let-forge `FortressSessionRow` contract — keep in sync. */
+export interface FortressSessionRow {
+  family: string;
+  sessionId: string;
+  title: string | null;
+  titleSource: "user" | "ai" | "fallback" | null;
+  cwd: string | null;
+  gitBranch: string | null;
+  sourcePath: string | null;
+  repoSlug: string | null;
+  orgName: string | null;
+  projectName: string | null;
+  model: string | null;
+  eventCount: number;
+  userTextCount: number;
+  assistantCount: number;
+  toolCallCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  estCostUsd: number | null;
+  bytesUploaded: number;
+  deviceName: string | null;
+  firstSeenAt: string;
+  lastActivityAt: string | null;
+  updatedAt: string;
+}
+
 export type VaultRpcRequest =
   | { method: "signStagingUpload"; key: SessionKey; chunkId: string }
   | { method: "readChunkText"; key: SessionKey; chunkId: string }
@@ -49,6 +82,10 @@ export type VaultRpcRequest =
   | { method: "writeArtifact"; key: SessionKey; name: string; text: string }
   | { method: "readArtifactText"; key: SessionKey; name: string }
   | { method: "listSessionMetadata"; userId: string }
+  // Prepared "my sessions" read against the fortress hx Postgres (MC-2415).
+  // Postgres-backed vaults only; older binaries reject the unknown method and
+  // the cloud falls back to listSessionMetadata.
+  | { method: "listSessions"; userId: string; limit?: number }
   // Metadata-ingest RPCs (MC-2406) — written to the fortress hx schema. Honored
   // by vaults built with the embedded/external Postgres; older binaries reject
   // the unknown method, which the cloud treats as best-effort.
@@ -66,6 +103,7 @@ export type VaultRpcResult =
   | { method: "writeArtifact"; value: { ok: true } }
   | { method: "readArtifactText"; value: string | null }
   | { method: "listSessionMetadata"; value: SessionMetadata[] }
+  | { method: "listSessions"; value: FortressSessionRow[] }
   | { method: "ingestCommit"; value: { ok: true } }
   | { method: "ingestAgentCommit"; value: { ok: true } }
   | { method: "selfTest"; value: { ok: true } };
@@ -112,6 +150,13 @@ export async function handleVaultRpc(
       return { method: req.method, value: await store.readArtifactText(req.key, req.name) };
     case "listSessionMetadata":
       return { method: req.method, value: await store.listSessionMetadata(req.userId) };
+    case "listSessions": {
+      if (!db) throw new Error("postgres_not_ready");
+      return {
+        method: req.method,
+        value: await listSessionsForUser(db, { userId: req.userId, limit: req.limit }),
+      };
+    }
     case "ingestCommit": {
       if (!db) throw new Error("postgres_not_ready");
       await ingestCommit(db, {

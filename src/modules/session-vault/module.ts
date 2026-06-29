@@ -7,7 +7,12 @@ import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials } from "./credentials.js";
 import { buildStore } from "./store.js";
 import type { HxDb } from "../../host/postgres/db.js";
-import type { Module, ModuleContext, ScopedLogger } from "../../host/types.js";
+import type {
+  HxIngestNotification,
+  Module,
+  ModuleContext,
+  ScopedLogger,
+} from "../../host/types.js";
 
 /** The session_vault module plus a getter for its live store, so the ingest
  *  gateway can presign against the same store the tunnel RPCs already use. */
@@ -19,6 +24,9 @@ export interface SessionVaultDeps {
   /** Resolves the hx-db handle so tunnel-relayed commits can be mirrored into
    *  the fortress Postgres. Null until Postgres is ready. */
   db?: () => HxDb | null;
+  /** Push a realtime invalidation to the cloud after a tunnel-relayed ingest
+   *  (MC-2415). Best-effort; omitted in tests. */
+  notify?: (evt: HxIngestNotification) => void;
 }
 
 export default function createModule(deps: SessionVaultDeps = {}): SessionVaultModule {
@@ -63,6 +71,14 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       const req = data.payload as VaultRpcRequest;
       try {
         const result = await handleVaultRpc(store, req, deps.db?.() ?? null);
+        // A relayed commit just changed this user's sessions — tell the cloud to
+        // refresh their live list (MC-2415). Best-effort, after the write landed.
+        if (req.method === "ingestCommit" || req.method === "ingestAgentCommit") {
+          deps.notify?.({
+            userExternalId: req.key.userId,
+            orgExternalId: req.attribution.orgExternalId,
+          });
+        }
         return { ok: true, payload: result };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

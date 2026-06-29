@@ -215,6 +215,7 @@ function createHarness(options: HarnessOptions = {}) {
       events.push("connection:close");
       connectionState = "offline";
     },
+    notifyIngest() {},
   };
   const supervisor: ModuleSupervisor = {
     async startAll(moduleIds): Promise<readonly ModuleStartResult[]> {

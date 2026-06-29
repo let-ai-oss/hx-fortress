@@ -32,6 +32,7 @@ describe("runFortressHost", () => {
           }),
           open: async () => {},
           close: async () => {},
+          notifyIngest: () => {},
         };
         return capturedConnection;
       },
