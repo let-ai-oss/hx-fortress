@@ -4,7 +4,7 @@
 // one chunk lands in a single transaction; a per-chunk dedupe key on
 // hx.ingest_events makes a re-committed chunk a no-op (idempotent retries).
 
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import type { HxDb, HxTx } from "../host/postgres/db";
 import {
@@ -17,6 +17,7 @@ import {
   type HxTitleSource,
 } from "../host/postgres/schema";
 import { hxEmbeddings } from "../host/postgres/schema/embeddings";
+import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
@@ -39,6 +40,173 @@ async function deleteOrphanedEmbeddings(tx: HxTx, turnIds: string[]): Promise<vo
   await tx
     .delete(hxEmbeddings)
     .where(and(eq(hxEmbeddings.ownerKind, "turn"), inArray(hxEmbeddings.ownerId, turnIds)));
+}
+
+// ── Per-session productivity facts (§13-A4) ──────────────────────────────────
+// Derived at ingest from the session's turns + tool_calls and upserted into
+// hx.session_facts in the SAME commit txn (recomputed from the LIVE post-write
+// state, so `replace` — which deletes + reinserts the lane first — never
+// double-counts). Scoped to the PARENT lane (agent_id IS NULL): the §10
+// completeness guarantee is parent-lane.
+
+/** Cap each inter-event gap at a fixed idle threshold (§13-A4: e.g. 5 min). */
+const IDLE_CAP_MS = 5 * 60 * 1000;
+/** Tools whose inputs carry a file diff (files_touched / lines_±). */
+const DIFF_TOOLS = new Set(["Edit", "Write", "MultiEdit"]);
+
+/** Line count of a newline-delimited string; non-string / empty ⇒ 0 (a deletion
+ *  adds no lines). "a\nb" ⇒ 2. */
+function lineCount(v: unknown): number {
+  return typeof v === "string" && v.length > 0 ? v.split("\n").length : 0;
+}
+
+interface DiffMetrics {
+  filesTouched: number;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+/** files_touched / lines_± from the Edit/Write/MultiEdit tool inputs (§13-A4):
+ *  Write → content (added only); Edit → old_string/new_string; MultiEdit → the
+ *  sum over edits[]. files_touched = distinct file_path count across all three. */
+function diffMetrics(calls: { toolName: string | null; input: Record<string, unknown> | null }[]): DiffMetrics {
+  const files = new Set<string>();
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  for (const c of calls) {
+    if (!c.toolName || !DIFF_TOOLS.has(c.toolName) || !c.input) continue;
+    const input = c.input;
+    if (typeof input.file_path === "string" && input.file_path) files.add(input.file_path);
+    if (c.toolName === "Write") {
+      linesAdded += lineCount(input.content);
+    } else if (c.toolName === "Edit") {
+      linesAdded += lineCount(input.new_string);
+      linesRemoved += lineCount(input.old_string);
+    } else {
+      // MultiEdit — one file_path, an edits[] of { old_string, new_string }.
+      const edits = Array.isArray(input.edits) ? input.edits : [];
+      for (const e of edits) {
+        if (e && typeof e === "object") {
+          const ed = e as Record<string, unknown>;
+          linesAdded += lineCount(ed.new_string);
+          linesRemoved += lineCount(ed.old_string);
+        }
+      }
+    }
+  }
+  return { filesTouched: files.size, linesAdded, linesRemoved };
+}
+
+/** active_ms = idle-capped sum of inter-event gaps over event_ts, applying the
+ *  §10 fill rule: a null event_ts INHERITS the prior turn's work-time; a LEADING
+ *  null run is seeded from the session's first known activity, and from `seedTs`
+ *  (the session's first_event_at / upload time, never commit-time) when the
+ *  session has no event_ts at all. Returns active_ms + the primary-day basis
+ *  (min(event_ts), else the seed). `orderedEventTs` is the parent lane in seq
+ *  order. */
+function activeMsFromEventTs(
+  orderedEventTs: (string | null)[],
+  seedTs: string | null,
+): { activeMs: number; basisMs: number | null } {
+  const parse = (v: string | null): number | null => {
+    if (v == null) return null;
+    const ms = Date.parse(v);
+    return Number.isFinite(ms) ? ms : null;
+  };
+
+  let firstKnownMs: number | null = null;
+  let minMs: number | null = null;
+  for (const ts of orderedEventTs) {
+    const ms = parse(ts);
+    if (ms == null) continue;
+    if (firstKnownMs == null) firstKnownMs = ms;
+    if (minMs == null || ms < minMs) minMs = ms;
+  }
+  const seedMs = parse(seedTs);
+  // The leading null run is seeded from first known activity, else the seed.
+  let prev: number | null = firstKnownMs ?? seedMs;
+
+  let activeMs = 0;
+  let last: number | null = null;
+  for (const ts of orderedEventTs) {
+    const ms = parse(ts);
+    let cur: number;
+    if (ms != null) {
+      cur = ms;
+      prev = ms; // a real ts becomes the basis the next null inherits
+    } else if (prev != null) {
+      cur = prev; // inherit the prior turn's work-time
+    } else {
+      continue; // no basis yet (all-null prefix, no seed) — skip
+    }
+    if (last != null) {
+      const gap = cur - last;
+      if (gap > 0) activeMs += Math.min(gap, IDLE_CAP_MS);
+    }
+    last = cur;
+  }
+  return { activeMs, basisMs: minMs ?? seedMs };
+}
+
+/** Recompute + upsert the session's hx.session_facts row from its LIVE parent-
+ *  lane turns + tool_calls (§13-A4). Called in the commit txn AFTER this chunk's
+ *  turns/tool_calls are written. `seedTs` = the session's first_event_at / upload
+ *  time (the fill-rule seed for an all-null-ts session). */
+async function recomputeSessionFacts(
+  tx: HxTx,
+  sessionId: string,
+  userId: string,
+  seedTs: string | null,
+  now: string,
+): Promise<void> {
+  const turns = await tx
+    .select({ kind: hxTurns.kind, eventTs: hxTurns.eventTs })
+    .from(hxTurns)
+    .where(and(eq(hxTurns.sessionId, sessionId), isNull(hxTurns.agentId)))
+    .orderBy(asc(hxTurns.seq));
+
+  const calls = await tx
+    .select({ toolName: hxToolCalls.toolName, input: hxToolCalls.input })
+    .from(hxToolCalls)
+    .where(and(eq(hxToolCalls.sessionId, sessionId), isNull(hxToolCalls.agentId)));
+
+  let userMsgs = 0;
+  let assistantMsgs = 0;
+  for (const t of turns) {
+    if (t.kind === "user_text") userMsgs += 1;
+    else if (t.kind === "assistant_text") assistantMsgs += 1;
+  }
+
+  const toolCallsByType: Record<string, number> = {};
+  for (const c of calls) {
+    if (!c.toolName) continue; // a tool_result-only row carries an empty name
+    toolCallsByType[c.toolName] = (toolCallsByType[c.toolName] ?? 0) + 1;
+  }
+
+  const { activeMs, basisMs } = activeMsFromEventTs(
+    turns.map((t) => t.eventTs),
+    seedTs,
+  );
+  // primary_day = date(min(event_ts)) in UTC.
+  const primaryDay = basisMs == null ? null : new Date(basisMs).toISOString().slice(0, 10);
+  const { filesTouched, linesAdded, linesRemoved } = diffMetrics(calls);
+
+  const row = {
+    userId,
+    primaryDay,
+    activeMs,
+    userMsgs,
+    assistantMsgs,
+    toolCallsByType,
+    filesTouched,
+    linesAdded,
+    linesRemoved,
+    updatedAt: now,
+  };
+  await tx
+    .insert(hxSessionFacts)
+    .values({ sessionId, ...row })
+    .onConflictDoUpdate({ target: hxSessionFacts.sessionId, set: row });
 }
 
 // Attribution resolved upstream (the cloud over the tunnel, or the capability
@@ -328,6 +496,17 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     await insertTurns(tx, sessionRowId, null, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
 
+    // Per-session productivity facts (§13-A4) — recomputed from the live parent-
+    // lane state, so a `replace` (which re-indexed the lane above) recomputes
+    // cleanly. Seed the §10 fill rule from the session's first activity / upload.
+    await recomputeSessionFacts(
+      tx,
+      sessionRowId,
+      dims.userId,
+      existing?.firstEventAt ?? parsed.firstActivityAt ?? now,
+      now,
+    );
+
     await tx.insert(hxIngestEvents).values({
       userId: dims.userId,
       eventType: "hx.session.updated",
@@ -479,6 +658,10 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
 
     await insertTurns(tx, sessionRowId, agentRowId, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, agentRowId, parsed.toolCalls, now);
+
+    // hx.session_facts is intentionally NOT recomputed here — the §10/§13-A4
+    // completeness guarantee is scoped to the parent lane (agent_id IS NULL),
+    // which a child-lane commit does not touch.
 
     await tx.insert(hxIngestEvents).values({
       userId: dims.userId,

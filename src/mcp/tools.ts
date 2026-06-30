@@ -3,15 +3,17 @@
 // (§13-C); the fortress matches those enumerated identities on its live session
 // rows (A6) and answers from its OWN Postgres + local blob.
 //
-// This slice ships the keyword + read + metadata tools. hx_semantic_search and
-// hx_sessions_aggregate are registered for contract completeness but are served
-// by net-new machinery this slice does not build (the OpenAI embed worker /
-// hx.embeddings HNSW, and the per-session hx.session_facts index) — they return
-// a structured fallback signal rather than partial or misleading data.
+// The registry serves every hx_* tool from the fortress's own Postgres + blob:
+// keyword (hx_session_search), metadata (hx_sessions_list / hx_session_get),
+// transcript reads (hx_session_read_events), semantic (hx_semantic_search over the
+// hx.embeddings HNSW — degrades to keyword when the vector index is absent), and
+// productivity (hx_sessions_aggregate over the per-session hx.session_facts index,
+// §13-A4).
 
 import type { HxDb } from "../host/postgres/db";
 import type { Embedder } from "../modules/embed-worker/openai";
 import type { SessionStore } from "../modules/session-vault/store/types";
+import { hxSessionsAggregate } from "../query/aggregate";
 import { hxSessionGet } from "../query/get-session";
 import { hxSessionReadEvents } from "../query/read-events";
 import { hxSessionSearch } from "../query/search";
@@ -254,11 +256,9 @@ export const MCP_TOOLS: McpTool[] = [
     },
   },
   {
-    // STUB — served by the net-new per-session hx.session_facts index (a later
-    // slice). No partial counts (a misleading 0 is worse than an explicit signal).
     name: "hx_sessions_aggregate",
     description:
-      "Aggregate productivity metrics over the in-scope sessions (sessions, active time, message counts, tool calls by type, files touched, lines changed).",
+      "Aggregate productivity metrics over the in-scope sessions (total sessions, active time, user/assistant message counts, tool calls by type, files touched, lines added/removed), bucketed by each session's primary day. Computed live from the per-session hx.session_facts index JOINed to the live session row.",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,8 +268,19 @@ export const MCP_TOOLS: McpTool[] = [
       },
       required: ["scope"],
     },
-    async handle() {
-      return err({ error: "facts_index_unpopulated", detail: "per-session facts index not built" });
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      return ok(
+        await hxSessionsAggregate(ctx.db!, {
+          scope: parseScope(a.scope),
+          family: str(a.family),
+          fromDate: str(a.fromDate),
+          toDate: str(a.toDate),
+          cwdContains: str(a.cwdContains),
+        }),
+      );
     },
   },
 ];

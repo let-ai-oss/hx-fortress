@@ -14,6 +14,7 @@ import sql0004Analysis from "./0004_analysis.sql" with { type: "text" };
 import sql0005Views from "./0005_views.sql" with { type: "text" };
 import sql0006Embeddings from "./0006_embeddings.sql" with { type: "text" };
 import sql0007TurnKind from "./0007_turn_kind.sql" with { type: "text" };
+import sql0008SessionFacts from "./0008_session_facts.sql" with { type: "text" };
 import sql0010EmbeddingsIndexes from "./0010_embeddings_indexes.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
@@ -29,6 +30,9 @@ export const migrations: Migration[] = [
   // Net-new `kind` (10-value taxonomy) + `text` nullable for text-less kinds;
   // backfills `kind` from the existing 3-value `role`. NOT gated.
   { name: "0007_turn_kind", sql: sql0007TurnKind },
+  // Net-new per-session productivity facts (§13-A4) — derived at ingest from the
+  // session's turns/tool_calls; the live aggregate JOINs it to hx.sessions. NOT gated.
+  { name: "0008_session_facts", sql: sql0008SessionFacts },
   // Gated (A7): content_hash btree + UNIQUE(owner_kind, owner_id) on the gated
   // hx.embeddings. Separate migration (never folded into 0006) so the append-
   // only runner applies it once pgvector is present and skips it otherwise.

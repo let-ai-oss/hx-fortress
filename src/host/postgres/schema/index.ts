@@ -7,3 +7,4 @@ export * from "./dimensions";
 export * from "./sessions";
 export * from "./transcript";
 export * from "./analysis";
+export * from "./facts";
