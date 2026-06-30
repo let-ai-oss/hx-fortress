@@ -13,3 +13,17 @@ test("mcpRpcResult up-frame round-trips", () => {
   };
   expect(decodeFrame<FortressToHubFrame>(encodeFrame(f))).toEqual(f);
 });
+
+test("mcpRpcError up-frame round-trips", () => {
+  const f: FortressToHubFrame = { t: "mcpRpcError", id: "9", error: "boom" };
+  expect(decodeFrame<FortressToHubFrame>(encodeFrame(f))).toEqual(f);
+});
+
+test("mcpRpcResult with isError round-trips", () => {
+  const f: FortressToHubFrame = {
+    t: "mcpRpcResult",
+    id: "2",
+    result: { method: "callTool", content: "Tool failed: x", isError: true },
+  };
+  expect(decodeFrame<FortressToHubFrame>(encodeFrame(f))).toEqual(f);
+});

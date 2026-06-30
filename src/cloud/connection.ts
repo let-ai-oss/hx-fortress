@@ -50,7 +50,7 @@ export async function dispatchMcpFrame(
     send({ t: "mcpRpcResult", id: frame.id, result });
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    logger.error(`mcp tunnel error: ${error}`);
+    logger.error(`mcp tunnel error: ${error}`, err);
     send({ t: "mcpRpcError", id: frame.id, error });
   }
 }
