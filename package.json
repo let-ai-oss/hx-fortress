@@ -1,6 +1,6 @@
 {
   "name": "hx-fortress",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "type": "module",
   "bin": {
@@ -30,6 +30,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1068.0",
     "@google-cloud/storage": "^7.21.0",
     "drizzle-orm": "^0.45.2",
-    "jose": "^6.2.3"
+    "jose": "^6.2.3",
+    "zod": "^4.4.3"
   }
 }
