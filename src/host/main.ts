@@ -204,6 +204,10 @@ export async function runFortressHost(
       port: gateway.port,
       logger: bus.scopeFor("gateway"),
       signingKey: () => signingKeyStore.load(),
+      // The fortress's own org id (from the enrolled cloud credential) lets the
+      // gateway reject a capability token whose `aud` names a different org —
+      // anti cross-org replay. Null before enrollment (no token verifies then).
+      ownOrgId: () => credentialStore.load().then((c) => c?.orgId ?? null).catch(() => null),
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
       db: resolveHxDb,

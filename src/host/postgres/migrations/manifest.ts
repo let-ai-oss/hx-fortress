@@ -33,6 +33,8 @@ export const migrations: Migration[] = [
   // Net-new per-session productivity facts (§13-A4) — derived at ingest from the
   // session's turns/tool_calls; the live aggregate JOINs it to hx.sessions. NOT gated.
   { name: "0008_session_facts", sql: sql0008SessionFacts },
+  // 0009 is intentionally absent: the spec slotted an "embed-job lease" table here, but
+  // the impl uses one in-process worker (anti-join + ON CONFLICT unique-index fence, 0010) instead.
   // Gated (A7): content_hash btree + UNIQUE(owner_kind, owner_id) on the gated
   // hx.embeddings. Separate migration (never folded into 0006) so the append-
   // only runner applies it once pgvector is present and skips it otherwise.

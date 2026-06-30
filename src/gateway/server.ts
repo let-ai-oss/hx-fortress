@@ -39,6 +39,10 @@ export interface GatewayDeps {
   store: () => SessionStore | null;
   /** Cached org Ed25519 public key (base64url), or null before the hub pushes it. */
   signingKey: () => Promise<string | null>;
+  /** This fortress's own org id (from its enrolled cloud credential), or null
+   *  before enrollment. Lets verify reject a capability token whose `aud` names a
+   *  DIFFERENT org — anti cross-org replay. Omitted ⇒ no aud-vs-org check. */
+  ownOrgId?: () => Promise<string | null>;
   /** True once the local Postgres is accepting connections. */
   postgresReady: () => boolean;
   /** Resolves the Drizzle handle on the bundled hx-db, or null before it's ready. */
@@ -71,7 +75,10 @@ async function authed(req: Request, deps: GatewayDeps): Promise<CapabilityClaims
   const key = await deps.signingKey();
   if (!key) return null;
   try {
-    return await verifyCapabilityToken(header.slice(7).trim(), key);
+    // Bind the token to this fortress's own org id when we know it: verify
+    // rejects an `aud` naming a different org (anti cross-org replay).
+    const ownOrgId = deps.ownOrgId ? await deps.ownOrgId() : null;
+    return await verifyCapabilityToken(header.slice(7).trim(), key, ownOrgId);
   } catch {
     return null;
   }

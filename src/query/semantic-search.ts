@@ -112,7 +112,10 @@ export async function hxSemanticSearch(
 
   const k = Math.min(Math.max(1, input.k ?? DEFAULT_K), MAX_K);
 
-  let queryVec: number[] | undefined;
+  // The embedder may dead-letter an un-embeddable input as a null vector
+  // (per-input poison-pill handling), so a null/empty query vector degrades to
+  // keyword exactly like an embed throw.
+  let queryVec: number[] | null | undefined;
   try {
     [queryVec] = await embedder.embed([queryText]);
   } catch {
@@ -133,20 +136,40 @@ export async function hxSemanticSearch(
   if (input.toDate) conditions.push(lte(hxTurns.eventTs, input.toDate));
 
   try {
-    const rows = await db
-      .select({
-        sessionId: hxSessions.sessionId,
-        seq: hxTurns.seq,
-        kind: hxTurns.kind,
-        text: hxTurns.text,
-        distance,
-      })
-      .from(hxEmbeddings)
-      .innerJoin(hxTurns, eq(hxTurns.id, hxEmbeddings.ownerId))
-      .innerJoin(hxSessions, eq(hxSessions.id, hxTurns.sessionId))
-      .where(and(...conditions))
-      .orderBy(distance)
-      .limit(k * OVERFETCH);
+    // Selective-scope recall: the HNSW index applies the scope WHERE only AFTER
+    // its approximate distance scan, so on a narrow scope pgvector's default
+    // hnsw.ef_search (40) can surface fewer than k in-scope rows — or none.
+    // Raise the candidate pool and, on pgvector ≥ 0.8, let iterative scan keep
+    // probing until k post-filter rows are found. Both are SET LOCAL inside one
+    // transaction so they scope to THIS query alone and never leak to other
+    // pooled queries; k×OVERFETCH stays as a backstop cap.
+    const rows = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL hnsw.ef_search = 200`);
+      // hnsw.iterative_scan exists only on pgvector ≥ 0.8; on older builds it is
+      // an unknown GUC that errors. Isolate the SET in a savepoint so that error
+      // rolls back only the savepoint and never poisons the outer transaction.
+      try {
+        await tx.transaction(async (inner) => {
+          await inner.execute(sql`SET LOCAL hnsw.iterative_scan = relaxed_order`);
+        });
+      } catch {
+        // pgvector < 0.8 — no iterative scan; ef_search + OVERFETCH carry recall.
+      }
+      return tx
+        .select({
+          sessionId: hxSessions.sessionId,
+          seq: hxTurns.seq,
+          kind: hxTurns.kind,
+          text: hxTurns.text,
+          distance,
+        })
+        .from(hxEmbeddings)
+        .innerJoin(hxTurns, eq(hxTurns.id, hxEmbeddings.ownerId))
+        .innerJoin(hxSessions, eq(hxSessions.id, hxTurns.sessionId))
+        .where(and(...conditions))
+        .orderBy(distance)
+        .limit(k * OVERFETCH);
+    });
 
     const hits = rows.slice(0, k).map((r) => ({
       sessionId: r.sessionId,

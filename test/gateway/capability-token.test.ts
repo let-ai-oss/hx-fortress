@@ -38,4 +38,33 @@ describe("verifyCapabilityToken", () => {
     const { rawB64url, token } = await makeKeyAndToken({ org: "org_1", repo: "acme/app" }, "-1s");
     await expect(verifyCapabilityToken(token, rawB64url)).rejects.toThrow();
   });
+
+  it("rejects a token with no exp claim (requiredClaims)", async () => {
+    const { publicKey, privateKey } = await generateKeyPair("EdDSA", { extractable: true });
+    const rawB64url = (await exportJWK(publicKey)).x as string;
+    // Minted WITHOUT setExpirationTime — an eternal token must be refused.
+    const token = await new SignJWT({ org: "org_1", repo: "*" })
+      .setProtectedHeader({ alg: "EdDSA" })
+      .setIssuedAt()
+      .sign(privateKey);
+    await expect(verifyCapabilityToken(token, rawB64url)).rejects.toThrow();
+  });
+
+  it("rejects a token whose aud names a different org (anti cross-org replay)", async () => {
+    const { rawB64url, token } = await makeKeyAndToken({ org: "org_1", repo: "*", aud: "org_1" });
+    await expect(verifyCapabilityToken(token, rawB64url, "org_2")).rejects.toThrow();
+  });
+
+  it("accepts a token whose aud matches the fortress org id", async () => {
+    const { rawB64url, token } = await makeKeyAndToken({ org: "org_1", repo: "*", aud: "org_1" });
+    const claims = await verifyCapabilityToken(token, rawB64url, "org_1");
+    expect(claims.aud).toBe("org_1");
+  });
+
+  it("accepts a token with no aud even when the fortress org id is known (rollout tolerance)", async () => {
+    const { rawB64url, token } = await makeKeyAndToken({ org: "org_1", repo: "*" });
+    const claims = await verifyCapabilityToken(token, rawB64url, "org_2");
+    expect(claims.org).toBe("org_1");
+    expect(claims.aud).toBeUndefined();
+  });
 });

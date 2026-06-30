@@ -50,6 +50,27 @@
       "when": 1782504154604,
       "tag": "0006_embeddings",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1782504554604,
+      "tag": "0007_turn_kind",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782504954604,
+      "tag": "0008_session_facts",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782505354604,
+      "tag": "0010_embeddings_indexes",
+      "breakpoints": true
     }
   ]
 }
