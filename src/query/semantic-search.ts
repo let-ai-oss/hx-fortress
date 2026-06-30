@@ -171,13 +171,20 @@ export async function hxSemanticSearch(
         .limit(k * OVERFETCH);
     });
 
-    const hits = rows.slice(0, k).map((r) => ({
-      sessionId: r.sessionId,
-      seq: r.seq,
-      kind: r.kind,
-      snippet: snippetOf(r.text),
-      distance: Number(r.distance),
-    }));
+    // relaxed_order (iterative scan) can return candidates slightly out of
+    // distance order, so re-sort the over-fetched pool by the exact computed
+    // distance before taking the k nearest — strict final ordering, cheap on the
+    // k×OVERFETCH pool, and not recoverable downstream once a nearer row is dropped.
+    const hits = [...rows]
+      .sort((a, b) => Number(a.distance) - Number(b.distance))
+      .slice(0, k)
+      .map((r) => ({
+        sessionId: r.sessionId,
+        seq: r.seq,
+        kind: r.kind,
+        snippet: snippetOf(r.text),
+        distance: Number(r.distance),
+      }));
     return { hits };
   } catch {
     // hx.embeddings missing (0006 unapplied) or any vector fault → keyword.

@@ -89,6 +89,20 @@ describe("hx-fortress embed — openai input isolation (A3 poison pill)", () => 
     const embedder = createOpenAIEmbedder({ apiKey: "bad", dimensions: DIMS, fetchImpl });
     await expect(embedder.embed(["anything"])).rejects.toBeInstanceOf(EmbedAccountError);
   });
+
+  test("a transient 503 (after retries) THROWS — pass aborts + retries, NOT a per-input dead-letter", async () => {
+    // A 5xx is transient/global, not input-specific: it must reject so the worker
+    // retries the whole pass next time, never silently drop good turns as poison.
+    const fetchImpl = (async () => new Response(JSON.stringify({ error: { message: "service unavailable" } }), { status: 503 })) as unknown as typeof fetch;
+    const embedder = createOpenAIEmbedder({ apiKey: "test", dimensions: DIMS, fetchImpl, maxRetries: 0 });
+    await expect(embedder.embed(["a", "b", "c"])).rejects.toThrow();
+  });
+
+  test("a 404 (bad base url / model) THROWS — global config error, not per-input dead-letter", async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify({ error: { message: "model not found" } }), { status: 404 })) as unknown as typeof fetch;
+    const embedder = createOpenAIEmbedder({ apiKey: "test", dimensions: DIMS, fetchImpl });
+    await expect(embedder.embed(["x"])).rejects.toThrow();
+  });
 });
 
 // ── worker drain + dead-letter (DB, no OpenAI) ───────────────────────────────

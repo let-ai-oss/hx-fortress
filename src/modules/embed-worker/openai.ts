@@ -155,9 +155,18 @@ export function createOpenAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
     } catch (err) {
       if (err instanceof EmbedAccountError) throw err; // pass-fatal — let it abort
 
+      // Only an HTTP 400 is INPUT-specific (over-long / malformed for this input).
+      // A 5xx, a non-quota 429 rate-limit, a 404 (bad base url / model), or a raw
+      // network throw (no status) is TRANSIENT or GLOBAL — re-throw so the pass
+      // aborts and retries next pass, instead of splitting and dead-lettering good
+      // turns for an infra blip (which would silently drop the whole in-flight
+      // backlog after deadLetterThreshold passes, mislabeled "unembeddable input").
+      const httpErr = err as HttpEmbedError;
+      if (httpErr.status !== 400) throw err;
+
       if (inputs.length > 1) {
-        // Isolate the offender: split and recurse. A length error (or any
-        // non-account error) on the whole batch must never drop the good inputs.
+        // A 400 on a multi-input batch: split to isolate the offending input(s)
+        // without dropping the good ones alongside it.
         const mid = Math.floor(inputs.length / 2);
         const [left, right] = await Promise.all([
           embedBatch(inputs.slice(0, mid)),
@@ -166,12 +175,10 @@ export function createOpenAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
         return [...left, ...right];
       }
 
-      // Single input. If it's an over-length 400, shrink and retry down to a
-      // floor before giving up; any other non-account error → dead-letter it
-      // this pass (null). The worker counts consecutive nulls and stops
-      // re-claiming a turn after a threshold, so even an undiagnosable input
-      // can't stall the pass forever.
-      const httpErr = err as HttpEmbedError;
+      // Single 400. If it's an over-length error, shrink and retry down to a floor
+      // before giving up; a non-length 400 (genuinely malformed for this one input)
+      // is dead-lettered (null). The worker counts consecutive nulls and stops
+      // re-claiming a turn after a threshold, so a poison input can't stall forever.
       if (isLengthError(httpErr.status, String(httpErr.detail ?? httpErr.message ?? ""))) {
         let text = inputs[0];
         while (text.length > MIN_SHRINK_CHARS) {
@@ -181,7 +188,9 @@ export function createOpenAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
             return [vec ?? null];
           } catch (retryErr) {
             if (retryErr instanceof EmbedAccountError) throw retryErr;
-            // still failing — keep shrinking until the floor, then dead-letter
+            // A transient/global error mid-shrink → abort the pass (retry next pass)
+            // rather than dead-letter; only a persistent 400 keeps shrinking.
+            if ((retryErr as HttpEmbedError).status !== 400) throw retryErr;
           }
         }
       }
