@@ -28,6 +28,8 @@ export interface ListSessionsOptions {
   /** Cloud user id, carried as hx_users.external_id. */
   userId: string;
   limit?: number;
+  /** Rows to skip from the most-recent end, for pagination. Defaults to 0. */
+  offset?: number;
 }
 
 /** List one user's sessions (most recent first), shaped for the cloud's "my
@@ -38,6 +40,7 @@ export async function listSessionsForUser(
   opts: ListSessionsOptions,
 ): Promise<FortressSessionRow[]> {
   const limit = Math.min(Math.max(1, opts.limit ?? DEFAULT_LIMIT), MAX_LIMIT);
+  const offset = Math.max(0, opts.offset ?? 0);
   const rows = await db
     .select({
       family: hxSessions.family,
@@ -76,7 +79,8 @@ export async function listSessionsForUser(
     .leftJoin(hxDevices, eq(hxDevices.id, hxSessions.deviceId))
     .where(and(eq(hxUsers.externalId, opts.userId), isNull(hxSessions.deletedAt)))
     .orderBy(sql`${hxSessions.lastActivityAt} DESC NULLS LAST`)
-    .limit(limit);
+    .limit(limit)
+    .offset(offset);
 
   return rows.map((r) => ({
     family: r.family,

@@ -263,6 +263,14 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(rows[0].sessionId).toBe("sess-rpc");
   });
 
+  test("listSessionsForUser skips rows when offset is set", async () => {
+    // With offset=1, the most-recent session (sess-rpc) is skipped.
+    const rows = await listSessionsForUser(db, { userId: "user-ext-1", offset: 1 });
+    const ids = rows.map((r) => r.sessionId);
+    expect(ids).not.toContain("sess-rpc");
+    expect(ids).toContain("sess-1");
+  });
+
   test("the listSessions tunnel RPC returns prepared rows", async () => {
     const noopStore = {} as SessionStore;
     const res = await handleVaultRpc(noopStore, { method: "listSessions", userId: "user-ext-1" }, db);
