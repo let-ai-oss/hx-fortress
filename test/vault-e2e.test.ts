@@ -23,6 +23,7 @@ import { FakeHub } from "./fake-hub";
 // ── constants ────────────────────────────────────────────────────────────────
 
 const TEST_TIMING = { heartbeatMs: 20, reconnectMinMs: 10, reconnectMaxMs: 50 };
+const NOOP_MCP = { handle: async () => ({ method: "listTools" as const, tools: [] }) };
 const IDENTITY = { version: "0.0.0-test", protocolVersion: SUPPORTED_PROTOCOL_VERSION };
 const SESSION_KEY = { userId: "u1", family: "f1", sessionId: "s1" };
 const BASE_CONFIG: Omit<FortressConfig, "cloud"> = {
@@ -123,6 +124,7 @@ async function buildStack(store = createMockStore()): Promise<Stack> {
     identity: IDENTITY,
     enrollToken: "test-enroll-token",
     ...TEST_TIMING,
+    mcp: NOOP_MCP,
   });
 
   return { hub, conn, credStore };
@@ -210,6 +212,7 @@ describe("enrollment", () => {
           logger: silentLogger(),
           identity: IDENTITY,
           ...TEST_TIMING,
+          mcp: NOOP_MCP,
         });
         await conn2.open({ ...BASE_CONFIG, cloud: { url: stack.hub.url } });
 

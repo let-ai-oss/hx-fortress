@@ -8,6 +8,7 @@ import { FakeHub } from "./fake-hub";
 
 // Short timings for tests — don't wait 30 s for heartbeats or reconnects.
 const TEST_TIMING = { heartbeatMs: 20, reconnectMinMs: 10, reconnectMaxMs: 50 };
+const NOOP_MCP = { handle: async () => ({ method: "listTools" as const, tools: [] }) };
 
 const IDENTITY = { version: "0.0.0-test", protocolVersion: SUPPORTED_PROTOCOL_VERSION };
 const CONFIG: FortressConfig = {
@@ -81,6 +82,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -104,6 +106,7 @@ describe("WsCloudConnection", () => {
       identity: IDENTITY,
       enrollToken: "tok-abc",
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -139,6 +142,7 @@ describe("WsCloudConnection", () => {
       identity: IDENTITY,
       enrollToken: "tok-fresh",
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -160,6 +164,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: hub.url } })).rejects.toThrow(
@@ -176,6 +181,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -197,6 +203,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -226,6 +233,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -252,6 +260,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: rejectedHub.url } })).rejects.toThrow(
@@ -276,6 +285,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: rejectedHub.url } })).rejects.toThrow(
@@ -300,6 +310,7 @@ describe("WsCloudConnection", () => {
       logger,
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: mismatchHub.url } })).rejects.toThrow(
@@ -321,6 +332,7 @@ describe("WsCloudConnection", () => {
       identity: IDENTITY,
       enrollToken: "tok",
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: mismatchHub.url } })).rejects.toThrow(
@@ -340,6 +352,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });
@@ -366,6 +379,7 @@ describe("WsCloudConnection", () => {
       logger: silentLogger(),
       identity: IDENTITY,
       ...TEST_TIMING,
+      mcp: NOOP_MCP,
     });
 
     await conn.open({ ...CONFIG, cloud: { url: hub.url } });

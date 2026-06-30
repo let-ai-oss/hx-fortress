@@ -5,6 +5,9 @@ import {
   WsCloudConnection,
 } from "../cloud";
 import type { PendingEnrollment, WsCloudConnectionDeps } from "../cloud";
+import { HxToolRegistry } from "../mcp/registry";
+import { listSessionsTool } from "../mcp/tools/list-sessions";
+import { handleMcpTunnelRequest } from "../mcp/executor";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
 import {
@@ -75,6 +78,8 @@ export async function runFortressHost(
   const emitIngest = (evt: HxIngestNotification): void => hubNotify.send(evt);
   const vaultModule = createSessionVaultModule({ db: resolveHxDb, notify: emitIngest });
   registry.register(vaultModule);
+  const hxToolRegistry = new HxToolRegistry([listSessionsTool]);
+  const mcpExecutorDeps = { registry: hxToolRegistry, db: resolveHxDb };
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
   const signingKeyStore = new FileSigningKeyStore(paths.signingKey);
@@ -142,6 +147,7 @@ export async function runFortressHost(
     logger,
     signingKeyStore,
     enrollToken: pendingEnrollment?.token,
+    mcp: { handle: (req) => handleMcpTunnelRequest(mcpExecutorDeps, req) },
     async onEnrolled(cred) {
       await pendingEnrollmentStore.clear().catch((err) => {
         logger.error("Failed to clear pending enrollment token", err);

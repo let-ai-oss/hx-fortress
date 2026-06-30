@@ -1,5 +1,5 @@
 import { decodeFrame, encodeFrame } from "../protocol/codec";
-import type { FortressToHubFrame, HubToFortressFrame } from "../protocol/frames";
+import type { FortressToHubFrame, HubToFortressFrame, McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
 import type { FortressIdentity } from "../protocol/identity";
 import type {
   CloudConnection,
@@ -32,9 +32,27 @@ export interface WsCloudConnectionDeps {
   /** Called once immediately after a successful enrollment and credential save.
    *  Use to clear the pending enrollment token and propagate identity to modules. */
   onEnrolled?: (cred: CloudCredential) => Promise<void> | void;
+  /** Handles MCP tunnel requests relayed from the hub (MC-2430). */
+  mcp: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> };
   heartbeatMs?: number;
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
+}
+
+export async function dispatchMcpFrame(
+  mcp: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> },
+  frame: { t: "mcpRpc"; id: string; req: McpTunnelRequest },
+  send: (f: FortressToHubFrame) => void,
+  logger: { error: (msg: string, err?: unknown) => void },
+): Promise<void> {
+  try {
+    const result = await mcp.handle(frame.req);
+    send({ t: "mcpRpcResult", id: frame.id, result });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.error(`mcp tunnel error: ${error}`);
+    send({ t: "mcpRpcError", id: frame.id, error });
+  }
 }
 
 export class WsCloudConnection implements CloudConnection {
@@ -302,6 +320,10 @@ export class WsCloudConnection implements CloudConnection {
             send({ t: "rpcError", id: frame.id, error: reply.error });
           }
         }
+        break;
+      }
+      case "mcpRpc": {
+        await dispatchMcpFrame(this.deps.mcp, frame, send, this.deps.logger);
         break;
       }
       case "heartbeatAck":
