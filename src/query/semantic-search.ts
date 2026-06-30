@@ -12,7 +12,7 @@
 // scope and returns those hits with `degraded:"keyword"` — never an empty or
 // misleading result.
 
-import { and, eq, gte, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
@@ -129,6 +129,9 @@ export async function hxSemanticSearch(
   const conditions = [
     scopePredicate(input.scope),
     eq(hxEmbeddings.ownerKind, "turn"),
+    // The embedding column is nullable; exclude null-embedding rows so the JS
+    // distance re-sort can't surface Number(null)===0 as a false nearest hit.
+    isNotNull(hxEmbeddings.embedding),
     isNull(hxTurns.deletedAt),
   ];
   if (input.family) conditions.push(eq(hxSessions.family, input.family));
