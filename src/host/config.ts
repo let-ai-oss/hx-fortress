@@ -162,6 +162,51 @@ export function resolveGatewayConfig(
   return { enabled: Boolean(gatewayUrl), gatewayUrl: gatewayUrl || undefined, port };
 }
 
+// ── Embed worker (A3) ─────────────────────────────────────────────────────
+
+export interface EmbedConfig {
+  /** True only when FORTRESS_OPENAI_API_KEY is set — otherwise the worker stays
+   *  off and hx_semantic_search degrades to keyword. */
+  enabled: boolean;
+  apiKey: string;
+  model: string;
+  dimensions: number;
+  /** OpenAI endpoint base (override for a zero-retention / DPA endpoint). */
+  baseUrl: string;
+  /** The worker's OWN Bun.SQL pool cap (the createHxDb handle is uncapped). */
+  dbMax: number;
+  concurrency: number;
+  batchSize: number;
+  maxPerPass: number;
+  debounceMs: number;
+  maxWaitMs: number;
+}
+
+function intEnv(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/** Resolve the embed worker's settings from FORTRESS_* env. The OpenAI key (the
+ *  one HUMAN input, §13-A3) gates the whole feature: absent ⇒ disabled. Model
+ *  defaults match the spec — text-embedding-3-large @ 1024 (Matryoshka). */
+export function resolveEmbedConfig(env: Record<string, string | undefined>): EmbedConfig {
+  const apiKey = env.FORTRESS_OPENAI_API_KEY?.trim() ?? "";
+  return {
+    enabled: apiKey.length > 0,
+    apiKey,
+    model: env.FORTRESS_EMBED_MODEL?.trim() || "text-embedding-3-large",
+    dimensions: intEnv(env.FORTRESS_EMBED_DIMENSIONS, 1024),
+    baseUrl: env.FORTRESS_OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1",
+    dbMax: intEnv(env.FORTRESS_EMBED_DB_MAX, 4),
+    concurrency: intEnv(env.FORTRESS_EMBED_CONCURRENCY, 2),
+    batchSize: intEnv(env.FORTRESS_EMBED_BATCH, 96),
+    maxPerPass: intEnv(env.FORTRESS_EMBED_MAX_PER_PASS, 500),
+    debounceMs: intEnv(env.FORTRESS_EMBED_DEBOUNCE_MS, 5_000),
+    maxWaitMs: intEnv(env.FORTRESS_EMBED_MAX_WAIT_MS, 30 * 60_000),
+  };
+}
+
 export async function ensureGatewayPublicUrlConfigured(
   paths: FortressPaths,
   gatewayPublicUrl = DEFAULT_GATEWAY_PUBLIC_URL,

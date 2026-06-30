@@ -1,0 +1,275 @@
+// A5 · the hx_* MCP tool registry — the data-plane query tools the workbench
+// agent (MCP client) calls. Every tool input carries the resolved `scope`
+// (§13-C); the fortress matches those enumerated identities on its live session
+// rows (A6) and answers from its OWN Postgres + local blob.
+//
+// This slice ships the keyword + read + metadata tools. hx_semantic_search and
+// hx_sessions_aggregate are registered for contract completeness but are served
+// by net-new machinery this slice does not build (the OpenAI embed worker /
+// hx.embeddings HNSW, and the per-session hx.session_facts index) — they return
+// a structured fallback signal rather than partial or misleading data.
+
+import type { HxDb } from "../host/postgres/db";
+import type { Embedder } from "../modules/embed-worker/openai";
+import type { SessionStore } from "../modules/session-vault/store/types";
+import { hxSessionGet } from "../query/get-session";
+import { hxSessionReadEvents } from "../query/read-events";
+import { hxSessionSearch } from "../query/search";
+import { hxSemanticSearch } from "../query/semantic-search";
+import { hxSessionsList } from "../query/sessions-list";
+import { parseScope } from "../query/scope";
+
+export interface McpToolContext {
+  db: HxDb | null;
+  store: SessionStore | null;
+  /** The fortress's OpenAI embedder, used by hx_semantic_search to embed the
+   *  query text. null ⇒ no key configured ⇒ semantic degrades to keyword. */
+  embedder?: Embedder | null;
+}
+
+export interface McpToolResult {
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+}
+
+export interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  handle(args: unknown, ctx: McpToolContext): Promise<McpToolResult>;
+}
+
+// ── arg coercion helpers ─────────────────────────────────────────────────────
+function rec(args: unknown): Record<string, unknown> {
+  return args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+}
+function str(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+function numOpt(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function ok(value: unknown): McpToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value) }] };
+}
+function err(value: unknown): McpToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(value) }], isError: true };
+}
+function needDb(ctx: McpToolContext): McpToolResult | null {
+  return ctx.db ? null : err({ error: "postgres_not_ready" });
+}
+
+// ── shared input-schema fragments ────────────────────────────────────────────
+const SCOPE_SCHEMA = {
+  type: "object",
+  description:
+    "Workbench-resolved consent scope: the enumerated in-scope session identities + an optional owner gate. The fortress matches these identities on its live session rows and evaluates no org/repo/project predicate of its own. Empty identities ⇒ no results (fail-closed).",
+  properties: {
+    identities: {
+      type: "array",
+      description: "Enumerated in-scope sessions, by natural key.",
+      items: {
+        type: "object",
+        properties: {
+          userExternalId: { type: "string" },
+          family: { type: "string" },
+          sessionId: { type: "string" },
+        },
+        required: ["userExternalId", "family", "sessionId"],
+      },
+    },
+    ownerGate: {
+      type: "object",
+      description:
+        "Additive AND-narrowing owner gate: a session is admitted only if its owner is in this active-member set.",
+      properties: { activeMemberExternalIds: { type: "array", items: { type: "string" } } },
+      required: ["activeMemberExternalIds"],
+    },
+  },
+  required: ["identities"],
+} as const;
+
+const DATE_FILTERS = {
+  family: { type: "string", description: "Filter by device family." },
+  fromDate: { type: "string", description: "ISO date lower bound." },
+  toDate: { type: "string", description: "ISO date upper bound." },
+} as const;
+
+export const MCP_TOOLS: McpTool[] = [
+  {
+    name: "hx_session_search",
+    description:
+      "Cross-session keyword/substring search over the in-scope sessions' transcript turns (tsvector + trigram). Broad: matches conversational text AND tool output/logs/code. Returns ranked hits (sessionId, seq, kind, snippet, rank).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        query: { type: "string", description: "Keyword/phrase to search for." },
+        k: { type: "number", description: "Max hits to return. Default 20, cap 100." },
+        ...DATE_FILTERS,
+      },
+      required: ["scope", "query"],
+    },
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      return ok(
+        await hxSessionSearch(ctx.db!, {
+          scope: parseScope(a.scope),
+          query: str(a.query) ?? "",
+          k: numOpt(a.k),
+          family: str(a.family),
+          fromDate: str(a.fromDate),
+          toDate: str(a.toDate),
+        }),
+      );
+    },
+  },
+  {
+    name: "hx_sessions_list",
+    description:
+      "List the in-scope sessions' metadata, keyset-paged on last activity (descending). Filter by family, date range, cwd substring, or free-text search across title/last texts. Returns { sessions, nextCursor }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        ...DATE_FILTERS,
+        cwdContains: { type: "string", description: "Filter by cwd substring (case-insensitive)." },
+        search: {
+          type: "string",
+          description: "Substring across title, last user text, last assistant text.",
+        },
+        limit: { type: "number", description: "Max rows. Default 25, cap 100." },
+        cursor: { type: "string", description: "Opaque keyset cursor from a previous nextCursor." },
+      },
+      required: ["scope"],
+    },
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      return ok(
+        await hxSessionsList(ctx.db!, {
+          scope: parseScope(a.scope),
+          family: str(a.family),
+          fromDate: str(a.fromDate),
+          toDate: str(a.toDate),
+          cwdContains: str(a.cwdContains),
+          search: str(a.search),
+          limit: numOpt(a.limit),
+          cursor: str(a.cursor),
+        }),
+      );
+    },
+  },
+  {
+    name: "hx_session_get",
+    description:
+      "Fetch one in-scope session's full metadata row. sessionId is disambiguated through scope.identities. Returns { session } or { session: null, error: 'session_not_found' }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        sessionId: { type: "string", description: "The session's natural session_id." },
+      },
+      required: ["scope", "sessionId"],
+    },
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      return ok(await hxSessionGet(ctx.db!, { scope: parseScope(a.scope), sessionId: str(a.sessionId) ?? "" }));
+    },
+  },
+  {
+    name: "hx_session_read_events",
+    description:
+      "Read a bounded slice of one in-scope session's transcript events (whole-object parse of the local canonical). get-by-type via filterType (sourced from persisted kind, reaches tool_result); full via fromIndex/maxEvents; get-by-offset via charOffset/length (turn-relative window). Returns { events, total, nextIndex }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        sessionId: { type: "string", description: "The session's natural session_id." },
+        filterType: {
+          type: "string",
+          description: "Restrict to one kind (e.g. user_text, assistant_text, tool_result).",
+        },
+        fromIndex: { type: "number", description: "0-based start into the (filtered) event list." },
+        maxEvents: { type: "number", description: "Max events. Default 50, cap 200." },
+        charOffset: {
+          type: "number",
+          description: "Turn-relative start offset into the target event's full text.",
+        },
+        length: { type: "number", description: "Window length for charOffset. Default 500, cap 4000." },
+      },
+      required: ["scope", "sessionId"],
+    },
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      return ok(
+        await hxSessionReadEvents(ctx.db!, ctx.store, {
+          scope: parseScope(a.scope),
+          sessionId: str(a.sessionId) ?? "",
+          filterType: str(a.filterType),
+          fromIndex: numOpt(a.fromIndex),
+          maxEvents: numOpt(a.maxEvents),
+          charOffset: numOpt(a.charOffset),
+          length: numOpt(a.length),
+        }),
+      );
+    },
+  },
+  {
+    name: "hx_semantic_search",
+    description:
+      "Semantic (vector) search over the in-scope sessions' conversational turns (user/assistant text only). The query text is embedded server-side and matched by cosine distance over the HNSW index. Returns ranked hits (sessionId, seq, kind, snippet, distance). Degrades to keyword search (hx_session_search) when the vector index is unavailable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        queryText: { type: "string", description: "Natural-language query; embedded server-side." },
+        k: { type: "number", description: "Max hits. Default 20, cap 100." },
+        ...DATE_FILTERS,
+      },
+      required: ["scope", "queryText"],
+    },
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      return ok(
+        await hxSemanticSearch(ctx.db!, ctx.embedder ?? null, {
+          scope: parseScope(a.scope),
+          queryText: str(a.queryText) ?? "",
+          k: numOpt(a.k),
+          family: str(a.family),
+          fromDate: str(a.fromDate),
+          toDate: str(a.toDate),
+        }),
+      );
+    },
+  },
+  {
+    // STUB — served by the net-new per-session hx.session_facts index (a later
+    // slice). No partial counts (a misleading 0 is worse than an explicit signal).
+    name: "hx_sessions_aggregate",
+    description:
+      "Aggregate productivity metrics over the in-scope sessions (sessions, active time, message counts, tool calls by type, files touched, lines changed).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        ...DATE_FILTERS,
+        cwdContains: { type: "string", description: "Filter by cwd substring (case-insensitive)." },
+      },
+      required: ["scope"],
+    },
+    async handle() {
+      return err({ error: "facts_index_unpopulated", detail: "per-session facts index not built" });
+    },
+  },
+];

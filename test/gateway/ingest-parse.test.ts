@@ -80,12 +80,36 @@ describe("parseChunk — rollup counts", () => {
   });
 });
 
-describe("parseChunk — turns", () => {
+describe("parseChunk — turns (one row per classified block)", () => {
   const p = parseChunk(CLAUDE_CHUNK);
 
-  test("emits user/assistant/system turns only (tool events excluded)", () => {
-    expect(p.turns.map((t) => t.role)).toEqual(["user", "assistant", "system", "user"]);
-    expect(p.turns.map((t) => t.text)).toEqual(["hello world", "hi there", "did stuff", "codex hi"]);
+  test("emits a turn per content block incl. tool_use/tool_result, with the 10-value kind", () => {
+    expect(p.turns.map((t) => t.kind)).toEqual([
+      "user_text",
+      "assistant_text",
+      "tool_use",
+      "tool_result",
+      "system_notice",
+      "user_text",
+    ]);
+    // role is vestigial: conversational rows keep user/assistant, the rest system.
+    expect(p.turns.map((t) => t.role)).toEqual([
+      "user",
+      "assistant",
+      "system",
+      "system",
+      "system",
+      "user",
+    ]);
+  });
+
+  test("projects tool text into the searchable turn text (broad tsv coverage)", () => {
+    const firstOf = (k: string) => p.turns.find((t) => t.kind === k)?.text ?? "";
+    expect(firstOf("user_text")).toBe("hello world");
+    expect(firstOf("assistant_text")).toBe("hi there");
+    expect(firstOf("tool_use")).toContain("Bash");
+    expect(firstOf("tool_result")).toContain("file1");
+    expect(firstOf("system_notice")).toBe("Compacted: did stuff");
   });
 
   test("carries eventTs and the verbatim rawEvent", () => {
@@ -122,6 +146,7 @@ describe("parseChunk — assistant string content + Codex agent_message", () => 
     const p = parseChunk(chunk);
     expect(p.assistantCount).toBe(2);
     expect(p.turns.map((t) => t.text)).toEqual(["plain reply", "codex reply"]);
+    expect(p.turns.map((t) => t.kind)).toEqual(["assistant_text", "assistant_text"]);
     expect(p.lastAssistantText).toBe("codex reply");
   });
 });

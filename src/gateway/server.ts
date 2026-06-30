@@ -3,6 +3,9 @@
 // swap. Every request carries a cloud-signed Ed25519 capability token, verified
 // offline against the org public key the hub pushed over the tunnel; on success
 // the matching handler presigns/composes against the live session_vault store.
+//
+// It also serves the hx_* MCP server at POST /mcp (A5) — key-authed with the
+// same capability machinery, reading the fortress's own Postgres + local blob.
 import {
   handleAppendUrl,
   handleCommit,
@@ -17,11 +20,14 @@ import { verifyCapabilityToken, type CapabilityClaims } from "./capability-token
 import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../ingest/ingest";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestNotification } from "../host/types";
+import type { Embedder } from "../modules/embed-worker/openai";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "../modules/session-vault/store/session-metadata";
+import { handleMcpRequest } from "../mcp/server";
+import packageJson from "../../package.json";
 
 export interface GatewayLogger {
   info(msg: string, fields?: Record<string, unknown>): void;
@@ -37,6 +43,9 @@ export interface GatewayDeps {
   postgresReady: () => boolean;
   /** Resolves the Drizzle handle on the bundled hx-db, or null before it's ready. */
   db: () => HxDb | null;
+  /** The fortress's OpenAI embedder for hx_semantic_search's in-fortress query
+   *  embed. null/omitted ⇒ no key ⇒ semantic search degrades to keyword. */
+  embedder?: Embedder | null;
   /** Push a realtime invalidation to the cloud after a direct-gateway ingest the
    *  cloud never relayed (MC-2415). Best-effort; optional. */
   notify?: (evt: HxIngestNotification) => void;
@@ -190,6 +199,28 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
       if (req.method === "GET" && url.pathname === "/readyz") {
         const ready = deps.store() !== null && deps.postgresReady();
         return json({ ok: ready, ready }, ready ? 200 : 503);
+      }
+
+      // MCP server (A5). Key-authed like every other route, but handled BEFORE
+      // the vault-store gate below: the keyword/metadata tools read only the
+      // local Postgres, so they answer even when the vault store is offline
+      // (only hx_session_read_events needs the store, and degrades per-tool).
+      if (url.pathname === "/mcp") {
+        const mcpClaims = await authed(req, deps);
+        if (!mcpClaims) return json({ error: "unauthorized" }, 401);
+        try {
+          return await handleMcpRequest(req, {
+            db: deps.db(),
+            store: deps.store(),
+            embedder: deps.embedder ?? null,
+            version: packageJson.version,
+          });
+        } catch (err) {
+          deps.logger.error("mcp handler failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return json({ error: "internal_error" }, 500);
+        }
       }
 
       const claims = await authed(req, deps);

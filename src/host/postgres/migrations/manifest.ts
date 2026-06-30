@@ -13,6 +13,8 @@ import sql0003Transcript from "./0003_transcript.sql" with { type: "text" };
 import sql0004Analysis from "./0004_analysis.sql" with { type: "text" };
 import sql0005Views from "./0005_views.sql" with { type: "text" };
 import sql0006Embeddings from "./0006_embeddings.sql" with { type: "text" };
+import sql0007TurnKind from "./0007_turn_kind.sql" with { type: "text" };
+import sql0010EmbeddingsIndexes from "./0010_embeddings_indexes.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -24,4 +26,11 @@ export const migrations: Migration[] = [
   // Gated: applied only when pgvector is installable; skipped (and retried)
   // otherwise, so the core schema installs on the stock bundle.
   { name: "0006_embeddings", sql: sql0006Embeddings, requires: "vector" },
+  // Net-new `kind` (10-value taxonomy) + `text` nullable for text-less kinds;
+  // backfills `kind` from the existing 3-value `role`. NOT gated.
+  { name: "0007_turn_kind", sql: sql0007TurnKind },
+  // Gated (A7): content_hash btree + UNIQUE(owner_kind, owner_id) on the gated
+  // hx.embeddings. Separate migration (never folded into 0006) so the append-
+  // only runner applies it once pgvector is present and skips it otherwise.
+  { name: "0010_embeddings_indexes", sql: sql0010EmbeddingsIndexes, requires: "vector" },
 ];

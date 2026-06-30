@@ -18,8 +18,16 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  resolveEmbedConfig,
   resolveGatewayConfig,
 } from "./config";
+import {
+  createEmbedWorker,
+  createOpenAIEmbedder,
+  setEmbedSignalHandler,
+  type Embedder,
+  type EmbedWorker,
+} from "../modules/embed-worker";
 import { FileLogSink } from "./file-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
@@ -174,6 +182,22 @@ export async function runFortressHost(
   // exposed a public URL. It presigns against the same live session_vault store
   // the tunnel RPCs use, and verifies capability tokens with the org public key
   // the hub pushes over the tunnel (cached on disk for offline restarts).
+  // The same Bun.serve gateway also serves the hx_* MCP server at POST /mcp
+  // (A5) — so the MCP endpoint boots here, with the gateway, whenever a public
+  // URL is configured.
+  // The fortress's OpenAI embedder (A3) — null when FORTRESS_OPENAI_API_KEY is
+  // absent, so the embed worker stays off and hx_semantic_search degrades to
+  // keyword. Shared by the gateway's semantic tool and the embed worker.
+  const embedConfig = resolveEmbedConfig(process.env);
+  const embedder: Embedder | null = embedConfig.enabled
+    ? createOpenAIEmbedder({
+        apiKey: embedConfig.apiKey,
+        model: embedConfig.model,
+        dimensions: embedConfig.dimensions,
+        baseUrl: embedConfig.baseUrl,
+      })
+    : null;
+
   let gatewayHandle: GatewayHandle | null = null;
   if (gateway.enabled) {
     gatewayHandle = startGatewayServer({
@@ -183,13 +207,39 @@ export async function runFortressHost(
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
       db: resolveHxDb,
+      embedder,
       notify: emitIngest,
     });
+  }
+
+  // Boot the embed worker beside the gateway (A3). It owns its OWN capped
+  // Bun.SQL handle (resolved lazily once the cluster's dsn is available — the
+  // shared createHxDb handle is uncapped) and drains the anti-join of un-embedded
+  // indexable turns; ingest signals it post-commit (debounced + max-wait capped).
+  // Runs whenever a key is configured, independent of the public gateway (ingest
+  // also arrives over the tunnel).
+  let embedWorker: EmbedWorker | null = null;
+  if (embedder) {
+    embedWorker = createEmbedWorker({
+      dsn: () => postgres.dsn(),
+      embedder,
+      dbMax: embedConfig.dbMax,
+      concurrency: embedConfig.concurrency,
+      batchSize: embedConfig.batchSize,
+      maxPerPass: embedConfig.maxPerPass,
+      debounceMs: embedConfig.debounceMs,
+      maxWaitMs: embedConfig.maxWaitMs,
+      logger: bus.scopeFor("embed-worker"),
+    });
+    setEmbedSignalHandler(() => embedWorker?.signal());
+    embedWorker.start();
   }
 
   try {
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     gatewayHandle?.stop();
+    setEmbedSignalHandler(() => {});
+    await embedWorker?.stop();
   }
 }

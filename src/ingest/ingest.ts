@@ -4,7 +4,7 @@
 // one chunk lands in a single transaction; a per-chunk dedupe key on
 // hx.ingest_events makes a re-committed chunk a no-op (idempotent retries).
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import type { HxDb, HxTx } from "../host/postgres/db";
 import {
@@ -16,9 +16,30 @@ import {
   type HxSessionAgentKind,
   type HxTitleSource,
 } from "../host/postgres/schema";
+import { hxEmbeddings } from "../host/postgres/schema/embeddings";
+import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { parseChunk, type ParsedChunk, type ParsedToolCall, type ParsedTurn } from "./parse";
+
+/** Hard-delete the embeddings owned by the given (now-deleted) turn ids, in the
+ *  SAME txn as the turn delete. hx.embeddings is a POLYMORPHIC owner (owner_kind
+ *  /owner_id, no FK), so a `replace` — which deletes + reinserts turns under new
+ *  ids — has no cascade and would orphan the old vectors, bloating the HNSW (A7).
+ *  No-op when hx.embeddings is absent (a non-pgvector fortress where 0006 was
+ *  gated-skipped), so the replace path stays safe there. */
+async function deleteOrphanedEmbeddings(tx: HxTx, turnIds: string[]): Promise<void> {
+  if (turnIds.length === 0) return;
+  // to_regclass returns NULL (never errors) when the relation is absent, so this
+  // probe can't poison the surrounding transaction.
+  const reg = await tx.execute(sql`SELECT to_regclass('hx.embeddings') AS rel`);
+  const rows = Array.isArray(reg) ? reg : ((reg as { rows?: unknown[] }).rows ?? []);
+  const present = (rows[0] as { rel?: string | null } | undefined)?.rel != null;
+  if (!present) return;
+  await tx
+    .delete(hxEmbeddings)
+    .where(and(eq(hxEmbeddings.ownerKind, "turn"), inArray(hxEmbeddings.ownerId, turnIds)));
+}
 
 // Attribution resolved upstream (the cloud over the tunnel, or the capability
 // token on the direct gateway). All ids are the cloud-side "external" ids the
@@ -120,6 +141,7 @@ async function insertTurns(
       agentId,
       seq: seq++,
       role: t.role,
+      kind: t.kind,
       eventTs: t.eventTs,
       text: t.text,
       rawEvent: t.rawEvent,
@@ -288,7 +310,16 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     }
 
     if (input.replace) {
-      await tx.delete(hxTurns).where(and(eq(hxTurns.sessionId, sessionRowId), isNull(hxTurns.agentId)));
+      // Capture the deleted turn ids (RETURNING) so their embeddings hard-delete
+      // in the same txn — no FK cascade reaches the polymorphic owner (A7).
+      const deleted = await tx
+        .delete(hxTurns)
+        .where(and(eq(hxTurns.sessionId, sessionRowId), isNull(hxTurns.agentId)))
+        .returning({ id: hxTurns.id });
+      await deleteOrphanedEmbeddings(
+        tx,
+        deleted.map((d) => d.id),
+      );
       await tx
         .delete(hxToolCalls)
         .where(and(eq(hxToolCalls.sessionId, sessionRowId), isNull(hxToolCalls.agentId)));
@@ -310,6 +341,10 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       processedAt: now,
     });
   });
+
+  // Off the commit path: nudge the embed worker that new indexable turns may
+  // have landed (debounced + max-wait capped). Best-effort — never throws.
+  signalEmbedWork();
 }
 
 /** Ingest a child-lane (subagent / workflow-agent) commit. */
@@ -428,7 +463,15 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
     }
 
     if (input.replace) {
-      await tx.delete(hxTurns).where(and(eq(hxTurns.sessionId, sessionRowId), eq(hxTurns.agentId, agentRowId)));
+      // Child lane: same explicit embeddings hard-delete across the agent_id lane.
+      const deleted = await tx
+        .delete(hxTurns)
+        .where(and(eq(hxTurns.sessionId, sessionRowId), eq(hxTurns.agentId, agentRowId)))
+        .returning({ id: hxTurns.id });
+      await deleteOrphanedEmbeddings(
+        tx,
+        deleted.map((d) => d.id),
+      );
       await tx
         .delete(hxToolCalls)
         .where(and(eq(hxToolCalls.sessionId, sessionRowId), eq(hxToolCalls.agentId, agentRowId)));
@@ -450,4 +493,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
       processedAt: now,
     });
   });
+
+  // Off the commit path: nudge the embed worker (best-effort — never throws).
+  signalEmbedWork();
 }

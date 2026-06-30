@@ -25,10 +25,29 @@ const tsvector = customType<{ data: string }>({
 
 export type HxTurnRole = "user" | "assistant" | "system";
 
+// The per-content-block classification persisted at ingest — the 10-value
+// taxonomy ported from workbench's `parseTranscript` into the fortress's shared
+// classifier (src/ingest/classify.ts). `role` (3-value) is kept NOT NULL for
+// back-compat but is vestigial; `kind` is the real discriminator that search and
+// the embed gate read off (`indexable := kind IN ('user_text','assistant_text')`).
+export type HxTurnKind =
+  | "user_text"
+  | "assistant_text"
+  | "tool_use"
+  | "tool_result"
+  | "thinking"
+  | "system_notice"
+  | "attachment_notice"
+  | "todo_reminder"
+  | "image"
+  | "queue_enqueue";
+
 // ── Unified transcript ──────────────────────────────────────────────────────
-// One row per text-bearing turn, for BOTH the parent session (agent_id null)
-// and every child lane (agent_id set). Structured tool calls live in
-// hx_tool_calls, not here.
+// One row per classified content block/item, for BOTH the parent session
+// (agent_id null) and every child lane (agent_id set). tool_use/tool_result also
+// get a row here (their text projected into the capped `text` so the broad
+// `text_tsv` covers tool output/logs/code); the structured tool payload still
+// lands in hx_tool_calls for clean aggregations.
 
 export const hxTurns = hxSchema.table(
   "turns",
@@ -39,12 +58,16 @@ export const hxTurns = hxSchema.table(
       .references(() => hxSessions.id, { onDelete: "cascade" }),
     // Null = parent lane; set = a child (subagent/workflow) lane.
     agentId: uuid("agent_id").references(() => hxSessionAgents.id, { onDelete: "cascade" }),
-    // Monotonic within the lane (session_id + agent_id).
+    // Dense emission ordinal within the lane (session_id + agent_id) — what the
+    // read path's `fromIndex` pages, NOT the JSONL line index.
     seq: integer("seq").notNull(),
     role: text("role").$type<HxTurnRole>().notNull(),
+    // 10-value classification (nullable for text-less kinds like image/queue).
+    kind: text("kind").$type<HxTurnKind>(),
     modelId: uuid("model_id").references(() => hxModels.id, { onDelete: "set null" }),
     eventTs: ts("event_ts"),
-    text: text("text").notNull(),
+    // Capped, searchable text. Nullable: text-less kinds (image) carry no text.
+    text: text("text"),
     // Convenience copy of the source event; the durable vault blob is the real
     // rebuild source, so this is not load-bearing.
     rawEvent: jsonb("raw_event").$type<Record<string, unknown>>(),
@@ -68,6 +91,7 @@ export const hxTurns = hxSchema.table(
     index("hx_turns_text_trgm_idx").using("gin", t.text.op("gin_trgm_ops")),
     index("hx_turns_session_seq_idx").on(t.sessionId, t.seq),
     index("hx_turns_role_idx").on(t.role),
+    index("hx_turns_kind_idx").on(t.kind),
     index("hx_turns_model_idx").on(t.modelId),
     index("hx_turns_event_ts_idx").on(t.eventTs),
   ],
