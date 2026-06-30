@@ -6,6 +6,9 @@ export type {
   FortressToHubFrame,
   HubToFortressFrame,
   ProtocolFrame,
+  McpToolDef,
+  McpTunnelRequest,
+  McpTunnelResult,
 } from "./frames";
 export type { FortressIdentity } from "./identity";
 export type { MsgData, MsgReply } from "./messages";
