@@ -11,6 +11,7 @@
 // §13-A4).
 
 import type { HxDb } from "../host/postgres/db";
+import { capToolOutput } from "./output-limit";
 import type { Embedder } from "../modules/embed-worker/openai";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import { hxSessionsAggregate } from "../query/aggregate";
@@ -53,10 +54,10 @@ function numOpt(v: unknown): number | undefined {
 }
 
 function ok(value: unknown): McpToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
+  return { content: [{ type: "text", text: capToolOutput(JSON.stringify(value)) }] };
 }
 function err(value: unknown): McpToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value) }], isError: true };
+  return { content: [{ type: "text", text: capToolOutput(JSON.stringify(value)) }], isError: true };
 }
 function needDb(ctx: McpToolContext): McpToolResult | null {
   return ctx.db ? null : err({ error: "postgres_not_ready" });
