@@ -287,6 +287,31 @@ async function alreadyIngested(tx: HxTx, dedupeKey: string): Promise<boolean> {
 }
 
 /** Insert turns for one lane (parent: agentId null), seq continuing from max+1. */
+// Postgres text/jsonb both reject U+0000 (0x00). Transcripts can carry `\u0000`
+// JSON escapes (e.g. in tool output) that JSON.parse decodes to a real null byte,
+// which would fail the whole session's insert. Strip null bytes from every parsed
+// text + deep-scrub the raw/tool JSON objects before they reach the DB.
+function stripNul(s: string | null): string | null {
+  return typeof s === "string" && s.includes("\u0000") ? s.replace(/\u0000/g, "") : s;
+}
+function deepStripNul<T>(v: T): T {
+  if (v == null) return v;
+  const json = JSON.stringify(v);
+  return json.includes("\\u0000") ? (JSON.parse(json.replace(/\\u0000/g, "")) as T) : v;
+}
+function scrubParsed(parsed: ParsedChunk): void {
+  parsed.lastUserText = stripNul(parsed.lastUserText);
+  parsed.lastAssistantText = stripNul(parsed.lastAssistantText);
+  for (const t of parsed.turns) {
+    t.text = stripNul(t.text);
+    t.rawEvent = deepStripNul(t.rawEvent);
+  }
+  for (const c of parsed.toolCalls) {
+    c.input = deepStripNul(c.input);
+    c.result = deepStripNul(c.result);
+  }
+}
+
 async function insertTurns(
   tx: HxTx,
   sessionId: string,
@@ -303,20 +328,25 @@ async function insertTurns(
     .from(hxTurns)
     .where(laneFilter);
   let seq = Number(maxSeq ?? -1) + 1;
-  await tx.insert(hxTurns).values(
-    turns.map((t) => ({
-      sessionId,
-      agentId,
-      seq: seq++,
-      role: t.role,
-      kind: t.kind,
-      eventTs: t.eventTs,
-      text: t.text,
-      rawEvent: t.rawEvent,
-      createdAt: now,
-      updatedAt: now,
-    })),
-  );
+  const rows = turns.map((t) => ({
+    sessionId,
+    agentId,
+    seq: seq++,
+    role: t.role,
+    kind: t.kind,
+    eventTs: t.eventTs,
+    text: t.text,
+    rawEvent: t.rawEvent,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  // Batch the insert: one multi-row INSERT binds rows×cols params and the PG wire
+  // protocol caps at 65535 — a very large session (thousands of turns) would blow
+  // it ("too many parameters"). ~500 rows/batch keeps params well under the cap.
+  const INSERT_BATCH = 500;
+  for (let i = 0; i < rows.length; i += INSERT_BATCH) {
+    await tx.insert(hxTurns).values(rows.slice(i, i + INSERT_BATCH));
+  }
 }
 
 /** Upsert tool calls by (session_id, tool_use_id) — tool_use sets name/input,
@@ -381,6 +411,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   const now = new Date().toISOString();
   const dedupeKey = `${userExternalId}:${input.key.family}:${input.key.sessionId}:${input.chunkId}`;
   const parsed = parseChunk(input.chunkText);
+  scrubParsed(parsed);
 
   await db.transaction(async (tx) => {
     if (await alreadyIngested(tx, dedupeKey)) return;
@@ -533,6 +564,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
   const now = new Date().toISOString();
   const dedupeKey = `${userExternalId}:${input.key.family}:${input.key.sessionId}:a:${input.agentId}:${input.chunkId}`;
   const parsed = parseChunk(input.chunkText);
+  scrubParsed(parsed);
 
   await db.transaction(async (tx) => {
     if (await alreadyIngested(tx, dedupeKey)) return;
