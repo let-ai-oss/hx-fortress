@@ -47,6 +47,12 @@ export interface ReadEventsResult {
   nextIndex?: number | null;
   error?: string;
   detail?: string;
+  /** Set when the read could NOT run due to an INFRA/CREDENTIAL problem (store
+   *  unreachable, S3 token expired/invalid, access denied) — affects ALL blob
+   *  reads. FAIL-FAST: the caller surfaces this reason to the user rather than
+   *  silently degrading (mirrors hx_semantic_search). A benign per-session miss
+   *  (one object genuinely absent) is `error:"session_not_found"`, NOT this. */
+  unavailable?: { reason: string; detail?: string };
 }
 
 const DEFAULT_MAX_EVENTS = 50;
@@ -73,6 +79,20 @@ function mapEvent(e: ClassifiedEvent, index: number, text: string, charOffset?: 
   return charOffset === undefined ? base : { ...base, charOffset };
 }
 
+/** A blob read failed. Distinguish a BENIGN per-session miss (the one object is
+ *  genuinely absent — NoSuchKey/NotFound) from an INFRA/credential failure
+ *  (expired/invalid creds, access denied, bucket/network/timeout) that affects
+ *  every blob read. Only the former is soft; the latter fails fast. */
+export function isBenignBlobMiss(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : "";
+  const msg = err instanceof Error ? err.message : String(err);
+  // Match the SDK's missing-object error NAME exactly (NoSuchKey / NotFound) — a
+  // substring test would false-match network errors like "getaddrinfo ENOTFOUND"
+  // (which contains "NOTFOUND") and wrongly treat a DNS outage as a benign miss.
+  // The message check keys on the missing-object phrasing, absent from infra errors.
+  return name === "NoSuchKey" || name === "NotFound" || /does not exist|no such key/i.test(msg);
+}
+
 export async function hxSessionReadEvents(
   db: HxDb,
   store: SessionStore | null,
@@ -94,7 +114,7 @@ export async function hxSessionReadEvents(
 
   const session = rows[0];
   if (!session) return { events: [], total: 0, error: "session_not_found" };
-  if (!store) return { events: [], total: 0, error: "vault_unavailable" };
+  if (!store) return { events: [], total: 0, unavailable: { reason: "vault_unavailable" } };
 
   let text: string;
   try {
@@ -104,12 +124,15 @@ export async function hxSessionReadEvents(
       sessionId: session.sessionId,
     });
   } catch (err) {
-    return {
-      events: [],
-      total: 0,
-      error: "session_read_failed",
-      detail: err instanceof Error ? err.message : String(err),
-    };
+    const detail = err instanceof Error ? err.message : String(err);
+    // Benign per-session miss (one blob absent) → soft not-found. Any other read
+    // failure is an INFRA/credential problem affecting ALL blob reads → FAIL-FAST
+    // with an explicit `unavailable` so the caller tells the user (never a silent
+    // degrade that presents a partial answer as complete).
+    if (isBenignBlobMiss(err)) {
+      return { events: [], total: 0, error: "session_not_found" };
+    }
+    return { events: [], total: 0, unavailable: { reason: "vault_store_unreachable", detail } };
   }
 
   const all = classifyChunk(text);
