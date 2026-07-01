@@ -295,9 +295,17 @@ function stripNul(s: string | null): string | null {
   return typeof s === "string" && s.includes("\u0000") ? s.replace(/\u0000/g, "") : s;
 }
 function deepStripNul<T>(v: T): T {
-  if (v == null) return v;
-  const json = JSON.stringify(v);
-  return json.includes("\\u0000") ? (JSON.parse(json.replace(/\\u0000/g, "")) as T) : v;
+  // Walk the actual object and strip real U+0000 from string VALUES only. (An
+  // earlier stringify→regex→parse shortcut corrupted content that legitimately
+  // contained the literal text "\\u0000" — an escaped backslash — into invalid JSON.)
+  if (typeof v === "string") return (v.includes("\u0000") ? v.replace(/\u0000/g, "") : v) as T;
+  if (Array.isArray(v)) return v.map((x) => deepStripNul(x)) as T;
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = deepStripNul(val);
+    return out as T;
+  }
+  return v;
 }
 function scrubParsed(parsed: ParsedChunk): void {
   parsed.lastUserText = stripNul(parsed.lastUserText);
