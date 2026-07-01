@@ -40,6 +40,8 @@ import { FileStatusStore } from "./status";
 import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
+import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
+import type { McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
 
 export interface HostMainDependencies {
   root?: string;
@@ -80,6 +82,12 @@ export async function runFortressHost(
   // no-op until then, so any ingest before the tunnel is up is simply not
   // signalled (the client's own refetch recovers the list).
   const hubNotify: { send: (evt: HxIngestNotification) => void } = { send: () => {} };
+  // MC-2430 tunnel-MCP: late-bound like hubNotify — the connection is built
+  // before the embedder/store below, so hand it a holder and repoint it once
+  // db+store+embedder exist. Replies "not ready" until then.
+  const mcpTunnel: { handle: (req: McpTunnelRequest) => Promise<McpTunnelResult> } = {
+    handle: async () => ({ method: "callTool", content: JSON.stringify({ error: "mcp_tunnel_not_ready" }), isError: true }),
+  };
   const emitIngest = (evt: HxIngestNotification): void => hubNotify.send(evt);
   const vaultModule = createSessionVaultModule({ db: resolveHxDb, notify: emitIngest });
   registry.register(vaultModule);
@@ -149,6 +157,7 @@ export async function runFortressHost(
     },
     logger,
     signingKeyStore,
+    mcp: mcpTunnel,
     enrollToken: pendingEnrollment?.token,
     async onEnrolled(cred) {
       await pendingEnrollmentStore.clear().catch((err) => {
@@ -197,6 +206,14 @@ export async function runFortressHost(
         baseUrl: embedConfig.baseUrl,
       })
     : null;
+
+  // Tunnel-MCP now has db+store+embedder — repoint the holder to the real
+  // handler so the reverse tunnel serves the same hx_* tools as the HTTP gateway.
+  mcpTunnel.handle = createMcpTunnelHandler({
+    db: resolveHxDb,
+    store: () => vaultModule.getStore(),
+    embedder,
+  }).handle;
 
   let gatewayHandle: GatewayHandle | null = null;
   if (gateway.enabled) {

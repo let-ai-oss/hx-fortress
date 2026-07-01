@@ -1,5 +1,5 @@
 import { decodeFrame, encodeFrame } from "../protocol/codec";
-import type { FortressToHubFrame, HubToFortressFrame } from "../protocol/frames";
+import type { FortressToHubFrame, HubToFortressFrame, McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
 import type { FortressIdentity } from "../protocol/identity";
 import type {
   CloudConnection,
@@ -35,6 +35,26 @@ export interface WsCloudConnectionDeps {
   heartbeatMs?: number;
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
+  /** MC-2430 tunnel-MCP: serves the fortress's MCP tools over the reverse
+   *  tunnel (the read transport for a fortress with no public URL). Omit to disable. */
+  mcp?: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> };
+}
+
+/** Dispatch one reverse-tunnel MCP request to the fortress tool handler + reply. */
+export async function dispatchMcpFrame(
+  mcp: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> },
+  frame: { t: "mcpRpc"; id: string; req: McpTunnelRequest },
+  send: (f: FortressToHubFrame) => void,
+  logger: { error: (msg: string, err?: unknown) => void },
+): Promise<void> {
+  try {
+    const result = await mcp.handle(frame.req);
+    send({ t: "mcpRpcResult", id: frame.id, result });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.error(`mcp tunnel error: ${error}`, err);
+    send({ t: "mcpRpcError", id: frame.id, error });
+  }
 }
 
 export class WsCloudConnection implements CloudConnection {
@@ -302,6 +322,10 @@ export class WsCloudConnection implements CloudConnection {
             send({ t: "rpcError", id: frame.id, error: reply.error });
           }
         }
+        break;
+      }
+      case "mcpRpc": {
+        if (this.deps.mcp) await dispatchMcpFrame(this.deps.mcp, frame, send, this.deps.logger);
         break;
       }
       case "heartbeatAck":
