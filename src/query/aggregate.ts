@@ -10,7 +10,7 @@
 import { and, eq, gte, ilike, isNull, lte, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
-import { hxSessions, hxUsers } from "../host/postgres/schema";
+import { hxRepos, hxSessions, hxUsers } from "../host/postgres/schema";
 import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { scopePredicate, type FortressScope } from "./scope";
 
@@ -22,8 +22,11 @@ export interface AggregateInput {
   /** ISO date upper bound on the session's primary day. */
   toDate?: string;
   cwdContains?: string;
-  /** When "user", also return per-owner subtotals in `groups` (team/org boards). */
-  groupBy?: "user";
+  /** Also return per-bucket subtotals in `groups`: "user" = per session owner
+   *  (team/org load), "repo" = per repository, "cwd" = per working directory.
+   *  For "repo"/"cwd" a session with no value falls into a labeled bucket
+   *  ("(unattributed)" / "(none)") rather than being dropped. */
+  groupBy?: "user" | "repo" | "cwd";
 }
 
 export interface AggregateResult {
@@ -43,7 +46,9 @@ export interface AggregateResult {
   /** Primary-day span of the matched sessions (null when the scope is empty). */
   firstDay: string | null;
   lastDay: string | null;
-  /** Per-owner subtotals, present only when groupBy:"user". key = userExternalId. */
+  /** Per-bucket subtotals, present only when groupBy is set. key = the bucket:
+   *  userExternalId (user) | repo slug or "(unattributed)" (repo) | cwd or
+   *  "(none)" (cwd). Ordered busiest-first. */
   groups?: AggregateGroup[];
 }
 
@@ -116,14 +121,24 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
     }
   }
 
-  // Per-owner subtotals (team/org boards: "how is work spread", "is anyone
-  // working too much"). Same scope + filters; GROUP BY the session owner's
-  // external id so the caller can attribute load per member. Ordered busiest-first.
+  // Per-bucket subtotals (team/org boards: "how is work spread", "is anyone
+  // working too much", "which repo/directory gets the deepest effort"). Same
+  // scope + filters; GROUP BY the requested dimension. Ordered busiest-first.
+  // The key expression + joins depend on the dimension; hxUsers/hxRepos are
+  // 1:(0..1) FK joins off the session, so they never multiply the fact rows.
+  // For repo/cwd a null value coalesces to a labeled bucket (never dropped), so
+  // the caller sees the HONEST distribution — including "sessions aren't tagged".
   let groups: AggregateGroup[] | undefined;
-  if (input.groupBy === "user") {
+  if (input.groupBy) {
+    const keyExpr =
+      input.groupBy === "user"
+        ? sql<string>`${hxUsers.externalId}`
+        : input.groupBy === "repo"
+          ? sql<string>`coalesce(${hxRepos.slug}, '(unattributed)')`
+          : sql<string>`coalesce(${hxSessions.cwd}, '(none)')`;
     const grpRows = await db
       .select({
-        key: hxUsers.externalId,
+        key: keyExpr,
         totalSessions: sql<number>`count(*)::int`,
         activeMs: sql<string>`coalesce(sum(${hxSessionFacts.activeMs}), 0)::bigint`,
         userMsgs: sql<number>`coalesce(sum(${hxSessionFacts.userMsgs}), 0)::int`,
@@ -139,9 +154,10 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
       })
       .from(hxSessionFacts)
       .innerJoin(hxSessions, eq(hxSessions.id, hxSessionFacts.sessionId))
-      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .leftJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .leftJoin(hxRepos, eq(hxRepos.id, hxSessions.repoId))
       .where(where)
-      .groupBy(hxUsers.externalId)
+      .groupBy(keyExpr)
       .orderBy(sql`count(*) DESC`);
     groups = grpRows.map((g) => ({
       key: g.key,

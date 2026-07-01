@@ -266,7 +266,7 @@ export const MCP_TOOLS: McpTool[] = [
         scope: SCOPE_SCHEMA,
         ...DATE_FILTERS,
         cwdContains: { type: "string", description: "Filter by cwd substring (case-insensitive)." },
-        groupBy: { type: "string", enum: ["user"], description: "\"user\" adds per-owner subtotals in `groups` (compare team/org members)." },
+        groupBy: { type: "string", enum: ["user", "repo", "cwd"], description: "Adds per-bucket subtotals in `groups`: \"user\" per member (team/org load), \"repo\" per repository, \"cwd\" per working directory. Sessions with no repo/cwd fall into a labeled \"(unattributed)\"/\"(none)\" bucket — so a single/empty breakdown truthfully means the sessions aren't tagged that way (do NOT invent a split)." },
       },
       required: ["scope"],
     },
@@ -274,6 +274,7 @@ export const MCP_TOOLS: McpTool[] = [
       const guard = needDb(ctx);
       if (guard) return guard;
       const a = rec(args);
+      const gb = a.groupBy;
       return ok(
         await hxSessionsAggregate(ctx.db!, {
           scope: parseScope(a.scope),
@@ -281,7 +282,7 @@ export const MCP_TOOLS: McpTool[] = [
           fromDate: str(a.fromDate),
           toDate: str(a.toDate),
           cwdContains: str(a.cwdContains),
-          groupBy: a.groupBy === "user" ? "user" : undefined,
+          groupBy: gb === "user" || gb === "repo" || gb === "cwd" ? gb : undefined,
         }),
       );
     },

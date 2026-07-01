@@ -253,6 +253,19 @@ function titleSourceOf(meta: Record<string, unknown> | null): HxTitleSource | nu
   return v === "user" || v === "ai" || v === "fallback" ? v : null;
 }
 
+/** Best-effort repo identity for when the client didn't send an explicit
+ *  repoSlug (claims.repo / meta.repoSlug — the PREFERRED source). Falls back to
+ *  the last path segment of the session's cwd (e.g. "/home/x/let-forge" →
+ *  "let-forge"), the repo root for the common case of running at the checkout
+ *  root. Returns null for an empty/root path so we never upsert a junk
+ *  dimension. Heuristic — a client that sends its real slug always wins. */
+function repoSlugFromCwd(cwd: string | null): string | null {
+  if (!cwd) return null;
+  const segs = cwd.split(/[/\\]+/).filter((seg) => seg && seg !== "." && seg !== "..");
+  const last = segs[segs.length - 1];
+  return last && last.length > 0 ? last : null;
+}
+
 function kindOf(meta: Record<string, unknown> | null): HxSessionAgentKind {
   return meta?.kind === "workflow_agent" ? "workflow_agent" : "subagent";
 }
@@ -263,6 +276,7 @@ async function resolveDimensions(
   userExternalId: string,
   lastModel: string | null,
   now: string,
+  cwd: string | null,
 ): Promise<ResolvedDimensions> {
   const userId = await upsertUser(tx, userExternalId, now);
   const orgId = attribution.orgExternalId ? await upsertOrg(tx, attribution.orgExternalId, now) : null;
@@ -270,7 +284,11 @@ async function resolveDimensions(
     orgId && attribution.projectExternalId
       ? await upsertProject(tx, orgId, attribution.projectExternalId, now)
       : null;
-  const repoId = attribution.repoSlug ? await upsertRepo(tx, attribution.repoSlug, projectId, now) : null;
+  // Prefer the client-sent repoSlug; fall back to the cwd's repo root so repo
+  // attribution (and the by-repo aggregate) is populated instead of null when the
+  // client omits it (see repoSlugFromCwd).
+  const repoSlug = attribution.repoSlug ?? repoSlugFromCwd(cwd);
+  const repoId = repoSlug ? await upsertRepo(tx, repoSlug, projectId, now) : null;
   const deviceId = attribution.deviceId ? await upsertDevice(tx, userId, attribution.deviceId, now) : null;
   const modelId = lastModel ? await upsertModel(tx, lastModel, now) : null;
   return { userId, orgId, projectId, repoId, deviceId, modelId };
@@ -424,7 +442,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   await db.transaction(async (tx) => {
     if (await alreadyIngested(tx, dedupeKey)) return;
 
-    const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now);
+    const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
     const existing = (
       await tx
@@ -577,7 +595,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
   await db.transaction(async (tx) => {
     if (await alreadyIngested(tx, dedupeKey)) return;
 
-    const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now);
+    const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
     // Ensure the parent session row exists (a child chunk can arrive first).
     const parent = (
