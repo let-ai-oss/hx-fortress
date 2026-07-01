@@ -6,7 +6,8 @@
 import { and, desc, eq, gte, ilike, lte, or, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
-import { hxSessions } from "../host/postgres/schema";
+import { hxSessions, hxUsers } from "../host/postgres/schema";
+import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { scopePredicate, type FortressScope } from "./scope";
 
 // Curated metadata projection shared by list + get (a superset that excludes the
@@ -77,7 +78,7 @@ function decodeCursor(raw: string): Cursor | null {
 export async function hxSessionsList(
   db: HxDb,
   input: ListSessionsInput,
-): Promise<{ sessions: SessionMeta[]; nextCursor?: string }> {
+): Promise<{ sessions: (SessionMeta & { userExternalId: string; activeMs: number | null; filesTouched: number | null; linesAdded: number | null; linesRemoved: number | null })[]; nextCursor?: string }> {
   const limit = Math.min(Math.max(1, input.limit ?? DEFAULT_LIMIT), MAX_LIMIT);
 
   const conditions: SQL[] = [scopePredicate(input.scope)];
@@ -108,8 +109,17 @@ export async function hxSessionsList(
   }
 
   const rows = await db
-    .select(SESSION_META_SELECT)
+    .select({
+      ...SESSION_META_SELECT,
+      userExternalId: hxUsers.externalId,
+      activeMs: hxSessionFacts.activeMs,
+      filesTouched: hxSessionFacts.filesTouched,
+      linesAdded: hxSessionFacts.linesAdded,
+      linesRemoved: hxSessionFacts.linesRemoved,
+    })
     .from(hxSessions)
+    .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+    .leftJoin(hxSessionFacts, eq(hxSessionFacts.sessionId, hxSessions.id))
     .where(and(...conditions))
     .orderBy(sql`${hxSessions.lastActivityAt} DESC NULLS LAST`, desc(hxSessions.id))
     .limit(limit + 1);

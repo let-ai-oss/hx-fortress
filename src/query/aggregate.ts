@@ -10,7 +10,7 @@
 import { and, eq, gte, ilike, isNull, lte, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
-import { hxSessions } from "../host/postgres/schema";
+import { hxSessions, hxUsers } from "../host/postgres/schema";
 import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { scopePredicate, type FortressScope } from "./scope";
 
@@ -22,6 +22,8 @@ export interface AggregateInput {
   /** ISO date upper bound on the session's primary day. */
   toDate?: string;
   cwdContains?: string;
+  /** When "user", also return per-owner subtotals in `groups` (team/org boards). */
+  groupBy?: "user";
 }
 
 export interface AggregateResult {
@@ -36,6 +38,19 @@ export interface AggregateResult {
   /** Primary-day span of the matched sessions (null when the scope is empty). */
   firstDay: string | null;
   lastDay: string | null;
+  /** Per-owner subtotals, present only when groupBy:"user". key = userExternalId. */
+  groups?: AggregateGroup[];
+}
+
+export interface AggregateGroup {
+  key: string;
+  totalSessions: number;
+  activeMs: number;
+  userMsgs: number;
+  assistantMsgs: number;
+  filesTouched: number;
+  linesAdded: number;
+  linesRemoved: number;
 }
 
 /** Coerce a Postgres aggregate scalar (number | bigint | numeric-as-string) to a
@@ -86,6 +101,40 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
     }
   }
 
+  // Per-owner subtotals (team/org boards: "how is work spread", "is anyone
+  // working too much"). Same scope + filters; GROUP BY the session owner's
+  // external id so the caller can attribute load per member. Ordered busiest-first.
+  let groups: AggregateGroup[] | undefined;
+  if (input.groupBy === "user") {
+    const grpRows = await db
+      .select({
+        key: hxUsers.externalId,
+        totalSessions: sql<number>`count(*)::int`,
+        activeMs: sql<string>`coalesce(sum(${hxSessionFacts.activeMs}), 0)::bigint`,
+        userMsgs: sql<number>`coalesce(sum(${hxSessionFacts.userMsgs}), 0)::int`,
+        assistantMsgs: sql<number>`coalesce(sum(${hxSessionFacts.assistantMsgs}), 0)::int`,
+        filesTouched: sql<number>`coalesce(sum(${hxSessionFacts.filesTouched}), 0)::int`,
+        linesAdded: sql<number>`coalesce(sum(${hxSessionFacts.linesAdded}), 0)::int`,
+        linesRemoved: sql<number>`coalesce(sum(${hxSessionFacts.linesRemoved}), 0)::int`,
+      })
+      .from(hxSessionFacts)
+      .innerJoin(hxSessions, eq(hxSessions.id, hxSessionFacts.sessionId))
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(where)
+      .groupBy(hxUsers.externalId)
+      .orderBy(sql`count(*) DESC`);
+    groups = grpRows.map((g) => ({
+      key: g.key,
+      totalSessions: num(g.totalSessions),
+      activeMs: num(g.activeMs),
+      userMsgs: num(g.userMsgs),
+      assistantMsgs: num(g.assistantMsgs),
+      filesTouched: num(g.filesTouched),
+      linesAdded: num(g.linesAdded),
+      linesRemoved: num(g.linesRemoved),
+    }));
+  }
+
   return {
     totalSessions: num(agg?.totalSessions),
     activeMs: num(agg?.activeMs),
@@ -97,5 +146,6 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
     toolCallsByType,
     firstDay: agg?.firstDay ?? null,
     lastDay: agg?.lastDay ?? null,
+    ...(groups ? { groups } : {}),
   };
 }

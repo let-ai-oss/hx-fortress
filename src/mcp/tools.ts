@@ -132,7 +132,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: "hx_sessions_list",
     description:
-      "List the in-scope sessions' metadata, keyset-paged on last activity (descending). Filter by family, date range, cwd substring, or free-text search across title/last texts. Returns { sessions, nextCursor }.",
+      "List the in-scope sessions' metadata, keyset-paged on last activity (descending). Filter by family, date range, cwd substring, or free-text search across title/last texts. Each row carries the owner (userExternalId), per-session cost (estCostUsd) + tokens (inputTokens/outputTokens/cacheReadTokens), and per-session productivity facts (activeMs, filesTouched, linesAdded, linesRemoved) — so use this (then sort) for \"most expensive / most lines / most files / longest\" rankings. Returns { sessions, nextCursor }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -265,6 +265,7 @@ export const MCP_TOOLS: McpTool[] = [
         scope: SCOPE_SCHEMA,
         ...DATE_FILTERS,
         cwdContains: { type: "string", description: "Filter by cwd substring (case-insensitive)." },
+        groupBy: { type: "string", enum: ["user"], description: "\"user\" adds per-owner subtotals in `groups` (compare team/org members)." },
       },
       required: ["scope"],
     },
@@ -279,6 +280,7 @@ export const MCP_TOOLS: McpTool[] = [
           fromDate: str(a.fromDate),
           toDate: str(a.toDate),
           cwdContains: str(a.cwdContains),
+          groupBy: a.groupBy === "user" ? "user" : undefined,
         }),
       );
     },
