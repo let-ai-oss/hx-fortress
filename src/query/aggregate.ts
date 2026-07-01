@@ -34,6 +34,11 @@ export interface AggregateResult {
   filesTouched: number;
   linesAdded: number;
   linesRemoved: number;
+  estCostUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   toolCallsByType: Record<string, number>;
   /** Primary-day span of the matched sessions (null when the scope is empty). */
   firstDay: string | null;
@@ -51,6 +56,11 @@ export interface AggregateGroup {
   filesTouched: number;
   linesAdded: number;
   linesRemoved: number;
+  estCostUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
 }
 
 /** Coerce a Postgres aggregate scalar (number | bigint | numeric-as-string) to a
@@ -79,6 +89,11 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
       filesTouched: sql<number>`coalesce(sum(${hxSessionFacts.filesTouched}), 0)::int`,
       linesAdded: sql<number>`coalesce(sum(${hxSessionFacts.linesAdded}), 0)::int`,
       linesRemoved: sql<number>`coalesce(sum(${hxSessionFacts.linesRemoved}), 0)::int`,
+      estCostUsd: sql<number>`coalesce(sum(${hxSessions.estCostUsd}), 0)::double precision`,
+      inputTokens: sql<string>`coalesce(sum(${hxSessions.inputTokens}), 0)::bigint`,
+      outputTokens: sql<string>`coalesce(sum(${hxSessions.outputTokens}), 0)::bigint`,
+      cacheReadTokens: sql<string>`coalesce(sum(${hxSessions.cacheReadTokens}), 0)::bigint`,
+      cacheCreationTokens: sql<string>`coalesce(sum(${hxSessions.cacheCreationTokens}), 0)::bigint`,
       firstDay: sql<string | null>`to_char(min(${hxSessionFacts.primaryDay}), 'YYYY-MM-DD')`,
       lastDay: sql<string | null>`to_char(max(${hxSessionFacts.primaryDay}), 'YYYY-MM-DD')`,
     })
@@ -116,6 +131,11 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
         filesTouched: sql<number>`coalesce(sum(${hxSessionFacts.filesTouched}), 0)::int`,
         linesAdded: sql<number>`coalesce(sum(${hxSessionFacts.linesAdded}), 0)::int`,
         linesRemoved: sql<number>`coalesce(sum(${hxSessionFacts.linesRemoved}), 0)::int`,
+        estCostUsd: sql<number>`coalesce(sum(${hxSessions.estCostUsd}), 0)::double precision`,
+        inputTokens: sql<string>`coalesce(sum(${hxSessions.inputTokens}), 0)::bigint`,
+        outputTokens: sql<string>`coalesce(sum(${hxSessions.outputTokens}), 0)::bigint`,
+        cacheReadTokens: sql<string>`coalesce(sum(${hxSessions.cacheReadTokens}), 0)::bigint`,
+        cacheCreationTokens: sql<string>`coalesce(sum(${hxSessions.cacheCreationTokens}), 0)::bigint`,
       })
       .from(hxSessionFacts)
       .innerJoin(hxSessions, eq(hxSessions.id, hxSessionFacts.sessionId))
@@ -132,6 +152,11 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
       filesTouched: num(g.filesTouched),
       linesAdded: num(g.linesAdded),
       linesRemoved: num(g.linesRemoved),
+      estCostUsd: num(g.estCostUsd),
+      inputTokens: num(g.inputTokens),
+      outputTokens: num(g.outputTokens),
+      cacheReadTokens: num(g.cacheReadTokens),
+      cacheCreationTokens: num(g.cacheCreationTokens),
     }));
   }
 
@@ -143,6 +168,11 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
     filesTouched: num(agg?.filesTouched),
     linesAdded: num(agg?.linesAdded),
     linesRemoved: num(agg?.linesRemoved),
+    estCostUsd: num(agg?.estCostUsd),
+    inputTokens: num(agg?.inputTokens),
+    outputTokens: num(agg?.outputTokens),
+    cacheReadTokens: num(agg?.cacheReadTokens),
+    cacheCreationTokens: num(agg?.cacheCreationTokens),
     toolCallsByType,
     firstDay: agg?.firstDay ?? null,
     lastDay: agg?.lastDay ?? null,
