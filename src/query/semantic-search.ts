@@ -6,19 +6,18 @@
 // no user id, so scope is never evaluated on the vector row). Candidates are
 // over-fetched (k×N) and re-ranked because the HNSW post-filters the scope WHERE.
 //
-// DEGRADE-TO-KEYWORD: when pgvector is absent (`to_regtype('vector') IS NULL`, or
-// 0006 unapplied so hx.embeddings doesn't exist), or no embedder is configured,
-// or the query embed fails, it falls back to hx_session_search over the same
-// scope and returns those hits with `degraded:"keyword"` — never an empty or
-// misleading result.
+// FAIL-FAST (not silent degrade): when pgvector is absent (`to_regtype('vector')
+// IS NULL`, or 0006 unapplied so hx.embeddings doesn't exist), no embedder is
+// configured, or the query embed fails on a credential error, it returns
+// `unavailable:{reason}` naming the missing/invalid dependency — the caller
+// surfaces it to the user rather than silently returning worse (keyword) results.
 
 import { and, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
 import { hxEmbeddings } from "../host/postgres/schema/embeddings";
-import type { Embedder } from "../modules/embed-worker/openai";
-import { hxSessionSearch } from "./search";
+import { EmbedAccountError, type Embedder } from "../modules/embed-worker/openai";
 import { scopePredicate, type FortressScope } from "./scope";
 
 export interface SemanticSearchInput {
@@ -35,15 +34,16 @@ export interface SemanticHit {
   seq: number;
   kind: string | null;
   snippet: string;
-  /** Cosine distance (lower = nearer); null on a keyword-degraded hit. */
+  /** Cosine distance (lower = nearer). */
   distance: number | null;
 }
 
 export interface SemanticSearchResult {
   hits: SemanticHit[];
-  /** Present only when the request fell back to keyword search. */
-  degraded?: "keyword";
-  reason?: string;
+  /** Set when semantic search could NOT run — a missing/invalid credential or an
+   *  unprovisioned vector index. FAIL-FAST: the caller surfaces this reason to the
+   *  user instead of silently returning worse (keyword) results. */
+  unavailable?: { reason: string; detail?: string };
 }
 
 const DEFAULT_K = 20;
@@ -74,30 +74,11 @@ async function vectorAvailable(db: HxDb): Promise<boolean> {
   }
 }
 
-async function degradeToKeyword(
-  db: HxDb,
-  input: SemanticSearchInput,
-  reason: string,
-): Promise<SemanticSearchResult> {
-  const kw = await hxSessionSearch(db, {
-    scope: input.scope,
-    query: input.queryText,
-    k: input.k,
-    family: input.family,
-    fromDate: input.fromDate,
-    toDate: input.toDate,
-  });
-  return {
-    hits: kw.hits.map((h) => ({
-      sessionId: h.sessionId,
-      seq: h.seq,
-      kind: h.kind,
-      snippet: h.snippet,
-      distance: null,
-    })),
-    degraded: "keyword",
-    reason,
-  };
+/** FAIL-FAST: semantic search could not run. Return an explicit unavailable
+ *  reason (NOT a silent keyword degrade) so the caller can tell the user which
+ *  credential / dependency is missing or invalid. */
+function unavailable(reason: string, detail?: string): SemanticSearchResult {
+  return { hits: [], unavailable: detail ? { reason, detail } : { reason } };
 }
 
 export async function hxSemanticSearch(
@@ -107,21 +88,25 @@ export async function hxSemanticSearch(
 ): Promise<SemanticSearchResult> {
   const queryText = typeof input.queryText === "string" ? input.queryText.trim() : "";
   if (!queryText) return { hits: [] };
-  if (!embedder) return degradeToKeyword(db, input, "embedder_unavailable");
-  if (!(await vectorAvailable(db))) return degradeToKeyword(db, input, "vector_extension_absent");
+  // FAIL-FAST on a missing credential or unprovisioned infra — surface a clear
+  // reason rather than silently degrading to keyword; the agent relays it.
+  if (!embedder) return unavailable("openai_credential_missing");
+  if (!(await vectorAvailable(db))) return unavailable("vector_index_unavailable");
 
   const k = Math.min(Math.max(1, input.k ?? DEFAULT_K), MAX_K);
 
-  // The embedder may dead-letter an un-embeddable input as a null vector
-  // (per-input poison-pill handling), so a null/empty query vector degrades to
-  // keyword exactly like an embed throw.
   let queryVec: number[] | null | undefined;
   try {
     [queryVec] = await embedder.embed([queryText]);
-  } catch {
-    return degradeToKeyword(db, input, "query_embed_failed");
+  } catch (err) {
+    // An account-level error (unfunded / invalid key) is a CREDENTIAL problem —
+    // name it so the operator/user knows to fix the key; anything else is transient.
+    return unavailable(
+      err instanceof EmbedAccountError ? "openai_credential_invalid_or_unfunded" : "openai_temporarily_unavailable",
+      err instanceof Error ? err.message : String(err),
+    );
   }
-  if (!queryVec || queryVec.length === 0) return degradeToKeyword(db, input, "query_embed_failed");
+  if (!queryVec || queryVec.length === 0) return unavailable("openai_temporarily_unavailable");
   const literal = `[${queryVec.join(",")}]`;
 
   const distance = sql<number>`${hxEmbeddings.embedding} <=> ${literal}::vector`;
@@ -189,8 +174,8 @@ export async function hxSemanticSearch(
         distance: Number(r.distance),
       }));
     return { hits };
-  } catch {
-    // hx.embeddings missing (0006 unapplied) or any vector fault → keyword.
-    return degradeToKeyword(db, input, "semantic_query_failed");
+  } catch (err) {
+    // hx.embeddings missing (0006 unapplied) or any vector fault → fail-fast.
+    return unavailable("semantic_query_failed", err instanceof Error ? err.message : String(err));
   }
 }

@@ -215,7 +215,7 @@ function defineSemanticSuite({ label, enabled, base }: SuiteOptions): void {
 
     test("(b) semantic search ranks the topically-matching session first, scope-gated", async () => {
       const q1 = await hxSemanticSearch(db, embedder, { scope: FULL_SCOPE, queryText: DB_QUERY, k: 10 });
-      expect(q1.degraded).toBeUndefined();
+      expect(q1.unavailable).toBeUndefined();
       expect(q1.hits.length).toBeGreaterThan(0);
       expect(q1.hits.every((h) => CORPUS.has(h.sessionId))).toBe(true); // no leak
       expect(q1.hits[0].sessionId).toBe(SID_DB);
@@ -259,17 +259,11 @@ function defineSemanticSuite({ label, enabled, base }: SuiteOptions): void {
       expect(Number(left)).toBe(0); // old vectors hard-deleted, awaiting re-embed
     });
 
-    test("(e) fail-closed + degrade: no embedder ⇒ keyword fallback; empty/foreign scope ⇒ 0 hits", async () => {
-      const empty = await hxSemanticSearch(db, null, { scope: { identities: [] }, queryText: "PostgreSQL index", k: 10 });
-      expect(empty.degraded).toBe("keyword");
-      expect(empty.hits.length).toBe(0);
-
-      const foreign = await hxSemanticSearch(db, null, {
-        scope: { identities: [{ userExternalId: "someone-else", family: FAMILY, sessionId: SID_COOK }] },
-        queryText: "sourdough bread",
-        k: 10,
-      });
-      expect(foreign.hits.length).toBe(0);
+    test("(e) fail-fast: no embedder ⇒ unavailable(openai_credential_missing), NO silent keyword", async () => {
+      const noKey = await hxSemanticSearch(db, null, { scope: FULL_SCOPE, queryText: "PostgreSQL index", k: 10 });
+      expect(noKey.unavailable?.reason).toBe("openai_credential_missing");
+      expect(noKey.hits.length).toBe(0);
+      expect((noKey as { degraded?: unknown }).degraded).toBeUndefined(); // no silent keyword swap
     });
 
     test("(f) embedding spend stayed bounded: 9 turns + 2 queries = 11 texts", () => {

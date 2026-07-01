@@ -228,7 +228,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: "hx_semantic_search",
     description:
-      "Semantic (vector) search over the in-scope sessions' conversational turns (user/assistant text only). The query text is embedded server-side and matched by cosine distance over the HNSW index. Returns ranked hits (sessionId, seq, kind, snippet, distance). Degrades to keyword search (hx_session_search) when the vector index is unavailable.",
+      "Semantic (vector) search over the in-scope sessions' conversational turns (user/assistant text only). The query text is embedded server-side and matched by cosine distance over the HNSW index. Returns ranked hits (sessionId, seq, kind, snippet, distance), or `{ unavailable: { reason } }` (fail-fast) when it could not run — e.g. the OpenAI credential is missing/invalid/unfunded or the vector index is not provisioned — so the caller can tell the user rather than silently returning worse results.",
     inputSchema: {
       type: "object",
       properties: {
