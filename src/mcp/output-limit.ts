@@ -8,6 +8,15 @@ export const MAX_TOOL_OUTPUT_CHARS = 30_000;
 
 export function capToolOutput(content: string, limit = MAX_TOOL_OUTPUT_CHARS): string {
   if (content.length <= limit) return content;
-  const omitted = content.length - limit;
-  return `${content.slice(0, limit)}\n\n[... output truncated: ${omitted} more characters omitted — narrow your query or page with offset ...]`;
+  // The callers (ok/err) serialize JSON, so a char-truncation would produce
+  // UNPARSABLE JSON (a half-object → the client's JSON.parse fails →
+  // "fortress_response_unparsable"). Return a VALID JSON error instead, so the
+  // caller reads a clear "narrow or page" signal. read_events budget-bounds its
+  // own output; this is the safety net for the other tools.
+  return JSON.stringify({
+    error: "output_too_large",
+    bytes: content.length,
+    limit,
+    hint: "Result exceeds the tool-output limit — narrow the query (smaller k/limit/maxEvents, a filterType, or a date range) or page with fromIndex/cursor.",
+  });
 }

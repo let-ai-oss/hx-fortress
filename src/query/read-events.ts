@@ -60,6 +60,10 @@ const MAX_MAX_EVENTS = 200;
 const FULL_TEXT_CAP = 1500; // bound token usage on full/get-by-type reads
 const DEFAULT_OFFSET_LEN = 500;
 const MAX_OFFSET_LEN = 4000;
+// Keep a full/get-by-type response comfortably under the MCP output cap
+// (MAX_TOOL_OUTPUT_CHARS = 30_000) so the envelope never truncates it into
+// unparsable JSON; the loop pages the rest via nextIndex.
+const OUTPUT_BUDGET = 26_000;
 
 function capText(text: string): string {
   if (text.length <= FULL_TEXT_CAP) return text;
@@ -150,15 +154,24 @@ export async function hxSessionReadEvents(
     return { events: [mapEvent(ev, idx, window, start)], total };
   }
 
-  // full / get-by-type: a window over the (filtered) event list.
+  // full / get-by-type: a window over the (filtered) event list, BOUNDED to the
+  // MCP output cap. Accumulate mapped events until the next would exceed the
+  // budget, then stop and page via nextIndex — so the response is ALWAYS valid
+  // JSON under the cap, never char-truncated into an unparsable payload (which the
+  // client would misread as an infra error). Always returns ≥1 event.
   const fromIndex = Math.max(0, input.fromIndex ?? 0);
   const maxEvents = Math.min(Math.max(1, input.maxEvents ?? DEFAULT_MAX_EVENTS), MAX_MAX_EVENTS);
-  const slice = filtered.slice(fromIndex, fromIndex + maxEvents);
-  const nextIndex = fromIndex + maxEvents < total ? fromIndex + maxEvents : null;
-
-  return {
-    events: slice.map((e, i) => mapEvent(e, fromIndex + i, capText(e.text ?? ""))),
-    total,
-    nextIndex,
-  };
+  const upper = Math.min(fromIndex + maxEvents, total);
+  const events: ReadEvent[] = [];
+  let budget = OUTPUT_BUDGET;
+  let idx = fromIndex;
+  for (; idx < upper; idx++) {
+    const mapped = mapEvent(filtered[idx], idx, capText(filtered[idx].text ?? ""));
+    const cost = JSON.stringify(mapped).length + 1;
+    if (events.length > 0 && cost > budget) break;
+    events.push(mapped);
+    budget -= cost;
+  }
+  const nextIndex = idx < total ? idx : null;
+  return { events, total, nextIndex };
 }
