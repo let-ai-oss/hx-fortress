@@ -211,7 +211,7 @@ jobs:
       PG_MAJOR: "18"
       # Single source of truth for the pgvector version — bumping pgvector across
       # every fortress = bump this ref (and re-run the release).
-      PGVECTOR_REF: "v0.8.0"
+      PGVECTOR_REF: "v0.8.4"
     steps:
       # pgvector only changes when PGVECTOR_REF / PG_MAJOR change, but the
       # release runs on every push to main. Cache the built artifact keyed on
