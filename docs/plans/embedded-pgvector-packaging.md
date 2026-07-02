@@ -12,6 +12,7 @@
 ## Global constraints
 
 - **2-space indentation.** Type-safe; no `as any`/`as unknown`/`as never`.
+- **Host-clean — everything under `~/.let`.** The injected `vector.{so,dylib}` + control + SQL land in the fortress's *own* embedded bundle (`~/.let/fortress/postgres/<version>/lib` and `.../share/extension`), beside the stock extensions (`pgcrypto`, `pg_trgm`) it already uses. Nothing is written to `/usr/local`, `/opt`, a system Postgres, or anywhere outside `~/.let` (or `FORTRESS_ROOT` when set). This works because PostgreSQL is **relocatable**: the running `postgres` binary derives `$libdir`/sharedir relative to its own extracted location. The only place host packages are touched is the **CI build runner** (ephemeral), never the customer host — the host only receives the prebuilt artifact.
 - **Best-effort, never fatal:** a missing/failed pgvector artifact must NEVER block fortress boot or session reads. Semantic search staying unavailable is acceptable; a crash is not. This mirrors the existing gated-migration philosophy ("skipped and retried on a later boot").
 - **Idempotent + sentinel-independent:** the inject step must upgrade an *existing* install (which already wrote the `.ready` bundle sentinel and has live data) without re-extracting or touching the data dir.
 - **Checksum every download** (sha256 sidecar), exactly like `acquireBinaries` already does for the zonky jar.
@@ -237,8 +238,10 @@ export function verifySha256(bytes: Uint8Array, expectedHex: string): boolean {
     classifier: ZonkyClassifier;
     pgMajor: number;
     baseUrl: string;                 // FORTRESS_PGVECTOR_URL
+    darwin: boolean;                 // macOS → strip quarantine + ad-hoc sign the .dylib
     fetchImpl: typeof fetch;
     extractTarGz: (tarPath: string, destDir: string) => Promise<void>;
+    spawn: (cmd: string[]) => Promise<void>;   // for xattr/codesign (Spawner)
     log: (msg: string, meta?: Record<string, unknown>) => void;
   }
   export async function ensurePgvectorInstalled(deps: EnsurePgvectorDeps): Promise<"present" | "installed" | "skipped">;
@@ -275,7 +278,7 @@ describe("ensurePgvectorInstalled", () => {
     const r = await ensurePgvectorInstalled({
       versionDir: dir, classifier: "linux-amd64", pgMajor: 18, baseUrl: "https://x",
       fetchImpl: (async () => { fetched = true; return new Response(); }) as unknown as typeof fetch,
-      extractTarGz: async () => {}, log: () => {},
+      darwin: false, extractTarGz: async () => {}, spawn: async () => {}, log: () => {},
     });
     assert.equal(r, "present");
     assert.equal(fetched, false);
@@ -286,7 +289,7 @@ describe("ensurePgvectorInstalled", () => {
     const r = await ensurePgvectorInstalled({
       versionDir: dir, classifier: "linux-amd64", pgMajor: 18, baseUrl: "https://x",
       fetchImpl: (async () => { throw new Error("offline"); }) as unknown as typeof fetch,
-      extractTarGz: async () => {}, log: () => {},
+      darwin: false, extractTarGz: async () => {}, spawn: async () => {}, log: () => {},
     });
     assert.equal(r, "skipped");
   });
@@ -319,6 +322,15 @@ export async function ensurePgvectorInstalled(deps: EnsurePgvectorDeps): Promise
     const libDir = await findLibDir(deps.versionDir);           // dir holding stock extension modules, else <versionDir>/lib
     await copyInto(path.join(tmp, "lib"), libDir, /^vector\./);
     await copyInto(path.join(tmp, "share", "extension"), extDir, /^vector(\.control|--.*\.sql)$/);
+    // macOS: a DOWNLOADED .dylib carries a com.apple.quarantine xattr that blocks
+    // dlopen by the local postgres process. Strip it and ad-hoc re-sign so the
+    // library loads — still entirely within ~/.let, nothing host-wide. No-op on
+    // Linux (deps.darwin false). Failures here are non-fatal (fall to "skipped").
+    if (deps.darwin) {
+      const dylib = path.join(libDir, "vector.dylib");
+      await deps.spawn(["xattr", "-d", "com.apple.quarantine", dylib]).catch(() => {});
+      await deps.spawn(["codesign", "--force", "--sign", "-", dylib]).catch(() => {});
+    }
     await rm(tmp, { recursive: true, force: true });
     deps.log("pgvector installed into embedded bundle", { classifier: deps.classifier, pgMajor: deps.pgMajor });
     return "installed";
@@ -354,8 +366,10 @@ ensureVector: async () => {
     classifier,
     pgMajor: pgMajorOf(resolved.version),
     baseUrl: resolved.pgvectorUrl,
+    darwin: (deps.platform ?? process.platform) === "darwin",
     fetchImpl: fetch,
     extractTarGz: makeTarGzExtractor(spawner),
+    spawn: async (cmd) => { await spawner.run(cmd); },
     log: (msg, meta) => log.info(meta ?? {}, msg),
   });
 },
@@ -385,6 +399,7 @@ and call it in the start orchestration between `ensureDbSchema` and `migrate` (s
 - Fresh install gets pgvector → Task 1 (artifact) + Task 3/4 (inject during boot after extract). ✓
 - Existing install upgrades seamlessly → Task 4 runs the idempotent inject every boot, independent of `.ready`; no data touched; gated migrations (unrecorded when skipped) apply; embed worker backfills. ✓
 - No host toolchain / no external PG required → artifacts prebuilt in CI, injected as files. ✓
+- Host-clean → inject targets only the bundle dirs under `~/.let` (relocatable PG resolves them); macOS quarantine/codesign handled in-place; nothing host-wide. ✓
 - Never blocks boot → Task 3 is best-effort (`"skipped"` on any failure, never throws); Task 4 doesn't await it as fatal. ✓
 - Air-gap / mirror → `FORTRESS_PGVECTOR_URL` (Task 4). ✓
 
