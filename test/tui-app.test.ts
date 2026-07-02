@@ -26,14 +26,45 @@ describe("createTuiApp", () => {
 
   test("wraps rows and resets the selected action when the row changes", () => {
     const app = createTuiApp({
-      model: buildMainScreenModel({
-        service: { loaded: true, pid: 1234 },
-        snapshot: null,
-        installedModules: [],
-        updates: {
-          session_vault: { kind: "module", version: "1.2.4" },
-        },
-      }),
+      // Hand-built multi-row model: MC-2465 currently ships only session_vault, but
+      // createTuiApp's row-wrap + action-reset navigation is general — exercise it
+      // across rows independently of how many the product renders today.
+      model: {
+        footerNote: "test",
+        rows: [
+          {
+            id: "session_vault",
+            label: "session_vault",
+            availability: "live",
+            statusLabel: "stopped",
+            installedVersion: null,
+            availableVersion: "1.2.4",
+            actions: [
+              { kind: "stop", enabled: true },
+              { kind: "update", enabled: true, version: "1.2.4" },
+              { kind: "view-details", enabled: true },
+            ],
+          },
+          {
+            id: "session_computer",
+            label: "session_computer",
+            availability: "unavailable",
+            statusLabel: "unavailable",
+            installedVersion: null,
+            availableVersion: null,
+            actions: [{ kind: "view-details", enabled: true }],
+          },
+          {
+            id: "devops_utility",
+            label: "devops-utility",
+            availability: "unavailable",
+            statusLabel: "unavailable",
+            installedVersion: null,
+            availableVersion: null,
+            actions: [{ kind: "view-details", enabled: true }],
+          },
+        ],
+      },
       actions: {
         start: async () => {},
         stop: async () => {},
