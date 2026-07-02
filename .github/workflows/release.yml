@@ -206,7 +206,12 @@ jobs:
           - classifier: darwin-arm64v8
             runner: macos-14
           - classifier: darwin-amd64
-            runner: macos-13
+            # macos-13 (the last free Intel runner) was retired 2025-12-04, so
+            # that label hangs forever ("Waiting for a runner..."). macos-15-intel
+            # is GitHub's native-Intel migration label (free for public repos)
+            # and keeps darwin-amd64 fortresses supported until the arch-wide
+            # x86_64 cutoff (~Aug 2027). Native build, no cross-compile.
+            runner: macos-15-intel
     env:
       PG_MAJOR: "18"
       # Single source of truth for the pgvector version — bumping pgvector across
