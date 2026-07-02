@@ -98,13 +98,21 @@ jobs:
           tag="builds/hx-fortress-${version}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release delete "$tag" --yes --cleanup-tag
+            gh release delete "$tag" --yes
           fi
+
+          # Move the tag with git instead of relying on gh's --target, which is
+          # silently ignored when the tag already exists, and --cleanup-tag,
+          # whose deletion is eventually-consistent and races the recreation.
+          # That combination left the release on the new commit while the tag
+          # stayed pinned to the previous one. git makes the tag position
+          # deterministic before we attach the release to it.
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push origin --force "refs/tags/$tag"
 
           gh release create "$tag" dist/hx-fortress-* \
             --title "HX Fortress build v$version" \
             --notes "Build from ${GITHUB_SHA:0:8} (HX Fortress v$version)." \
-            --target "$GITHUB_SHA" \
             --prerelease=false \
             --latest=false
 
