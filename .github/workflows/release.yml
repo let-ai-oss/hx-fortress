@@ -204,9 +204,16 @@ jobs:
           - classifier: linux-arm64v8
             runner: ubuntu-24.04-arm
           - classifier: darwin-arm64v8
-            runner: macos-14
+            # Kept on the same macOS major as the Intel leg (macos-15-intel) so
+            # both darwin pgvector artifacts build against the same toolchain.
+            runner: macos-15
           - classifier: darwin-amd64
-            runner: macos-13
+            # macos-13 (the last free Intel runner) was retired 2025-12-04, so
+            # that label hangs forever ("Waiting for a runner..."). macos-15-intel
+            # is GitHub's native-Intel migration label (free for public repos)
+            # and keeps darwin-amd64 fortresses supported until the arch-wide
+            # x86_64 cutoff (~Aug 2027). Native build, no cross-compile.
+            runner: macos-15-intel
     env:
       PG_MAJOR: "18"
       # Single source of truth for the pgvector version — bumping pgvector across
@@ -267,6 +274,10 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job never checks out the repo (it only builds + uploads assets),
+          # so gh has no git remote to infer the target from and would die with
+          # "not a git repository". GH_REPO points it at the repo directly.
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
