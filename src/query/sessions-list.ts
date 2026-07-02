@@ -3,7 +3,7 @@
 // family, date range (last_activity_at), cwd substring, free-text search across
 // title/last_user_text/last_assistant_text. Scope applied on the live row (A6).
 
-import { and, desc, eq, gte, ilike, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, or, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxUsers } from "../host/postgres/schema";
@@ -84,7 +84,10 @@ export async function hxSessionsList(
   const conditions: SQL[] = [scopePredicate(input.scope)];
   if (input.family) conditions.push(eq(hxSessions.family, input.family));
   if (input.fromDate) conditions.push(gte(hxSessions.lastActivityAt, input.fromDate));
-  if (input.toDate) conditions.push(lte(hxSessions.lastActivityAt, input.toDate));
+  // toDate is a bare date; `<= toDate` on a timestamptz coerces to midnight and
+  // drops the whole toDate day — use a day-inclusive upper bound (matches
+  // hx_sessions_aggregate's date-bucketed primary_day semantics).
+  if (input.toDate) conditions.push(sql`${hxSessions.lastActivityAt} < (${input.toDate}::date + interval '1 day')`);
   if (input.cwdContains) conditions.push(ilike(hxSessions.cwd, `%${input.cwdContains}%`));
   if (input.search) {
     const s = `%${input.search}%`;

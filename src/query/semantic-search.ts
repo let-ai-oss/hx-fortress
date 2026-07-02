@@ -12,7 +12,7 @@
 // `unavailable:{reason}` naming the missing/invalid dependency — the caller
 // surfaces it to the user rather than silently returning worse (keyword) results.
 
-import { and, eq, gte, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
@@ -121,7 +121,10 @@ export async function hxSemanticSearch(
   ];
   if (input.family) conditions.push(eq(hxSessions.family, input.family));
   if (input.fromDate) conditions.push(gte(hxTurns.eventTs, input.fromDate));
-  if (input.toDate) conditions.push(lte(hxTurns.eventTs, input.toDate));
+  // toDate is a bare date; `<= toDate` on a timestamptz coerces to midnight and
+  // drops the whole toDate day — use a day-inclusive upper bound (matches
+  // hx_sessions_aggregate's date-bucketed primary_day semantics).
+  if (input.toDate) conditions.push(sql`${hxTurns.eventTs} < (${input.toDate}::date + interval '1 day')`);
 
   try {
     // Selective-scope recall: the HNSW index applies the scope WHERE only AFTER
