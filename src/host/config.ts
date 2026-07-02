@@ -206,8 +206,13 @@ function resolveEmbedDimensions(value: string | undefined): number {
 /** Resolve the embed worker's settings from FORTRESS_* env. The OpenAI key (the
  *  one HUMAN input, §13-A3) gates the whole feature: absent ⇒ disabled. Model
  *  defaults match the spec — text-embedding-3-large @ 1024 (Matryoshka). */
-export function resolveEmbedConfig(env: Record<string, string | undefined>): EmbedConfig {
-  const apiKey = env.FORTRESS_OPENAI_API_KEY?.trim() ?? "";
+export function resolveEmbedConfig(
+  env: Record<string, string | undefined>,
+  configKey?: string,
+): EmbedConfig {
+  // Env overrides the persisted key (ops flexibility); otherwise use the key the
+  // enroll wizard wrote to credentials.json (MC-2465).
+  const apiKey = env.FORTRESS_OPENAI_API_KEY?.trim() || configKey?.trim() || "";
   return {
     enabled: apiKey.length > 0,
     apiKey,

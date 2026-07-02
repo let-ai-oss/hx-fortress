@@ -47,6 +47,10 @@ export interface VaultCredentials {
   gcs?: GcsServiceAccountKey;
   /** Inline S3 access key. Absent → AWS default credential chain. */
   s3?: S3Credentials;
+  /** OpenAI API key for the embed worker (MC-2465). Kept here — the fortress's
+   *  0600 secret store — so `host` can create vector embeddings without an env
+   *  var; it never leaves this host. FORTRESS_OPENAI_API_KEY (env) overrides it. */
+  openaiApiKey?: string;
 }
 
 export const VAULT_HOME = path.join(os.homedir(), ".let", "session-vault");

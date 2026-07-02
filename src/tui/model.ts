@@ -10,11 +10,10 @@ import type {
 } from "./types";
 
 
-const ROW_ORDER: MainScreenRowId[] = [
-  "session_vault",
-  "session_computer",
-  "devops_utility",
-];
+// MC-2465: only session_vault ships for now — session_computer and
+// devops_utility are hidden until they're real. They stay in the type + LABELS
+// so re-enabling one is just adding it back to this list.
+const ROW_ORDER: MainScreenRowId[] = ["session_vault"];
 
 const LABELS: Record<MainScreenRowId, string> = {
   session_vault: "session_vault",

@@ -144,6 +144,18 @@ export async function runFortressHost(
 
   const vaultCreds = await readVaultCredentials();
 
+  // MC-2471: fail-fast — the fortress indexes sessions for semantic search by
+  // creating OpenAI vector embeddings in its local Postgres DB. Without a key
+  // that search can't work, so refuse to start rather than silently degrade to
+  // keyword-only search. Set it in the enroll wizard, or FORTRESS_OPENAI_API_KEY.
+  if (!resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey).enabled) {
+    throw new Error(
+      "hx-fortress needs an OpenAI API key to create vector embeddings for semantic " +
+        "search of the sessions stored in its local Postgres DB. Add it in the enroll " +
+        "wizard (hx-fortress enroll) or set FORTRESS_OPENAI_API_KEY, then start again.",
+    );
+  }
+
   const connectionDependencies: WsCloudConnectionDeps = {
     dispatcher: registry,
     credentialStore,
@@ -197,7 +209,7 @@ export async function runFortressHost(
   // The fortress's OpenAI embedder (A3) — null when FORTRESS_OPENAI_API_KEY is
   // absent, so the embed worker stays off and hx_semantic_search degrades to
   // keyword. Shared by the gateway's semantic tool and the embed worker.
-  const embedConfig = resolveEmbedConfig(process.env);
+  const embedConfig = resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey);
   const embedder: Embedder | null = embedConfig.enabled
     ? createOpenAIEmbedder({
         apiKey: embedConfig.apiKey,
