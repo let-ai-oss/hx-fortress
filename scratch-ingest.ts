@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- standalone diagnostic ingest script */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename } from "node:path";
 import { createHxDb } from "./src/host/postgres/db";

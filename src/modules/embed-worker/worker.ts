@@ -80,9 +80,6 @@ const DEFAULT_CONCURRENCY = 2;
 // `NOT IN (...)` exclusion list is never empty (keeps the query shape constant).
 const NO_EXCLUDE_SENTINEL = "00000000-0000-0000-0000-000000000000";
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];

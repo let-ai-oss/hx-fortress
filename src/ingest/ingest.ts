@@ -310,12 +310,14 @@ async function alreadyIngested(tx: HxTx, dedupeKey: string): Promise<boolean> {
 // which would fail the whole session's insert. Strip null bytes from every parsed
 // text + deep-scrub the raw/tool JSON objects before they reach the DB.
 function stripNul(s: string | null): string | null {
+  // eslint-disable-next-line no-control-regex
   return typeof s === "string" && s.includes("\u0000") ? s.replace(/\u0000/g, "") : s;
 }
 function deepStripNul<T>(v: T): T {
   // Walk the actual object and strip real U+0000 from string VALUES only. (An
   // earlier stringify→regex→parse shortcut corrupted content that legitimately
   // contained the literal text "\\u0000" — an escaped backslash — into invalid JSON.)
+  // eslint-disable-next-line no-control-regex
   if (typeof v === "string") return (v.includes("\u0000") ? v.replace(/\u0000/g, "") : v) as T;
   if (Array.isArray(v)) return v.map((x) => deepStripNul(x)) as T;
   if (v && typeof v === "object") {

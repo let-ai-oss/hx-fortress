@@ -26,6 +26,7 @@ function s3FromEnv(): SessionStore | null {
 }
 
 /** Reconstruct a session's canonical JSONL from the workbench turn index. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function canonicalFromWorkbench(wb: any, sessionRowId: string): Promise<string> {
   const rows = await wb`SELECT raw_event FROM hx_session_turns WHERE session_row_id = ${sessionRowId} AND deleted_at IS NULL ORDER BY seq` as Array<{ raw_event: unknown }>;
   return rows.map((r) => (typeof r.raw_event === "string" ? r.raw_event : JSON.stringify(r.raw_event))).join("\n");
@@ -58,6 +59,7 @@ async function main() {
     if (exists.n > 0) { skipped++; continue; }
     const canonical = await canonicalFromWorkbench(wb, s.id);
     if (!canonical.trim()) { empty++; continue; }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (store) { try { const signed = await store.signStagingUpload(key, "migrate"); await fetch(signed.url, { method: "PUT", body: canonical, headers: { "content-type": "application/x-ndjson" } }); await store.appendChunkToCanonical(key, "migrate", { replace: true }); } catch (e: any) { console.log(`  blob warn ${s.session_id}: ${e?.message?.slice(0, 50)}`); } }
     await ingestCommit(db, { attribution: { orgExternalId: null, projectExternalId: null, repoSlug: null, deviceId: null }, key, chunkId: "migrate", replace: false, chunkText: canonical, totalBytes: canonical.length, componentCount: 1, meta: { title: `migrated ${s.session_id.slice(0, 8)}` } });
     migrated++;
