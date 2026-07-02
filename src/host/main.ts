@@ -29,6 +29,7 @@ import {
   type EmbedWorker,
 } from "../modules/embed-worker";
 import { FileLogSink } from "./file-log-sink";
+import { MultiLogSink, StdoutLogSink } from "./stdout-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
@@ -62,7 +63,17 @@ export async function runFortressHost(
   const root = dependencies.root;
   const version = dependencies.version ?? packageJson.version;
   const paths = fortressPaths(root);
-  const bus = new LogBus(new FileLogSink(paths.log));
+  // On a non-interactive host (the Railway cloud service — no TTY) tee every
+  // record to stdout as well, so the platform's log capture actually shows
+  // fortress activity + connection errors. File-only leaves logs in
+  // logs/service.log inside the container, invisible to Railway (which then
+  // shows just "Starting Container"). A local operator install runs in a TTY
+  // and keeps file-only so its terminal / TUI stays clean.
+  const fileSink = new FileLogSink(paths.log);
+  const sink = process.stdout.isTTY
+    ? fileSink
+    : new MultiLogSink([fileSink, new StdoutLogSink()]);
+  const bus = new LogBus(sink);
   const logger = new BusHostLogger(bus);
   const registry = new ModuleRegistry(bus);
   // Lazily built once Postgres is ready (the cluster boots after modules are
