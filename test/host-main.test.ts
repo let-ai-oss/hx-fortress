@@ -10,6 +10,18 @@ import type { CloudConnection } from "../src/host/types";
 import { fortressPaths } from "../src/host/paths";
 
 describe("runFortressHost", () => {
+  // MC-2471: the host refuses to start without an OpenAI key (used to create the
+  // semantic-search embeddings). Provide a dummy so the composition test exercises
+  // the real runtime wiring instead of tripping the fail-fast.
+  const priorOpenAiKey = process.env.FORTRESS_OPENAI_API_KEY;
+  beforeEach(() => {
+    process.env.FORTRESS_OPENAI_API_KEY = "sk-test-fortress-openai-key";
+  });
+  afterEach(() => {
+    if (priorOpenAiKey === undefined) delete process.env.FORTRESS_OPENAI_API_KEY;
+    else process.env.FORTRESS_OPENAI_API_KEY = priorOpenAiKey;
+  });
+
   test("composes the production host runtime", async () => {
     let capturedRuntime: {
       start(): Promise<void>;

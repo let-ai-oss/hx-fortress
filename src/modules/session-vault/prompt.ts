@@ -133,7 +133,7 @@ export async function confirmPrompt(
   return ans.startsWith("y");
 }
 
-/** Hidden input for secrets — characters are not echoed. */
+/** Masked input for secrets — each character echoes as a '*' (MC-2464). */
 export async function passwordPrompt(message: string): Promise<string> {
   const io = openPromptIo();
   let buf = "";
@@ -152,10 +152,16 @@ export async function passwordPrompt(message: string): Promise<string> {
         process.exit(130);
       }
       if (ch === "\x7f" || ch === "\b") {
-        buf = buf.slice(0, -1);
+        if (buf.length > 0) {
+          buf = buf.slice(0, -1);
+          io.write("\b \b");
+        }
         continue;
       }
-      buf += ch;
+      if (ch >= " " && ch !== "\x7f") {
+        buf += ch;
+        io.write("*");
+      }
     }
   } finally {
     io.close();

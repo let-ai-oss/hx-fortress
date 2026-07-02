@@ -4,7 +4,7 @@ import { buildMainScreenModel } from "../src/tui/model";
 import type { HostStatusSnapshot } from "../src/host/types";
 
 describe("buildMainScreenModel", () => {
-  test("renders the live session_vault row plus inert future rows", () => {
+  test("renders only the live session_vault row (future modules hidden — MC-2465)", () => {
     const model = buildMainScreenModel({
       service: { loaded: true, pid: 1234 },
       snapshot: runningSnapshot(),
@@ -22,11 +22,9 @@ describe("buildMainScreenModel", () => {
       },
     });
 
-    expect(model.rows.map((row) => row.id)).toEqual([
-      "session_vault",
-      "session_computer",
-      "devops_utility",
-    ]);
+    // MC-2465: session_computer + devops_utility are hidden until they're real, so
+    // only the live session_vault row renders.
+    expect(model.rows.map((row) => row.id)).toEqual(["session_vault"]);
     expect(model.rows[0]).toMatchObject({
       id: "session_vault",
       label: "session_vault",
@@ -44,21 +42,6 @@ describe("buildMainScreenModel", () => {
       kind: "update",
       enabled: true,
       version: "1.2.4",
-    });
-    expect(model.rows[1]).toMatchObject({
-      id: "session_computer",
-      label: "session_computer",
-      availability: "unavailable",
-      statusLabel: "unavailable",
-      installedVersion: null,
-      availableVersion: null,
-      actions: [{ kind: "view-details", enabled: true }],
-    });
-    expect(model.rows[2]).toMatchObject({
-      id: "devops_utility",
-      label: "devops-utility",
-      availability: "unavailable",
-      statusLabel: "unavailable",
     });
     expect(model.footerNote).toBe(
       "Safe to exit HX Fortress. Components keep running in the background.",

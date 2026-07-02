@@ -255,16 +255,42 @@ async function maybeKmsKey(): Promise<string | undefined> {
 
 // ── shared steps ─────────────────────────────────────────────────────────────
 
+/** MC-2465: collect the OpenAI key (required — MC-2471 refuses to start without
+ *  it). Written only to this host's 0600 credentials file, never sent to let.ai;
+ *  the user can verify that in the open-source hx-fortress repo. */
+async function promptOpenAiKey(log: Log): Promise<string> {
+  log("");
+  log("OpenAI API key — hx-fortress creates vector embeddings so you can search");
+  log("your sessions by meaning. It is written ONLY to this host's credentials");
+  log("file (chmod 600) and is never sent to let.ai — you can verify that in the");
+  log("open-source repo: https://github.com/let-ai-oss/hx-fortress");
+  while (true) {
+    const key = (await passwordPrompt("OpenAI API key (sk-...):")).trim();
+    if (key) return key;
+    log("An OpenAI key is required — hx-fortress will not start without it (Ctrl-C to abort).");
+  }
+}
+
 async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: Log): Promise<void> {
-  await writeVaultCredentials(creds);
-  log("Verifying write + read access to the bucket…");
-  try {
-    await buildStore(creds).selfTest();
-    log("Storage verified.");
-  } catch (e) {
-    log(`Storage check failed: ${(e as Error).message}`);
-    log("credentials.json was written; fix the bucket access and re-run enroll.");
-    process.exit(1);
+  const openaiApiKey = await promptOpenAiKey(log);
+  // MC-2464: a bad bucket/creds must not crash the installer — verify in a loop
+  // and let the operator re-enter the bucket name and retry, staying in the TUI.
+  let current: VaultCredentials = { ...creds, openaiApiKey };
+  while (true) {
+    await writeVaultCredentials(current);
+    log("Verifying write + read access to the bucket…");
+    try {
+      await buildStore(current).selfTest();
+      log("Storage verified.");
+      break;
+    } catch (e) {
+      log(`Storage check failed: ${(e as Error).message}`);
+      if (!(await confirmPrompt("Re-enter the bucket name and try again?", { default: true }))) {
+        log("credentials.json was written; fix the bucket access and re-run enroll.");
+        return;
+      }
+      current = { ...current, bucket: await requireBucketName(log) };
+    }
   }
 
   // Write the enrollment token to the Fortress identity directory so the host
@@ -274,7 +300,7 @@ async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: 
   await pendingStore.save({ token: opts.token, cloudUrl: opts.cloudUrl });
 
   log("");
-  log(`Session Vault credentials saved. Transcripts will rest in ${creds.bucket}.`);
+  log(`Session Vault credentials saved. Transcripts will rest in ${current.bucket}.`);
   log("Start Fortress to activate:  hx-fortress start");
 }
 
@@ -322,12 +348,13 @@ async function defer(ctx: TemplateContext, log: Log): Promise<void> {
 }
 
 async function requireBucketName(log: Log): Promise<string> {
-  const bucket = await textPrompt("Bucket name (must be globally unique):");
-  if (!bucket) {
+  // MC-2464: never dead-end — loop until a name is given (Ctrl-C still aborts)
+  // instead of exiting the installer.
+  while (true) {
+    const bucket = await textPrompt("Bucket name (must be globally unique):");
+    if (bucket) return bucket;
     log("A bucket name is required.");
-    process.exit(2);
   }
-  return bucket;
 }
 
 function indexOf(list: { value: string }[], value: string | null): number {
