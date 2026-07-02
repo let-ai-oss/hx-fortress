@@ -4,15 +4,17 @@ import path from "node:path";
 import { acquireBinaries } from "./acquire";
 import { detectMusl, resolveZonkyClassifier } from "./classifier";
 import { ensureCluster, ensureDatabaseAndSchema, PG_DATABASE, PG_ROLE, type ClusterSql } from "./cluster";
-import { makeExtractor } from "./extract";
+import { makeExtractor, makeTarGzExtractor } from "./extract";
 import { runMigrations } from "./migrate";
 import { migrations } from "./migrations/manifest";
+import { pgMajorOf } from "./pgvector-artifact";
+import { ensurePgvectorInstalled } from "./pgvector-install";
 import { createEmbeddedPostgres, createExternalPostgres } from "./provider";
 import { resolvePostgresConfig } from "./resolve";
 import { defaultSpawner, type Spawner } from "./spawn";
 import { makeMigrationExec } from "./sql-exec";
 import type { fortressPaths } from "../paths";
-import type { FortressConfig, PostgresProvider } from "../types";
+import type { FortressConfig, PostgresProvider, ScopedLogger } from "../types";
 
 export interface BuildPostgresDeps {
   env: Record<string, string | undefined>;
@@ -21,6 +23,7 @@ export interface BuildPostgresDeps {
   platform?: NodeJS.Platform;
   arch?: string;
   spawner?: Spawner;
+  logger?: ScopedLogger;
 }
 
 export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider {
@@ -97,6 +100,32 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       await spawner.run([path.join(binDir, "pg_ctl"), "-D", dataDir, "-m", "fast", "stop"]);
     },
     ensureDbSchema: () => ensureDatabaseAndSchema(sql),
+    ensureVector: async () => {
+      // pgvector is mandatory. It needs a download base (the cloud proxy); an
+      // enrolled fortress always has one (the start sequence only runs once the
+      // OpenAI key gate has passed, which implies enrollment). A missing base is
+      // a real misconfiguration, so fail rather than silently degrade.
+      if (!resolved.pgvectorUrl) {
+        throw new Error(
+          "pgvector requires a download base but none is configured " +
+            "(no cloud URL and no FORTRESS_PGVECTOR_URL)",
+        );
+      }
+      await ensurePgvectorInstalled({
+        versionDir,
+        classifier,
+        pgMajor: pgMajorOf(resolved.version),
+        baseUrl: resolved.pgvectorUrl,
+        darwin: (deps.platform ?? process.platform) === "darwin",
+        fetchImpl: fetch,
+        extractTarGz: makeTarGzExtractor(spawner),
+        spawn: async (cmd) => {
+          const { code, stderr } = await spawner.run(cmd);
+          if (code !== 0) throw new Error(`${cmd[0]} failed: ${stderr.trim()}`);
+        },
+        log: (msg, meta) => deps.logger?.info(msg, meta),
+      });
+    },
     migrate: async () => {
       await runMigrations(makeMigrationExec(dsnFor(PG_DATABASE)), migrations);
     },

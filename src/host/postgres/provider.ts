@@ -11,6 +11,11 @@ export interface EmbeddedDeps {
   stopServer: (binDir: string) => Promise<void>;
   /** Create the hx-db database and hx schema over a live connection. */
   ensureDbSchema: () => Promise<void>;
+  /**
+   * Best-effort inject of pgvector into the embedded bundle before migrate, so
+   * the gated embeddings migrations can apply. Optional + never fatal.
+   */
+  ensureVector?: () => Promise<void>;
   /** Apply the hx schema migrations over a live connection. */
   migrate: () => Promise<void>;
   /** Connection string handed to modules once ready. */
@@ -31,6 +36,11 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
         await deps.ensureCluster(binDir);
         await deps.startServer(binDir);
         await deps.ensureDbSchema();
+        // Inject pgvector before migrate so the embeddings migrations can apply
+        // this boot. Mandatory: if the inject throws, it propagates and fails
+        // the start (phase = "failed") — semantic search is core, so we refuse
+        // to boot half-working rather than silently degrade.
+        if (deps.ensureVector) await deps.ensureVector();
         await deps.migrate();
         phase = "ready";
         reason = null;

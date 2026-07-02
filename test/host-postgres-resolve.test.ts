@@ -38,7 +38,37 @@ describe("postgres config", () => {
       dataDir: "/data/pgdata",
       port: DEFAULT_PG_PORT,
       externalUrl: null,
+      // default download base: cloud ws url → https download proxy base
+      pgvectorUrl: "https://example.let.ai/tunnel",
     });
+  });
+
+  test("pgvectorUrl: env over config over the cloud-derived default", () => {
+    // default: derived from cloud.url via downloadBaseFromCloudUrl
+    expect(resolvePostgresConfig({}, base, "/d").pgvectorUrl).toBe(
+      "https://example.let.ai/tunnel",
+    );
+    // config override
+    expect(
+      resolvePostgresConfig(
+        {},
+        { ...base, postgres: { pgvectorUrl: "https://mirror/pgv" } },
+        "/d",
+      ).pgvectorUrl,
+    ).toBe("https://mirror/pgv");
+    // env wins
+    expect(
+      resolvePostgresConfig(
+        { FORTRESS_PGVECTOR_URL: "https://env/pgv" },
+        { ...base, postgres: { pgvectorUrl: "https://mirror/pgv" } },
+        "/d",
+      ).pgvectorUrl,
+    ).toBe("https://env/pgv");
+  });
+
+  test("pgvectorUrl is '' when the fortress has no cloud URL yet", () => {
+    const noCloud: FortressConfig = { ...base, cloud: { url: "" } };
+    expect(resolvePostgresConfig({}, noCloud, "/d").pgvectorUrl).toBe("");
   });
 
   test("resolves the port from env over config over default", () => {

@@ -89,7 +89,7 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
   if (typeof value === "undefined") return undefined;
   if (!isRecord(value)) throw new Error("postgres must be an object");
   const result: FortressPostgresConfig = {};
-  for (const key of ["version", "binariesUrl", "dataDir", "externalUrl"] as const) {
+  for (const key of ["version", "binariesUrl", "dataDir", "externalUrl", "pgvectorUrl"] as const) {
     const field = value[key];
     if (typeof field === "undefined") continue;
     if (typeof field !== "string") throw new Error(`postgres.${key} must be a string`);

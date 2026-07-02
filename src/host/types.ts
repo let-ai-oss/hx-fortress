@@ -10,6 +10,8 @@ export interface FortressPostgresConfig {
   dataDir?: string;
   port?: number;
   externalUrl?: string;
+  /** Override the download base for the per-platform pgvector artifact. */
+  pgvectorUrl?: string;
 }
 
 export interface FortressConfig {

@@ -20,6 +20,16 @@ export function makeExtractor(
   };
 }
 
+// Extract a gzipped tarball (the pgvector artifact) into destDir. Unlike the
+// zonky jar, this is a plain `.tar.gz`, so a single `tar -xzf` suffices.
+export function makeTarGzExtractor(
+  spawner: Spawner,
+): (tarPath: string, destDir: string) => Promise<void> {
+  return async (tarPath, destDir) => {
+    await run(spawner, ["tar", "-xzf", tarPath, "-C", destDir]);
+  };
+}
+
 async function run(spawner: Spawner, cmd: string[]): Promise<void> {
   const { code, stderr } = await spawner.run(cmd);
   if (code !== 0) throw new Error(`${cmd[0]} failed: ${stderr.trim()}`);
