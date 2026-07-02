@@ -1,6 +1,7 @@
 export { runFortressHost, type HostMainDependencies } from "./main";
 export { BusHostLogger, LogBus } from "./logging";
 export { FileLogSink } from "./file-log-sink";
+export { StdoutLogSink, MultiLogSink } from "./stdout-log-sink";
 export { FileConfigStore, parseFortressConfig } from "./config";
 export {
   FsModuleInventoryStore,
