@@ -18,8 +18,16 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  resolveEmbedConfig,
   resolveGatewayConfig,
 } from "./config";
+import {
+  createEmbedWorker,
+  createOpenAIEmbedder,
+  setEmbedSignalHandler,
+  type Embedder,
+  type EmbedWorker,
+} from "../modules/embed-worker";
 import { FileLogSink } from "./file-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
@@ -32,6 +40,8 @@ import { FileStatusStore } from "./status";
 import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
+import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
+import type { McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
 
 export interface HostMainDependencies {
   root?: string;
@@ -72,6 +82,12 @@ export async function runFortressHost(
   // no-op until then, so any ingest before the tunnel is up is simply not
   // signalled (the client's own refetch recovers the list).
   const hubNotify: { send: (evt: HxIngestNotification) => void } = { send: () => {} };
+  // MC-2430 tunnel-MCP: late-bound like hubNotify — the connection is built
+  // before the embedder/store below, so hand it a holder and repoint it once
+  // db+store+embedder exist. Replies "not ready" until then.
+  const mcpTunnel: { handle: (req: McpTunnelRequest) => Promise<McpTunnelResult> } = {
+    handle: async () => ({ method: "callTool", content: JSON.stringify({ error: "mcp_tunnel_not_ready" }), isError: true }),
+  };
   const emitIngest = (evt: HxIngestNotification): void => hubNotify.send(evt);
   const vaultModule = createSessionVaultModule({ db: resolveHxDb, notify: emitIngest });
   registry.register(vaultModule);
@@ -141,6 +157,7 @@ export async function runFortressHost(
     },
     logger,
     signingKeyStore,
+    mcp: mcpTunnel,
     enrollToken: pendingEnrollment?.token,
     async onEnrolled(cred) {
       await pendingEnrollmentStore.clear().catch((err) => {
@@ -174,22 +191,76 @@ export async function runFortressHost(
   // exposed a public URL. It presigns against the same live session_vault store
   // the tunnel RPCs use, and verifies capability tokens with the org public key
   // the hub pushes over the tunnel (cached on disk for offline restarts).
+  // The same Bun.serve gateway also serves the hx_* MCP server at POST /mcp
+  // (A5) — so the MCP endpoint boots here, with the gateway, whenever a public
+  // URL is configured.
+  // The fortress's OpenAI embedder (A3) — null when FORTRESS_OPENAI_API_KEY is
+  // absent, so the embed worker stays off and hx_semantic_search degrades to
+  // keyword. Shared by the gateway's semantic tool and the embed worker.
+  const embedConfig = resolveEmbedConfig(process.env);
+  const embedder: Embedder | null = embedConfig.enabled
+    ? createOpenAIEmbedder({
+        apiKey: embedConfig.apiKey,
+        model: embedConfig.model,
+        dimensions: embedConfig.dimensions,
+        baseUrl: embedConfig.baseUrl,
+      })
+    : null;
+
+  // Tunnel-MCP now has db+store+embedder — repoint the holder to the real
+  // handler so the reverse tunnel serves the same hx_* tools as the HTTP gateway.
+  mcpTunnel.handle = createMcpTunnelHandler({
+    db: resolveHxDb,
+    store: () => vaultModule.getStore(),
+    embedder,
+  }).handle;
+
   let gatewayHandle: GatewayHandle | null = null;
   if (gateway.enabled) {
     gatewayHandle = startGatewayServer({
       port: gateway.port,
       logger: bus.scopeFor("gateway"),
       signingKey: () => signingKeyStore.load(),
+      // The fortress's own org id (from the enrolled cloud credential) lets the
+      // gateway reject a capability token whose `aud` names a different org —
+      // anti cross-org replay. Null before enrollment (no token verifies then).
+      ownOrgId: () => credentialStore.load().then((c) => c?.orgId ?? null).catch(() => null),
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
       db: resolveHxDb,
+      embedder,
       notify: emitIngest,
     });
+  }
+
+  // Boot the embed worker beside the gateway (A3). It owns its OWN capped
+  // Bun.SQL handle (resolved lazily once the cluster's dsn is available — the
+  // shared createHxDb handle is uncapped) and drains the anti-join of un-embedded
+  // indexable turns; ingest signals it post-commit (debounced + max-wait capped).
+  // Runs whenever a key is configured, independent of the public gateway (ingest
+  // also arrives over the tunnel).
+  let embedWorker: EmbedWorker | null = null;
+  if (embedder) {
+    embedWorker = createEmbedWorker({
+      dsn: () => postgres.dsn(),
+      embedder,
+      dbMax: embedConfig.dbMax,
+      concurrency: embedConfig.concurrency,
+      batchSize: embedConfig.batchSize,
+      maxPerPass: embedConfig.maxPerPass,
+      debounceMs: embedConfig.debounceMs,
+      maxWaitMs: embedConfig.maxWaitMs,
+      logger: bus.scopeFor("embed-worker"),
+    });
+    setEmbedSignalHandler(() => embedWorker?.signal());
+    embedWorker.start();
   }
 
   try {
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     gatewayHandle?.stop();
+    setEmbedSignalHandler(() => {});
+    await embedWorker?.stop();
   }
 }

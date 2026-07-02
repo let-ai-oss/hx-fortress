@@ -75,6 +75,39 @@ boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key
 is a redeploy.
 
+### Configuration (embed / semantic)
+
+The semantic layer — the `hx_semantic_search` tool and its `pgvector` index — is
+driven by an in-fortress embed worker. It is **off until
+`FORTRESS_OPENAI_API_KEY` is set**; with no key the worker never runs and
+`hx_semantic_search` degrades to keyword search. The OpenAI account **must have
+billing/credits** — otherwise embedding fails with `insufficient_quota` and the
+tool likewise degrades to keyword. Resolved in `resolveEmbedConfig`
+(`src/host/config.ts`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FORTRESS_OPENAI_API_KEY` | — (gates the feature) | OpenAI key for the embed worker. Absent ⇒ worker off, semantic degrades to keyword. |
+| `FORTRESS_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI endpoint base; override for a zero-retention / DPA endpoint. |
+| `FORTRESS_EMBED_MODEL` | `text-embedding-3-large` | Embedding model. |
+| `FORTRESS_EMBED_DIMENSIONS` | `1024` | Output dimensions (Matryoshka); must match the `vector`/`halfvec` column width. |
+| `FORTRESS_EMBED_DB_MAX` | `4` | The worker's own `Bun.SQL` pool cap (the shared `createHxDb` handle is uncapped). |
+| `FORTRESS_EMBED_CONCURRENCY` | `2` | In-process embed concurrency limit. |
+| `FORTRESS_EMBED_BATCH` | `96` | Turns per OpenAI embed request. |
+| `FORTRESS_EMBED_MAX_PER_PASS` | `500` | Maximum turns embedded per worker pass. |
+| `FORTRESS_EMBED_DEBOUNCE_MS` | `5000` | Debounce (ms) after a commit before an embed pass fires. |
+| `FORTRESS_EMBED_MAX_WAIT_MS` | `1800000` | Max-wait cap (ms; 30 min) — embed any turn that has waited at least this long regardless of later chunks. |
+
+The vector column and its index require a pgvector-enabled Postgres; point the
+fortress at one via `FORTRESS_DATABASE_URL` (the bundled embedded Postgres is
+vanilla and ships no `vector` extension). When the extension is absent the embed
+indexes are skipped and `hx_semantic_search` degrades to keyword.
+
+**MCP data plane.** The `hx_*` tools are served over MCP on the gateway's `/mcp`
+route, which is **off by default**. Set `FORTRESS_PUBLIC_URL` to enable the
+gateway and advertise the public address an MCP client connects to; without it
+the fortress advertises no public URL and the MCP data plane is unavailable.
+
 ### Embedded Postgres
 
 Fortress runs a local Postgres (database `hx-db`, schema `hx`) with no Docker, no

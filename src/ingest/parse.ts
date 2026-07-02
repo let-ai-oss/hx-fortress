@@ -1,28 +1,35 @@
 // Pure NDJSON chunk parser — one pass over the staged session chunk that
 // produces everything the ingestion path writes to Postgres:
 //   • session rollups (counts, tokens, cost, last texts/activity/model)
-//   • turns[]      — text-bearing prompts/replies/summaries (NOT tool events)
+//   • turns[]      — one row per classified content block/item (incl.
+//                    tool_use/tool_result/thinking/image), with the 10-value
+//                    `kind` and projected, capped, searchable `text`
 //   • toolCalls[]  — tool_use / tool_result projected for hx.tool_calls
 //
 // Counts and turns intentionally use different granularity, matching the cloud:
 //   counts  — per text-bearing EVENT  (a multi-block reply is one reply)
-//   turns   — per text BLOCK          (each block is its own searchable row)
+//   turns   — per classified BLOCK    (each block is its own searchable row)
 //
-// Faithful port of the cloud gateway's chunk-counts.ts + the transcript
-// extractTurns, adapted to the fortress schema (tool events → hx.tool_calls,
-// turn roles limited to user/assistant/system).
+// Classification + turn projection is delegated to the shared `classifyChunk`
+// (src/ingest/classify.ts — the parseTranscript port, also used by the read
+// path); parseChunk keeps the rollup/token/cost math + the structured
+// hx.tool_calls extraction (tool events → hx.tool_calls, keyed by tool_use_id).
 
+import type { HxTurnKind, HxTurnRole } from "../host/postgres/schema/transcript";
+import { classifyChunk } from "./classify";
 import { costUsd } from "./pricing";
 
 const MAX_BODY = 4000; // session last-text preview cap
 const MAX_TEXT = 40_000; // per-turn text cap
 
-export type ParsedTurnRole = "user" | "assistant" | "system";
+export type ParsedTurnRole = HxTurnRole;
 
 export interface ParsedTurn {
   role: ParsedTurnRole;
+  kind: HxTurnKind;
   eventTs: string | null;
-  text: string;
+  // Null for text-less kinds (e.g. image); otherwise the capped searchable text.
+  text: string | null;
   rawEvent: Record<string, unknown>;
 }
 
@@ -147,46 +154,55 @@ export function parseChunk(jsonl: string): ParsedChunk {
     const type = String(d.type ?? "");
     if (type === "user") {
       const msg = (d.message ?? {}) as { content?: unknown };
-      handleUser(out, msg.content, ts, d);
+      handleUser(out, msg.content, ts);
     } else if (type === "assistant") {
       const msg = (d.message ?? {}) as { content?: unknown };
-      handleAssistant(out, msg.content, ts, d);
-    } else if (type === "summary") {
-      const text = clip(String(d.summary ?? ""));
-      if (text) out.turns.push({ role: "system", eventTs: ts, text, rawEvent: d });
+      handleAssistant(out, msg.content, ts);
     } else if (type === "event_msg" && d.payload) {
       const p = d.payload as { type?: string; message?: unknown };
       if (p.type === "user_message" && typeof p.message === "string") {
         out.userTextCount += 1;
         out.lastUserText = bodyText(p.message);
-        const text = clip(p.message);
-        if (text) out.turns.push({ role: "user", eventTs: ts, text, rawEvent: d });
       } else if (p.type === "agent_message" && typeof p.message === "string") {
         out.assistantCount += 1;
         out.lastAssistantText = bodyText(p.message);
-        const text = clip(p.message);
-        if (text) out.turns.push({ role: "assistant", eventTs: ts, text, rawEvent: d });
       }
     } else if (type === "response_item" && d.payload) {
       const p = d.payload as { type?: string; role?: string; content?: unknown };
       if (p.type === "message" && p.role === "user") {
-        handleUser(out, p.content, ts, d, ["input_text", "text"]);
+        handleUser(out, p.content, ts, ["input_text", "text"]);
       } else if (p.type === "message" && p.role === "assistant") {
-        handleAssistant(out, p.content, ts, d, ["output_text", "text"]);
+        handleAssistant(out, p.content, ts, ["output_text", "text"]);
       }
     }
   }
 
+  // Turns: one row per classified content block/item, in dense emission order
+  // (the shared classifier — the same the read path re-parses with). Tool/thinking/
+  // image rows carry role='system'; their text is projected + capped here so the
+  // broad text_tsv covers tool output. Text-less kinds (image) store null text.
+  out.turns = classifyChunk(jsonl).map((ev) => {
+    const text = clip(ev.text);
+    return {
+      role: ev.role,
+      kind: ev.kind,
+      eventTs: ev.ts,
+      text: text.length > 0 ? text : null,
+      rawEvent: ev.raw,
+    };
+  });
+
   return out;
 }
 
-// User event: text blocks → user turns + per-event count; tool_result blocks →
-// tool_calls. `textTypes` lets Codex response_items reuse this with input_text.
+// User event: count the per-event text (a multi-block message counts once) and
+// project tool_result blocks into hx.tool_calls. Turn rows are emitted by the
+// shared classifier, not here. `textTypes` lets Codex response_items reuse this
+// with input_text.
 function handleUser(
   out: ParsedChunk,
   content: unknown,
   ts: string | null,
-  rawEvent: Record<string, unknown>,
   textTypes: string[] = ["text"],
 ): void {
   const joined = blocksText(content, textTypes).trim();
@@ -194,16 +210,10 @@ function handleUser(
     out.userTextCount += 1;
     out.lastUserText = bodyText(joined);
   }
-  if (typeof content === "string") {
-    const text = clip(content);
-    if (text) out.turns.push({ role: "user", eventTs: ts, text, rawEvent });
-    return;
-  }
   if (!Array.isArray(content)) return;
   for (const block of content as Array<Record<string, unknown>>) {
     if (!block || typeof block !== "object") continue;
-    const btype = String(block.type ?? "");
-    if (btype === "tool_result") {
+    if (String(block.type ?? "") === "tool_result") {
       out.toolCalls.push({
         toolUseId: typeof block.tool_use_id === "string" ? block.tool_use_id : "",
         toolName: null,
@@ -212,20 +222,16 @@ function handleUser(
         isError: block.is_error === true,
         eventTs: ts,
       });
-    } else if (textTypes.includes(btype) && typeof block.text === "string") {
-      const text = clip(block.text);
-      if (text) out.turns.push({ role: "user", eventTs: ts, text, rawEvent });
     }
   }
 }
 
-// Assistant event: text blocks → assistant turns + per-event count; tool_use
-// blocks → tool_calls (with toolCallCount).
+// Assistant event: count the per-event text and project tool_use blocks into
+// hx.tool_calls (with toolCallCount). Turn rows are emitted by the classifier.
 function handleAssistant(
   out: ParsedChunk,
   content: unknown,
   ts: string | null,
-  rawEvent: Record<string, unknown>,
   textTypes: string[] = ["text"],
 ): void {
   const joined = blocksText(content, textTypes).trim();
@@ -233,16 +239,10 @@ function handleAssistant(
     out.assistantCount += 1;
     out.lastAssistantText = bodyText(joined);
   }
-  if (typeof content === "string") {
-    const text = clip(content);
-    if (text) out.turns.push({ role: "assistant", eventTs: ts, text, rawEvent });
-    return;
-  }
   if (!Array.isArray(content)) return;
   for (const block of content as Array<Record<string, unknown>>) {
     if (!block || typeof block !== "object") continue;
-    const btype = String(block.type ?? "");
-    if (btype === "tool_use") {
+    if (String(block.type ?? "") === "tool_use") {
       out.toolCallCount += 1;
       out.toolCalls.push({
         toolUseId: typeof block.id === "string" ? block.id : "",
@@ -255,9 +255,6 @@ function handleAssistant(
         isError: false,
         eventTs: ts,
       });
-    } else if (textTypes.includes(btype) && typeof block.text === "string") {
-      const text = clip(block.text);
-      if (text) out.turns.push({ role: "assistant", eventTs: ts, text, rawEvent });
     }
   }
 }

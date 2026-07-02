@@ -95,7 +95,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(s.title).toBe("My session");
     expect(s.attribution_source).toBe("auto");
 
-    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE session_id IN (SELECT id FROM hx.sessions WHERE session_id='sess-1')")).toBe(2);
+    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE session_id IN (SELECT id FROM hx.sessions WHERE session_id='sess-1')")).toBe(4);
     expect(await count("SELECT count(*)::int n FROM hx.tool_calls")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.users WHERE external_id='user-ext-1'")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.orgs WHERE external_id='org-ext-1'")).toBe(1);
@@ -131,7 +131,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(Number(s.bytes_uploaded)).toBe(250);
     // Title carries forward when a later chunk omits it.
     expect(s.title).toBe("My session");
-    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE session_id IN (SELECT id FROM hx.sessions WHERE session_id='sess-1') AND agent_id IS NULL")).toBe(4);
+    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE session_id IN (SELECT id FROM hx.sessions WHERE session_id='sess-1') AND agent_id IS NULL")).toBe(8);
   });
 
   test("a replace commit resets counts and re-indexes the parent lane", async () => {
@@ -148,7 +148,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     const s = await session();
     expect(s.event_count).toBe(3);
     expect(s.chunk_count).toBe(1);
-    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE session_id IN (SELECT id FROM hx.sessions WHERE session_id='sess-1') AND agent_id IS NULL")).toBe(2);
+    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE session_id IN (SELECT id FROM hx.sessions WHERE session_id='sess-1') AND agent_id IS NULL")).toBe(4);
   });
 
   test("re-committing the same chunk is a no-op (idempotent)", async () => {
@@ -187,7 +187,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(agent[0].kind).toBe("subagent");
     expect(agent[0].label).toBe("explorer");
     expect(agent[0].event_count).toBe(3);
-    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE agent_id IS NOT NULL")).toBe(2);
+    expect(await count("SELECT count(*)::int n FROM hx.turns WHERE agent_id IS NOT NULL")).toBe(4);
   });
 
   test("the ingestCommit tunnel RPC writes the same rows (cloud-relayed path)", async () => {

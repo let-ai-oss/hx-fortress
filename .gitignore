@@ -13,3 +13,6 @@ coverage/
 CLAUDE.local.md
 .claude/settings.local.json
 
+
+# local dev harnesses + secrets (never commit)
+scratch/

@@ -13,6 +13,10 @@ import sql0003Transcript from "./0003_transcript.sql" with { type: "text" };
 import sql0004Analysis from "./0004_analysis.sql" with { type: "text" };
 import sql0005Views from "./0005_views.sql" with { type: "text" };
 import sql0006Embeddings from "./0006_embeddings.sql" with { type: "text" };
+import sql0007TurnKind from "./0007_turn_kind.sql" with { type: "text" };
+import sql0008SessionFacts from "./0008_session_facts.sql" with { type: "text" };
+import sql0010EmbeddingsIndexes from "./0010_embeddings_indexes.sql" with { type: "text" };
+import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -24,4 +28,17 @@ export const migrations: Migration[] = [
   // Gated: applied only when pgvector is installable; skipped (and retried)
   // otherwise, so the core schema installs on the stock bundle.
   { name: "0006_embeddings", sql: sql0006Embeddings, requires: "vector" },
+  // Net-new `kind` (10-value taxonomy) + `text` nullable for text-less kinds;
+  // backfills `kind` from the existing 3-value `role`. NOT gated.
+  { name: "0007_turn_kind", sql: sql0007TurnKind },
+  // Net-new per-session productivity facts (§13-A4) — derived at ingest from the
+  // session's turns/tool_calls; the live aggregate JOINs it to hx.sessions. NOT gated.
+  { name: "0008_session_facts", sql: sql0008SessionFacts },
+  // 0009 is intentionally absent: the spec slotted an "embed-job lease" table here, but
+  // the impl uses one in-process worker (anti-join + ON CONFLICT unique-index fence, 0010) instead.
+  // Gated (A7): content_hash btree + UNIQUE(owner_kind, owner_id) on the gated
+  // hx.embeddings. Separate migration (never folded into 0006) so the append-
+  // only runner applies it once pgvector is present and skips it otherwise.
+  { name: "0010_embeddings_indexes", sql: sql0010EmbeddingsIndexes, requires: "vector" },
+  { name: "0011_widen_session_tokens", sql: sql0011WidenTokens },
 ];

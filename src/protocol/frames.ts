@@ -18,7 +18,9 @@ export type FortressToHubFrame =
   | { t: "moduleInstallResult"; moduleId: string; version: string; ok: true }
   | { t: "moduleInstallResult"; moduleId: string; version: string; ok: false; error: string }
   | { t: "moduleRemoveResult"; moduleId: string; ok: true }
-  | { t: "moduleRemoveResult"; moduleId: string; ok: false; error: string };
+  | { t: "moduleRemoveResult"; moduleId: string; ok: false; error: string }
+  | { t: "mcpRpcResult"; id: string; result: McpTunnelResult }
+  | { t: "mcpRpcError"; id: string; error: string };
 
 export type HubToFortressFrame =
   | { t: "welcome"; orgId: string; protocolVersion: number; signingPublicKey?: string }
@@ -41,6 +43,20 @@ export type HubToFortressFrame =
       artifactUrl: string;
       checksum: string;
     }
-  | { t: "moduleRemove"; moduleId: string };
+  | { t: "moduleRemove"; moduleId: string }
+  | { t: "mcpRpc"; id: string; req: McpTunnelRequest };
+
+// --- MCP tunnel (MC-2430) — reverse-tunnel MCP transport for a fortress with no public URL ---
+export interface McpToolDef {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+export type McpTunnelRequest =
+  | { method: "listTools" }
+  | { method: "callTool"; name: string; arguments: Record<string, unknown>; userId: string };
+export type McpTunnelResult =
+  | { method: "listTools"; tools: McpToolDef[] }
+  | { method: "callTool"; content: string; isError?: boolean };
 
 export type ProtocolFrame = FortressToHubFrame | HubToFortressFrame;
