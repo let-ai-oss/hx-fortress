@@ -1,3 +1,4 @@
+import { downloadBaseFromCloudUrl } from "../../update";
 import type { FortressConfig } from "../types";
 
 export const DEFAULT_PG_VERSION = "18.4.0";
@@ -13,6 +14,13 @@ export interface ResolvedPostgresConfig {
   dataDir: string;
   port: number;
   externalUrl: string | null;
+  /**
+   * Download base for the per-platform pgvector artifact. Defaults to the same
+   * workbench hx-gateway proxy the binary installer/self-update use (derived
+   * from cloud.url); "" when the fortress has no cloud URL yet (pre-enrollment),
+   * in which case the inject step self-skips.
+   */
+  pgvectorUrl: string;
 }
 
 export function resolvePostgresConfig(
@@ -29,7 +37,21 @@ export function resolvePostgresConfig(
     dataDir: pick(env.FORTRESS_PG_DATA, persisted.dataDir, defaultDataDir),
     port: pickPort(env.FORTRESS_PG_PORT, persisted.port, DEFAULT_PG_PORT),
     externalUrl,
+    pgvectorUrl: pick(
+      env.FORTRESS_PGVECTOR_URL,
+      persisted.pgvectorUrl,
+      defaultPgvectorUrl(config.cloud?.url),
+    ),
   };
+}
+
+// The pgvector artifact ships as a release asset next to the fortress binaries,
+// so it downloads through the same workbench hx-gateway proxy the installer and
+// `hx-fortress update` use. Derive that base from the cloud URL; "" when there
+// is no cloud URL yet (the inject step then self-skips, best-effort).
+function defaultPgvectorUrl(cloudUrl: string | undefined): string {
+  const trimmed = cloudUrl?.trim();
+  return trimmed ? downloadBaseFromCloudUrl(trimmed) : "";
 }
 
 function pickPort(

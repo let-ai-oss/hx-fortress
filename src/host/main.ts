@@ -151,6 +151,7 @@ export async function runFortressHost(
       modules: { enabled: [] },
     },
     paths,
+    logger: bus.scopeFor("postgres"),
   });
 
   const vaultCreds = await readVaultCredentials();

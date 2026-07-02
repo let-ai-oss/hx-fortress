@@ -22,6 +22,8 @@ jobs:
     permissions:
       contents: write
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
       - uses: actions/checkout@v4
 
@@ -180,3 +182,103 @@ jobs:
             --notes "Published from ${GITHUB_SHA:0:8}." \
             --target "$GITHUB_SHA" \
             --latest=false
+
+  # MC-2475: build pgvector from source per (PG major × classifier) and attach
+  # it to the same fortress release(s) as the binaries. The runtime downloads the
+  # matching artifact on boot and injects it into the embedded bundle, so
+  # semantic search works with no external Postgres. pgvector is MANDATORY at
+  # runtime (a fortress refuses to boot without it), so every supported platform
+  # MUST get an artifact here — a missing leg bricks that platform's fortresses.
+  pgvector:
+    name: Build pgvector (${{ matrix.classifier }})
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - classifier: linux-amd64
+            runner: ubuntu-latest
+          - classifier: linux-arm64v8
+            runner: ubuntu-24.04-arm
+          - classifier: darwin-arm64v8
+            runner: macos-14
+          - classifier: darwin-amd64
+            runner: macos-13
+    env:
+      PG_MAJOR: "18"
+      # Single source of truth for the pgvector version — bumping pgvector across
+      # every fortress = bump this ref (and re-run the release).
+      PGVECTOR_REF: "v0.8.0"
+    steps:
+      # pgvector only changes when PGVECTOR_REF / PG_MAJOR change, but the
+      # release runs on every push to main. Cache the built artifact keyed on
+      # (ref × pg-major × classifier) so a build only happens when the ref bumps;
+      # every other release restores from cache and just re-attaches (the rolling
+      # release is recreated each push, so the assets must be re-uploaded even on
+      # a cache hit). Bump the `v1` scheme prefix to force a rebuild.
+      - name: Restore cached pgvector artifact
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: pkgout
+          key: pgvector-v1-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-${{ matrix.classifier }}
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} (+ build headers)
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release; echo $VERSION_CODENAME)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+            sudo apt-get update
+            sudo apt-get install -y "postgresql-server-dev-${PG_MAJOR}" build-essential
+            echo "PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" >> "$GITHUB_ENV"
+          else
+            brew install "postgresql@${PG_MAJOR}"
+            echo "PG_CONFIG=$(brew --prefix postgresql@${PG_MAJOR})/bin/pg_config" >> "$GITHUB_ENV"
+          fi
+      - name: Build pgvector at ${{ env.PGVECTOR_REF }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${PGVECTOR_REF}" https://github.com/pgvector/pgvector.git
+          make -C pgvector PG_CONFIG="${PG_CONFIG}"
+          make -C pgvector PG_CONFIG="${PG_CONFIG}" DESTDIR="$PWD/stage" install
+      - name: Assemble + checksum artifact
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          libdir="$("${PG_CONFIG}" --pkglibdir)"
+          sharedir="$("${PG_CONFIG}" --sharedir)"
+          out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          mkdir -p "pkg/${out}/lib" "pkg/${out}/share/extension" pkgout
+          cp "$PWD/stage${libdir}/"vector.* "pkg/${out}/lib/"
+          cp "$PWD/stage${sharedir}/extension/"vector.control \
+             "$PWD/stage${sharedir}/extension/"vector--*.sql \
+             "pkg/${out}/share/extension/"
+          tar -C "pkg/${out}" -czf "pkgout/${out}.tar.gz" .
+          shasum -a 256 "pkgout/${out}.tar.gz" | awk '{print $1}' > "pkgout/${out}.tar.gz.sha256"
+      - name: Attach to the fortress release(s)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          # The rolling build release is recreated on every release run, so the
+          # artifact always (re)lands there — even on a cache hit (dev installs
+          # pull builds/*).
+          gh release upload "builds/hx-fortress-${VERSION}" \
+            "pkgout/${out}.tar.gz" "pkgout/${out}.tar.gz.sha256" --clobber
+          # The immutable release only exists on a manual dispatch; deployed
+          # fortresses pull releases/*, so attach there too when it exists.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            gh release upload "releases/hx-fortress-${VERSION}" \
+              "pkgout/${out}.tar.gz" "pkgout/${out}.tar.gz.sha256" --clobber
+          fi
