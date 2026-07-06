@@ -239,6 +239,14 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
       try {
         if (req.method === "POST") {
           const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+          // Authorization: the storage identity is always the capability-token
+          // subject. A legitimate client may echo it back as body.userId, but
+          // must never assert a *different* user's id — otherwise any token
+          // holder could read or write another user's sessions. Reject the
+          // mismatch here so every /sessions/* handler below is covered.
+          if (typeof body.userId === "string" && body.userId !== userId) {
+            return json({ error: "forbidden" }, 403);
+          }
           switch (url.pathname) {
             case "/sessions/append-url":
               return json(
