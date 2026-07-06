@@ -1,4 +1,5 @@
 import type { InstalledModuleRecord, ModuleInventoryStore } from "./module-inventory";
+import { SIGNATURE_ENFORCE, verifyDetachedSignature } from "./trust/verify";
 import type {
   HostLogger,
   LoadableRegistry,
@@ -39,11 +40,22 @@ export class ModuleLoader implements ModuleLifecycleHandler {
   }
 
   async install(params: ModuleInstallParams): Promise<void> {
-    const { moduleId, version, artifactUrl, checksum } = params;
+    const { moduleId, version, artifactUrl, checksum, signature } = params;
     const artifactPath = this.deps.artifactPathFor(moduleId, version);
 
     const data = await this.deps.fetchArtifact(artifactUrl);
-    verifyChecksum(data, checksum, moduleId);
+    // Authenticity is the detached Ed25519 signature verified against the baked
+    // trust anchors — NOT the hub-supplied `checksum` (integrity only; a
+    // compromised hub could serve a matching hash for a trojaned artifact). A
+    // present signature must verify; an absent one fails closed only when
+    // enforcing (Release A = verify-if-present).
+    if (signature) {
+      await verifyDetachedSignature(data, signature);
+    } else if (SIGNATURE_ENFORCE) {
+      throw new Error(
+        `Module ${moduleId} has no signature and signature enforcement is enabled`,
+      );
+    }
 
     await this.deps.saveArtifact(artifactPath, data);
 
@@ -113,16 +125,5 @@ export class ModuleLoader implements ModuleLifecycleHandler {
     }
 
     await this.deps.inventory.remove(moduleId);
-  }
-}
-
-function verifyChecksum(data: Uint8Array, expected: string, moduleId: string): void {
-  const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(data);
-  const actual = hasher.digest("hex");
-  if (actual !== expected) {
-    throw new Error(
-      `Checksum mismatch for module ${moduleId}: expected ${expected}, got ${actual}`,
-    );
   }
 }

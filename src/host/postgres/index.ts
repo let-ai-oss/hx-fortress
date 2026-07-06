@@ -116,6 +116,11 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
         classifier,
         version: resolved.version,
         binariesUrl: resolved.binariesUrl,
+        // M-3: prefer the baked pinned hash; fall back to the network `.sha256`
+        // (with a SECURITY warn) unless strict pinning is required.
+        requirePinned: envFlag(deps.env.FORTRESS_PG_REQUIRE_PINNED),
+        allowUnpinned: envFlag(deps.env.FORTRESS_PG_ALLOW_UNPINNED),
+        log: (msg, fields) => deps.logger?.warn(msg, fields),
       }),
     ensureCluster: async (binDir) => {
       const s = await getSecrets();
@@ -183,6 +188,13 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       await ensureAppRoles(sql, await getSecrets());
     },
   });
+}
+
+/** Defensive boolean env parse: only the common truthy spellings enable a flag;
+ *  anything else (unset, empty, "0", "false", junk) reads as off. */
+function envFlag(value: string | undefined): boolean {
+  const s = value?.trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
 }
 
 async function probe(url: string): Promise<boolean> {

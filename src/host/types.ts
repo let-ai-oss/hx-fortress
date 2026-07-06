@@ -178,7 +178,14 @@ export interface ModuleInstallParams {
   moduleId: string;
   version: string;
   artifactUrl: string;
+  /** Hub-supplied integrity hash. Recorded for inventory bookkeeping ONLY — it
+   *  is NOT an authenticity root (a compromised hub could serve a matching hash
+   *  for a trojaned artifact). Authenticity is the detached `signature`. */
   checksum: string;
+  /** Detached Ed25519 signature sidecar JSON (from moduleAdvertise.signature),
+   *  verified against the baked trust anchors. Absent → allowed only when
+   *  signature enforcement is off (verify-if-present). */
+  signature?: string;
 }
 
 export interface ModuleLifecycleHandler {

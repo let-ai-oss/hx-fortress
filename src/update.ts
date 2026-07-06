@@ -27,6 +27,8 @@ import {
   FORTRESS_VERSION,
   parseStableSemver,
 } from "./version.js";
+import { assertHttpsDownloadUrl, isLoopbackHost } from "./host/config";
+import { SIGNATURE_ENFORCE, verifyFetchedArtifact } from "./host/trust/verify";
 
 export interface UpdateProgress {
   phase: "download" | "unpack" | "verify";
@@ -65,14 +67,32 @@ export interface UpdateResult {
  * The download base is:
  *   `https://{host}{prefix}/_api/hx-gateway/download`
  *
- * Transformation: convert ws(s):// to http(s):// and replace the
- * `/vault-tunnel` suffix with `/download`.
+ * Transformation: convert wss:// to https://; convert ws:// to http:// ONLY for
+ * a loopback host (local dev) and otherwise UPGRADE it to https:// (M-2 no
+ * silent downgrade of a remote origin), then replace the `/vault-tunnel` suffix
+ * with `/download`. The result is asserted https-or-loopback (M-12) so a
+ * tampered cloud URL can't point the self-updater at a cleartext remote origin.
  */
 export function downloadBaseFromCloudUrl(cloudUrl: string): string {
-  const httpUrl = cloudUrl
-    .replace(/^wss:\/\//, "https://")
-    .replace(/^ws:\/\//, "http://");
-  return httpUrl.replace(/\/vault-tunnel$/, "/download");
+  let base: string;
+  try {
+    const url = new URL(cloudUrl);
+    if (url.protocol === "wss:") {
+      url.protocol = "https:";
+    } else if (url.protocol === "ws:") {
+      url.protocol = isLoopbackHost(url.hostname) ? "http:" : "https:";
+    }
+    base = url.toString().replace(/\/vault-tunnel\/?$/, "/download");
+  } catch {
+    // Non-URL input (shouldn't happen post config-validation): fall back to a
+    // conservative string map that never downgrades to cleartext.
+    base = cloudUrl
+      .replace(/^wss:\/\//, "https://")
+      .replace(/^ws:\/\//, "https://")
+      .replace(/\/vault-tunnel$/, "/download");
+  }
+  assertHttpsDownloadUrl(base, "cloud.url download base");
+  return base;
 }
 
 export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult> {
@@ -132,6 +152,17 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
   if ((await sha256OfFile(binPath)) === actual) {
     return alreadyLatest(asset, binPath, localVersion, remoteVersion?.raw ?? null);
   }
+
+  // Authenticity gate BEFORE the swap: verify the detached signature over the
+  // DECOMPRESSED binary (the CI signs pre-gzip). The sidecar lives at
+  // `${asset}.sig` (not `.gz.sig`). Verify-if-present in Release A — a present
+  // signature must verify; an absent one warns (non-bricking) until CI signs.
+  await verifyFetchedArtifact({
+    fetchImpl: fetch,
+    url: `${downloadBase}/${asset}`,
+    bytes: binBytes,
+    enforce: SIGNATURE_ENFORCE,
+  });
 
   await mkdir(dirname(binPath), { recursive: true });
   const tmpPath = `${binPath}.new`;

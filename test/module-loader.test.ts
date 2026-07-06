@@ -153,17 +153,66 @@ describe("ModuleLoader.install", () => {
     expect(reply).toEqual({ ok: true, payload: { value: 42 } });
   });
 
-  test("rejects when checksum does not match", async () => {
+  test("does not gate install on the hub checksum (integrity, not authenticity)", async () => {
+    const { loader, registry } = makeLoader();
+
+    // Release A verifies detached SIGNATURES; the hub-supplied `checksum` is not
+    // an authenticity root, so a mismatched checksum no longer blocks install
+    // (and with no signature + enforcement off, install proceeds).
+    await loader.install({
+      moduleId: "test_echo",
+      version: "1.0.0",
+      artifactUrl: "https://example.com/test_echo-1.0.0.js",
+      checksum: "0000000000000000000000000000000000000000000000000000000000000000",
+    });
+
+    expect(registry.has("test_echo")).toBe(true);
+  });
+
+  test("rejects a module whose detached signature does not verify", async () => {
     const { loader, saved } = makeLoader();
+
+    // keyid is a genuinely trusted baked anchor, but the signature bytes are
+    // bogus → verification fails BEFORE the artifact is ever saved.
+    const badSidecar = JSON.stringify({
+      v: 1,
+      alg: "Ed25519",
+      keyid: "hxf-dev-2026-07",
+      sig: "AAAA",
+    });
 
     await expect(
       loader.install({
         moduleId: "test_echo",
         version: "1.0.0",
         artifactUrl: "https://example.com/test_echo-1.0.0.js",
-        checksum: "0000000000000000000000000000000000000000000000000000000000000000",
+        checksum: "unused",
+        signature: badSidecar,
       }),
-    ).rejects.toThrow("Checksum mismatch");
+    ).rejects.toThrow(/signature verification failed/);
+
+    expect(saved.size).toBe(0);
+  });
+
+  test("rejects a module signed by an untrusted key id", async () => {
+    const { loader, saved } = makeLoader();
+
+    const sidecar = JSON.stringify({
+      v: 1,
+      alg: "Ed25519",
+      keyid: "attacker-key",
+      sig: "AAAA",
+    });
+
+    await expect(
+      loader.install({
+        moduleId: "test_echo",
+        version: "1.0.0",
+        artifactUrl: "https://example.com/test_echo-1.0.0.js",
+        checksum: "unused",
+        signature: sidecar,
+      }),
+    ).rejects.toThrow(/untrusted signing key id/);
 
     expect(saved.size).toBe(0);
   });

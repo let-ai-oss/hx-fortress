@@ -95,6 +95,12 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
     if (typeof field !== "string") throw new Error(`postgres.${key} must be a string`);
     result[key] = field;
   }
+  // Artifact download bases must be https (or loopback http for local dev): a
+  // cleartext, non-loopback binaries/pgvector origin is a MITM foothold for the
+  // native code we then load. externalUrl is a DB DSN, not a download base, so
+  // it is not subject to this check.
+  if (result.binariesUrl) assertHttpsDownloadUrl(result.binariesUrl, "postgres.binariesUrl");
+  if (result.pgvectorUrl) assertHttpsDownloadUrl(result.pgvectorUrl, "postgres.pgvectorUrl");
   if (typeof value.port !== "undefined") {
     if (typeof value.port !== "number" || !Number.isInteger(value.port)) {
       throw new Error("postgres.port must be an integer");
@@ -104,11 +110,29 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
   return result;
 }
 
-/** A loopback host literal (no DNS resolution). Cleartext ws: is only tolerable
- *  to one of these — anything else is a network-reachable cleartext hub. */
-function isLoopbackHost(h: string): boolean {
+/** A loopback host literal (no DNS resolution). Cleartext ws:/http: is only
+ *  tolerable to one of these — anything else is a network-reachable cleartext
+ *  hub / download origin. */
+export function isLoopbackHost(h: string): boolean {
   const host = h.replace(/^\[|\]$/g, "");
   return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+/** Validate an artifact download base (M-12): https everywhere, with cleartext
+ *  http tolerated ONLY for a loopback host (local dev). A plaintext, remotely
+ *  reachable origin for native binaries we execute/dlopen is rejected
+ *  fail-closed. Shared by config parsing (persisted), resolve.ts (env-sourced),
+ *  and the self-updater's cloud-URL derivation. */
+export function assertHttpsDownloadUrl(value: string, field: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${field} must be a valid URL`);
+  }
+  if (url.protocol === "https:") return;
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return;
+  throw new Error(`${field} must use https: (cleartext http: is only allowed to a loopback host)`);
 }
 
 function assertCloudUrl(value: string): void {

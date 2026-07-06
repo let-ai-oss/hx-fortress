@@ -347,9 +347,22 @@ export class WsCloudConnection implements CloudConnection {
         break;
       case "moduleAdvertise": {
         const { moduleId, version, artifactUrl, checksum } = frame;
+        // The detached-signature sidecar rides on `moduleAdvertise.signature`.
+        // Read it defensively so an older hub/protocol without the field still
+        // parses (the loader then fails closed only when enforcing).
+        const signature =
+          "signature" in frame && typeof frame.signature === "string"
+            ? frame.signature
+            : undefined;
         if (this.deps.moduleLoader) {
           try {
-            await this.deps.moduleLoader.install({ moduleId, version, artifactUrl, checksum });
+            await this.deps.moduleLoader.install({
+              moduleId,
+              version,
+              artifactUrl,
+              checksum,
+              signature,
+            });
             send({ t: "moduleInstallResult", moduleId, version, ok: true });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
