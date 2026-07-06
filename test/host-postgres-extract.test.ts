@@ -111,6 +111,24 @@ describe("extractor", () => {
     expect(calls.some((c) => base(c) === "tar" && c.includes("-xJf"))).toBe(true);
   });
 
+  // Guard against the Bun path.posix.normalize bug: a top-level symlink whose
+  // target's first segment is `<chars>..` then climbs (`ab../../..`) is a real
+  // root-escape that Bun's normalize misses — the manual depth walk must catch it.
+  test("rejects a top-level symlink escaping via a mid-segment '..' (normalize-bug guard)", async () => {
+    const spawner: Spawner = {
+      run: async (cmd) => {
+        if (base(cmd) === "tar" && cmd.some((a) => a.startsWith("-tv")))
+          return { code: 0, stdout: "lrwxrwxrwx 0/0 0 2026-01-01 12:00 link -> ab../../..\n", stderr: "" };
+        if (base(cmd) === "tar" && cmd.some((a) => a.startsWith("-t")))
+          return { code: 0, stdout: "link\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await expect(makeTarGzExtractor(spawner)("/cache/pgvector.tar.gz", "/pg/ext")).rejects.toThrow(
+      /escapes archive root/,
+    );
+  });
+
   test("rejects a symlink whose target escapes the tree", async () => {
     const spawner: Spawner = {
       run: async (cmd) => {

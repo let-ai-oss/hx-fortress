@@ -129,11 +129,18 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
     },
     startServer: async (binDir) => {
       await mkdir(socketDir, { recursive: true, mode: 0o700 });
+      // `-l <logfile>` is REQUIRED: pg_ctl daemonizes the postmaster, which
+      // inherits this process's stdout. defaultSpawner drains child stdout to EOF
+      // (for the tar-audit capture), so without `-l` the never-closing daemon pipe
+      // hangs `start()` forever — bricking the boot. Redirecting the server's
+      // stdout/stderr to a file releases the inherited pipe → EOF → we return.
       const { code, stderr } = await spawner.run([
         path.join(binDir, "pg_ctl"),
         "-D",
         dataDir,
         "-w",
+        "-l",
+        path.join(dataDir, "pg_ctl-server.log"),
         "-o",
         `-k ${socketDir} -p ${port} -c listen_addresses=127.0.0.1`,
         "start",

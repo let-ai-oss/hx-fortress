@@ -9,8 +9,6 @@
 // hostile $PATH can't shadow `tar`/`unzip`; if resolution fails we fall back to
 // the bare name (dev machines where which() misses but the tool is on PATH).
 
-import path from "node:path";
-
 import type { Spawner } from "./spawn";
 
 const binCache = new Map<string, string>();
@@ -60,10 +58,23 @@ function assertSafeLinkTarget(linkFrom: string, target: string, archivePath: str
   if (target.startsWith("/")) {
     throw new Error(`unsafe link (absolute target) in ${archivePath}: ${linkFrom} -> ${target}`);
   }
-  const base = path.posix.dirname(linkFrom.replace(/^\.\/+/, ""));
-  const resolved = path.posix.normalize(path.posix.join(base === "." ? "" : base, target));
-  if (resolved === ".." || resolved.startsWith("../")) {
-    throw new Error(`unsafe link (escapes archive root) in ${archivePath}: ${linkFrom} -> ${target}`);
+  // Runtime-independent segment-depth walk — do NOT use path.posix.normalize:
+  // Bun 1.3.14 mis-normalizes `xx../../..` (leaves it unchanged instead of `..`),
+  // which would let a top-level symlink escape. Start at the symlink's directory
+  // depth, apply the target's segments, and reject if depth ever drops below root.
+  let depth = 0;
+  const fromSegs = linkFrom.replace(/^\.\/+/, "").split("/");
+  for (const s of fromSegs.slice(0, -1)) if (s && s !== ".") depth += 1;
+  for (const s of target.split("/")) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") {
+      depth -= 1;
+      if (depth < 0) {
+        throw new Error(`unsafe link (escapes archive root) in ${archivePath}: ${linkFrom} -> ${target}`);
+      }
+    } else {
+      depth += 1;
+    }
   }
 }
 
