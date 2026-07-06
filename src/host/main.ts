@@ -42,7 +42,7 @@ import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
-import type { McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
+import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 
 export interface HostMainDependencies {
   root?: string;

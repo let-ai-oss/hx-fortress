@@ -1,11 +1,4 @@
-// VENDORED: Temporary local copy of the future @let-ai/hx-protocol package.
-// See VENDORED.md before modifying this file.
-
-export { decodeFrame, encodeFrame } from "./codec";
-export type {
-  FortressToHubFrame,
-  HubToFortressFrame,
-  ProtocolFrame,
-} from "./frames";
-export type { FortressIdentity } from "./identity";
-export type { MsgData, MsgReply } from "./messages";
+// The HX wire contract now lives in @let-ai/hx-protocol. This directory is a
+// thin re-export surface so callers keep importing from "../protocol".
+// See VENDORED.md.
+export * from "@let-ai/hx-protocol";
