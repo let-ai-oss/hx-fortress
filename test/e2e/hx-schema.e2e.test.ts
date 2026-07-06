@@ -213,4 +213,46 @@ describe.if(RUN)("hx schema migrations", () => {
     );
     expect(recorded[0].n).toBe(0);
   });
+
+  test("hx_app_rw can INSERT but cannot CREATE TABLE (DML, no DDL)", async () => {
+    const rw = new Bun.SQL(cluster.rwDsn);
+    try {
+      await rw.unsafe(
+        "INSERT INTO hx.users (id, external_id) VALUES ('22222222-2222-7222-8222-222222222222','u-rw')",
+      );
+      const rows = (await rw.unsafe(
+        "SELECT count(*)::int AS n FROM hx.users WHERE external_id='u-rw'",
+      )) as Array<{ n: number }>;
+      expect(rows[0].n).toBe(1);
+      // USAGE-only on schema hx → no CREATE, so DDL is denied.
+      let threw = false;
+      try {
+        await rw.unsafe("CREATE TABLE hx.rw_should_not_exist (id int)");
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(true);
+    } finally {
+      await rw.end();
+    }
+  });
+
+  test("hx_app_ro can SELECT but cannot INSERT (read-only)", async () => {
+    const ro = new Bun.SQL(cluster.roDsn);
+    try {
+      const rows = (await ro.unsafe(
+        "SELECT count(*)::int AS n FROM hx.sessions",
+      )) as Array<{ n: number }>;
+      expect(rows[0].n).toBeGreaterThanOrEqual(0);
+      let threw = false;
+      try {
+        await ro.unsafe("INSERT INTO hx.users (external_id) VALUES ('ro-should-fail')");
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(true);
+    } finally {
+      await ro.end();
+    }
+  });
 });

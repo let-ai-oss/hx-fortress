@@ -3,7 +3,18 @@ import path from "node:path";
 
 import { acquireBinaries } from "./acquire";
 import { detectMusl, resolveZonkyClassifier } from "./classifier";
-import { ensureCluster, ensureDatabaseAndSchema, PG_DATABASE, PG_ROLE, type ClusterSql } from "./cluster";
+import {
+  ensureAppRoles,
+  ensureAuth,
+  ensureCluster,
+  ensureDatabaseAndSchema,
+  PG_APP_RO_ROLE,
+  PG_APP_RW_ROLE,
+  PG_DATABASE,
+  PG_ROLE,
+  type ClusterSql,
+} from "./cluster";
+import { ensureRoleSecrets, type RoleSecrets } from "./roles";
 import { makeExtractor, makeTarGzExtractor } from "./extract";
 import { runMigrations } from "./migrate";
 import { migrations } from "./migrations/manifest";
@@ -46,13 +57,37 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
   const dataDir = resolved.dataDir;
   const socketDir = deps.paths.postgresSocket;
   const port = resolved.port;
-  // Loopback only: the server binds 127.0.0.1, never an external interface.
-  const dsnFor = (database: string) =>
-    `postgresql://${PG_ROLE}@127.0.0.1:${port}/${database}`;
+
+  // Per-install role secrets, read (or minted) once and memoized. Awaited by the
+  // first boot hook that needs it (ensureCluster) and reused everywhere; the
+  // synchronous role-DSN accessor below reads the resolved value (only ever
+  // invoked once the cluster is ready, by which point this is populated).
+  let secrets: RoleSecrets | null = null;
+  const getSecrets = async (): Promise<RoleSecrets> => {
+    if (!secrets) secrets = await ensureRoleSecrets(deps.paths.pgRoles);
+    return secrets;
+  };
+
+  // Loopback only: the server binds 127.0.0.1, never an external interface. The
+  // password is URL-safe hex (roles.ts), so it needs no escaping in the DSN.
+  const dsnFor = (database: string, password: string, role: string): string =>
+    `postgresql://${role}:${password}@127.0.0.1:${port}/${database}`;
+  // Bootstrap connections (schema, auth hardening, migrations) run as the
+  // fortress superuser.
+  const superDsn = (database: string, s: RoleSecrets): string =>
+    dsnFor(database, s.super, PG_ROLE);
+  // Role-aware DSN handed to modules once ready. Default/"rw" → the DML role;
+  // "ro" → the SELECT-only role (least-privilege for the MCP read tools).
+  const roleDsn = (role?: "ro" | "rw"): string => {
+    if (!secrets) throw new Error("postgres role secrets not initialized");
+    return role === "ro"
+      ? dsnFor(PG_DATABASE, secrets.appRo, PG_APP_RO_ROLE)
+      : dsnFor(PG_DATABASE, secrets.appRw, PG_APP_RW_ROLE);
+  };
 
   const sql: ClusterSql = {
     run: async (database, statement) => {
-      const client = new Bun.SQL(dsnFor(database));
+      const client = new Bun.SQL(superDsn(database, await getSecrets()));
       try {
         await client.unsafe(statement);
       } finally {
@@ -60,7 +95,7 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       }
     },
     exists: async (database, query) => {
-      const client = new Bun.SQL(dsnFor(database));
+      const client = new Bun.SQL(superDsn(database, await getSecrets()));
       try {
         const rows = await client.unsafe(query);
         return Array.isArray(rows) && rows.length > 0;
@@ -71,7 +106,7 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
   };
 
   return createEmbeddedPostgres({
-    dsn: dsnFor(PG_DATABASE),
+    dsn: roleDsn,
     acquire: () =>
       acquireBinaries({
         fetchImpl: fetch,
@@ -82,7 +117,10 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
         version: resolved.version,
         binariesUrl: resolved.binariesUrl,
       }),
-    ensureCluster: (binDir) => ensureCluster({ spawner, binDir, dataDir }),
+    ensureCluster: async (binDir) => {
+      const s = await getSecrets();
+      await ensureCluster({ spawner, binDir, dataDir, superPassword: s.super });
+    },
     startServer: async (binDir) => {
       await mkdir(socketDir, { recursive: true, mode: 0o700 });
       const { code, stderr } = await spawner.run([
@@ -98,6 +136,18 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
     },
     stopServer: async (binDir) => {
       await spawner.run([path.join(binDir, "pg_ctl"), "-D", dataDir, "-m", "fast", "stop"]);
+    },
+    ensureAuth: async (binDir) => {
+      const s = await getSecrets();
+      await ensureAuth(sql, dataDir, s, async () => {
+        const { code, stderr } = await spawner.run([
+          path.join(binDir, "pg_ctl"),
+          "-D",
+          dataDir,
+          "reload",
+        ]);
+        if (code !== 0) throw new Error(`pg_ctl reload failed: ${stderr.trim()}`);
+      });
     },
     ensureDbSchema: () => ensureDatabaseAndSchema(sql),
     ensureVector: async () => {
@@ -127,7 +177,10 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       });
     },
     migrate: async () => {
-      await runMigrations(makeMigrationExec(dsnFor(PG_DATABASE)), migrations);
+      await runMigrations(makeMigrationExec(superDsn(PG_DATABASE, await getSecrets())), migrations);
+    },
+    ensureAppRoles: async () => {
+      await ensureAppRoles(sql, await getSecrets());
     },
   });
 }

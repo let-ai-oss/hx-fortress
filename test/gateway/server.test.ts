@@ -21,6 +21,7 @@ describe("gateway health endpoints", () => {
       store: () => storeValue,
       postgresReady: () => true,
       db: () => null,
+      dbRead: () => null,
     });
   });
 

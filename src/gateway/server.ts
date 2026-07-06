@@ -45,8 +45,12 @@ export interface GatewayDeps {
   ownOrgId?: () => Promise<string | null>;
   /** True once the local Postgres is accepting connections. */
   postgresReady: () => boolean;
-  /** Resolves the Drizzle handle on the bundled hx-db, or null before it's ready. */
+  /** RW Drizzle handle on the bundled hx-db (the DML `hx_app_rw` role) — the
+   *  ingest write path. Null before Postgres is ready. */
   db: () => HxDb | null;
+  /** RO Drizzle handle on the bundled hx-db (the SELECT-only `hx_app_ro` role) —
+   *  the MCP read tools. Null before Postgres is ready. */
+  dbRead: () => HxDb | null;
   /** The fortress's OpenAI embedder for hx_semantic_search's in-fortress query
    *  embed. null/omitted ⇒ no key ⇒ semantic search degrades to keyword. */
   embedder?: Embedder | null;
@@ -223,7 +227,9 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
         if (!mcpClaims) return json({ error: "unauthorized" }, 401);
         try {
           return await handleMcpRequest(req, {
-            db: deps.db(),
+            // Least-privilege: the MCP tools are read-only, so they run on the
+            // SELECT-only RO handle, never the ingest RW one.
+            db: deps.dbRead(),
             store: deps.store(),
             embedder: deps.embedder ?? null,
             version: packageJson.version,

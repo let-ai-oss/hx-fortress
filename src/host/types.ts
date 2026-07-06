@@ -198,5 +198,8 @@ export interface PostgresProvider {
   stop(): Promise<void>;
   status(): PostgresStatusSnapshot;
   isReady(): boolean;
-  dsn(): string | null;
+  /** Role-aware DSN, or null before the cluster is ready. Default (and `"rw"`)
+   *  is the DML role; `"ro"` the SELECT-only role. External Postgres returns the
+   *  operator's single URL for both. */
+  dsn(role?: "ro" | "rw"): string | null;
 }

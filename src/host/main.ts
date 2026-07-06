@@ -113,15 +113,26 @@ export async function runFortressHost(
   const logger = new BusHostLogger(bus);
   const registry = new ModuleRegistry(bus);
   // Lazily built once Postgres is ready (the cluster boots after modules are
-  // wired). Shared by the tunnel module (relayed commits) and the direct
-  // gateway so both ingest into the same hx-db handle.
-  let hxDb: HxDb | null = null;
+  // wired). Two role-scoped handles (de-superuser least-privilege): the RW
+  // handle (hx_app_rw) is the ingest write path shared by the tunnel module +
+  // the direct gateway; the RO handle (hx_app_ro) is the SELECT-only read path
+  // for the MCP tools (HTTP /mcp + the reverse tunnel). Embedded mode splits the
+  // two roles; external mode resolves both to the operator's single URL.
+  let hxDbRw: HxDb | null = null;
   const resolveHxDb = (): HxDb | null => {
-    if (hxDb) return hxDb;
-    const dsn = postgres.dsn();
+    if (hxDbRw) return hxDbRw;
+    const dsn = postgres.dsn("rw");
     if (!dsn) return null;
-    hxDb = createHxDb(dsn);
-    return hxDb;
+    hxDbRw = createHxDb(dsn);
+    return hxDbRw;
+  };
+  let hxDbRo: HxDb | null = null;
+  const resolveHxDbRead = (): HxDb | null => {
+    if (hxDbRo) return hxDbRo;
+    const dsn = postgres.dsn("ro");
+    if (!dsn) return null;
+    hxDbRo = createHxDb(dsn);
+    return hxDbRo;
   };
   // Fortress→cloud realtime bridge (MC-2415): ingest paths emit invalidations
   // here; the closure is repointed at the live connection once it's built below
@@ -308,7 +319,8 @@ export async function runFortressHost(
   // Tunnel-MCP now has db+store+embedder — repoint the holder to the real
   // handler so the reverse tunnel serves the same hx_* tools as the HTTP gateway.
   mcpTunnel.handle = createMcpTunnelHandler({
-    db: resolveHxDb,
+    // Read-only tools → the SELECT-only RO handle (least-privilege).
+    db: resolveHxDbRead,
     store: () => vaultModule.getStore(),
     embedder,
   }).handle;
@@ -325,7 +337,9 @@ export async function runFortressHost(
       ownOrgId: () => credentialStore.load().then((c) => c?.orgId ?? null).catch(() => null),
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
+      // RW handle for the ingest write path; RO handle for the /mcp read tools.
       db: resolveHxDb,
+      dbRead: resolveHxDbRead,
       embedder,
       notify: emitIngest,
     });
@@ -340,7 +354,8 @@ export async function runFortressHost(
   let embedWorker: EmbedWorker | null = null;
   if (embedder) {
     embedWorker = createEmbedWorker({
-      dsn: () => postgres.dsn(),
+      // The embed worker writes embeddings + budget rows → the RW role.
+      dsn: () => postgres.dsn("rw"),
       embedder,
       dbMax: embedConfig.dbMax,
       concurrency: embedConfig.concurrency,

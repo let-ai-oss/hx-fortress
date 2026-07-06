@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -17,12 +17,16 @@ const config: FortressConfig = {
 };
 
 export interface Cluster {
-  /** DSN for the hx-db database on the freshly-booted embedded cluster. */
+  /** Superuser (fortress) DSN — full privilege, for migrations/DDL/seed rows. */
   dsn: string;
+  /** hx_app_rw DSN — DML only (SELECT/INSERT/UPDATE/DELETE), no DDL. */
+  rwDsn: string;
+  /** hx_app_ro DSN — SELECT only (via hx_readonly). */
+  roDsn: string;
   stop: () => Promise<void>;
 }
 
-/** Boot a throwaway embedded Postgres in a temp root and return its hx-db DSN.
+/** Boot a throwaway embedded Postgres in a temp root and return its role DSNs.
  *  Acquires/extracts the zonky binaries on first use (slow); reused by the
  *  schema e2e suites. Caller must `stop()` to shut down and remove the root. */
 export async function startCluster(): Promise<Cluster> {
@@ -39,10 +43,17 @@ export async function startCluster(): Promise<Cluster> {
     await rm(root, { recursive: true, force: true });
     throw new Error(`cluster not ready: ${status.reason ?? "unknown"}`);
   }
-  const dsn = provider.dsn();
-  if (!dsn) throw new Error("cluster ready but no dsn");
+  const rwDsn = provider.dsn("rw");
+  const roDsn = provider.dsn("ro");
+  if (!rwDsn || !roDsn) throw new Error("cluster ready but no dsn");
+  // Build the privileged superuser DSN from the generated secret so the schema/
+  // seed steps (which run migrations, DDL, and inserts) connect as fortress.
+  const secrets = JSON.parse(await readFile(paths.pgRoles, "utf8")) as { super: string };
+  const dsn = `postgresql://fortress:${secrets.super}@127.0.0.1:${port}/hx-db`;
   return {
     dsn,
+    rwDsn,
+    roDsn,
     stop: async () => {
       await provider.stop();
       await rm(root, { recursive: true, force: true });
