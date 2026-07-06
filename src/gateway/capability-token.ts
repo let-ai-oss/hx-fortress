@@ -117,14 +117,21 @@ export async function verifyCapabilityToken(
  *  throws a specific error.
  *
  *  Requires `v === 2`, `purpose === opts.purpose`, `org === aud === expectedOrgId`,
- *  a non-empty `sub`, and — for a read grant — a present `scopeHash`. The caller
- *  then binds the grant to the object it touches (write) or recomputes the scope
- *  hash over the tool args (read). */
+ *  and a non-empty `sub`. `opts.requireScope` (default true) governs the read-grant
+ *  scope commitment:
+ *   • SCOPE-BOUND reads (the MCP query tools) pass `requireScope:true` — a present
+ *     `scopeHash` is REQUIRED and the caller recomputes it over the tool args.
+ *   • OWN-OBJECT reads (the vault-RPC own-data reads + the HTTP `/sessions` reads)
+ *     pass `requireScope:false` — these grants are `sub`-bound with NO scopeHash;
+ *     the boundary is `key.userId === sub`, enforced by the caller. Requiring a
+ *     scopeHash here would throw `unauthorized` on every such read once grants ship.
+ *  The caller then binds the grant to the object it touches (write / own-object) or
+ *  recomputes the scope hash over the tool args (scope-bound read). */
 export async function verifyGrant(
   token: string,
   publicKeyB64url: string,
   expectedOrgId: string,
-  opts: { purpose: "ingest" | "read" },
+  opts: { purpose: "ingest" | "read"; requireScope?: boolean },
 ): Promise<GrantClaims> {
   const key = await importJWK({ kty: "OKP", crv: "Ed25519", x: publicKeyB64url }, "EdDSA");
   const { payload } = await jwtVerify(token, key, {
@@ -141,7 +148,10 @@ export async function verifyGrant(
   if (typeof aud !== "string" || aud !== expectedOrgId) throw new Error("grant audience mismatch");
   if (typeof sub !== "string" || sub.length === 0) throw new Error("grant missing sub");
   const scopeHash = typeof p.scopeHash === "string" ? p.scopeHash : undefined;
-  if (opts.purpose === "read" && !scopeHash) {
+  // Default to REQUIRING a scopeHash on reads (the scope-bound MCP path); own-object
+  // read callers opt out with requireScope:false.
+  const requireScope = opts.requireScope ?? true;
+  if (opts.purpose === "read" && requireScope && !scopeHash) {
     throw new Error("read grant missing scopeHash");
   }
   return {

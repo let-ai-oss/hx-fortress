@@ -67,11 +67,21 @@ describe("verifyGrant", () => {
     );
   });
 
-  it("rejects a read grant with no scopeHash", async () => {
+  it("rejects a read grant with no scopeHash (scope-bound MCP read, requireScope default)", async () => {
     const { rawB64url, token } = await makeGrant({ v: 2, purpose: "read", org: "org_1", aud: "org_1", sub: "user_1" });
     await expect(verifyGrant(token, rawB64url, "org_1", { purpose: "read" })).rejects.toThrow(
       /missing scopeHash/,
     );
+  });
+
+  it("ACCEPTS a read grant with no scopeHash when requireScope:false (own-object read)", async () => {
+    // The vault-RPC own-data reads + HTTP /sessions reads are sub-bound with no
+    // scopeHash (the boundary is key.userId === sub). requireScope:false must let
+    // such a grant verify — otherwise every own-object read throws once grants ship.
+    const { rawB64url, token } = await makeGrant({ v: 2, purpose: "read", org: "org_1", aud: "org_1", sub: "user_1" });
+    const grant = await verifyGrant(token, rawB64url, "org_1", { purpose: "read", requireScope: false });
+    expect(grant.sub).toBe("user_1");
+    expect(grant.scopeHash).toBeUndefined();
   });
 
   it("rejects a grant that is not v2", async () => {

@@ -30,6 +30,39 @@ describe("assertS3EndpointSafe", () => {
     );
   });
 
+  // SSRF IP-encoding bypass: an integer / hex / octal encoding of a loopback or
+  // metadata address must be rejected too. The WHATWG URL parser canonicalizes
+  // most of these to dotted-decimal (so the range classifier catches them); the
+  // obfuscated-literal guard is the belt-and-suspenders for a parser that doesn't.
+  test.each([
+    ["decimal-integer metadata IP (2852039166 = 169.254.169.254)", "https://2852039166/"],
+    ["hex loopback (0x7f000001 = 127.0.0.1)", "https://0x7f000001/"],
+    ["octal loopback (0177.0.0.1 = 127.0.0.1)", "https://0177.0.0.1/"],
+    ["decimal-integer loopback (2130706433 = 127.0.0.1)", "https://2130706433/"],
+  ])("rejects an encoded-IP endpoint: %s", (_name, endpoint) => {
+    expect(() => assertS3EndpointSafe(endpoint, {})).toThrow(
+      /private\/loopback address|obfuscated IP literal/,
+    );
+  });
+
+  test("rejects the unspecified 0.0.0.0 address (0.0.0.0/8)", () => {
+    expect(() => assertS3EndpointSafe("https://0.0.0.0", {})).toThrow(/private\/loopback address/);
+  });
+
+  test("rejects a carrier-grade-NAT address (100.64.0.0/10)", () => {
+    expect(() => assertS3EndpointSafe("https://100.64.0.1", {})).toThrow(/private\/loopback address/);
+  });
+
+  test("rejects an IPv4-mapped IPv6 metadata address (hex-normalized form)", () => {
+    expect(() => assertS3EndpointSafe("https://[::ffff:169.254.169.254]", {})).toThrow(
+      /private\/loopback address/,
+    );
+  });
+
+  test("rejects an fe80::/10 link-local address the old fe80-prefix check missed", () => {
+    expect(() => assertS3EndpointSafe("https://[fe9a::1]", {})).toThrow(/private\/loopback address/);
+  });
+
   test("rejects a host that is not in the allowlist", () => {
     expect(() =>
       assertS3EndpointSafe("https://minio.other.example", {

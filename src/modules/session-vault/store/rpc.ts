@@ -197,7 +197,10 @@ export async function handleVaultRpc(
       // and surface a URL-free reason so the signed URL never reaches logs/replies.
       let res: Response;
       try {
-        res = await fetch(url);
+        // redirect:"error" — a validated signed URL must not 3xx-redirect into a
+        // private/metadata address (SSRF): a redirect makes fetch throw, which we
+        // map to the URL-free network reason below (fail-closed).
+        res = await fetch(url, { redirect: "error" });
       } catch {
         throw new Error("canonical_fetch_failed:network");
       }

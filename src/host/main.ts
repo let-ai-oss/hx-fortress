@@ -160,12 +160,14 @@ export async function runFortressHost(
   // caller rejects the grant) before the key is pinned or the org id is known.
   const verifyGrantFn = async (
     token: string,
-    opts: { purpose: "ingest" | "read" },
+    opts: { purpose: "ingest" | "read"; requireScope?: boolean },
   ): Promise<GrantClaims> => {
     const key = await signingKeyStore.pinnedKey();
     if (!key) throw new Error("no pinned signing key");
     const orgId = (await credentialStore.load().catch(() => null))?.orgId ?? null;
     if (!orgId) throw new Error("fortress org id unknown");
+    // requireScope is the CALLER's decision (vault-RPC own-object reads pass false;
+    // the scope-bound tunnel-MCP read path passes true) — forward it unchanged.
     return verifyGrant(token, key, orgId, opts);
   };
 

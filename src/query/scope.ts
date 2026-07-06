@@ -77,6 +77,16 @@ export function parseScope(raw: unknown): FortressScope {
     const members = Array.isArray(g.activeMemberExternalIds)
       ? g.activeMemberExternalIds.filter((m): m is string => typeof m === "string")
       : [];
+    // M-9d · cap the owner-gate member list symmetric with MAX_SCOPE_IDENTITIES.
+    // The gate is AND-narrowing (a session is admitted only if its owner is in the
+    // set), so truncating it only NARROWS the match set — fail-closed-safe, and an
+    // oversized gate is abusive rather than a legitimate 10k-owner consent.
+    if (members.length > MAX_SCOPE_IDENTITIES) {
+      console.warn(
+        `parseScope: truncating ${members.length} owner-gate members to ${MAX_SCOPE_IDENTITIES}`,
+      );
+      members.length = MAX_SCOPE_IDENTITIES;
+    }
     ownerGate = { activeMemberExternalIds: members };
   }
   return ownerGate ? { identities, ownerGate } : { identities };

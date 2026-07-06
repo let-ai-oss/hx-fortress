@@ -153,20 +153,24 @@ describe("ModuleLoader.install", () => {
     expect(reply).toEqual({ ok: true, payload: { value: 42 } });
   });
 
-  test("does not gate install on the hub checksum (integrity, not authenticity)", async () => {
-    const { loader, registry } = makeLoader();
+  test("gates install on a checksum-INTEGRITY mismatch (fail-closed, defense in depth)", async () => {
+    const { loader, registry, saved } = makeLoader();
 
-    // Release A verifies detached SIGNATURES; the hub-supplied `checksum` is not
-    // an authenticity root, so a mismatched checksum no longer blocks install
-    // (and with no signature + enforcement off, install proceeds).
-    await loader.install({
-      moduleId: "test_echo",
-      version: "1.0.0",
-      artifactUrl: "https://example.com/test_echo-1.0.0.js",
-      checksum: "0000000000000000000000000000000000000000000000000000000000000000",
-    });
+    // With SIGNATURE_ENFORCE off and no signature published, the hub-supplied
+    // `checksum` is the ONLY integrity control — so a mismatched checksum must fail
+    // the install (corrupted / truncated / substituted artifact), and the artifact
+    // is never saved. (It is NOT authenticity — the signature gate covers that.)
+    await expect(
+      loader.install({
+        moduleId: "test_echo",
+        version: "1.0.0",
+        artifactUrl: "https://example.com/test_echo-1.0.0.js",
+        checksum: "0000000000000000000000000000000000000000000000000000000000000000",
+      }),
+    ).rejects.toThrow(/integrity|checksum/i);
 
-    expect(registry.has("test_echo")).toBe(true);
+    expect(registry.has("test_echo")).toBe(false);
+    expect(saved.size).toBe(0);
   });
 
   test("rejects a module whose detached signature does not verify", async () => {

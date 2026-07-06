@@ -52,13 +52,19 @@ describe("FileSigningKeyStore", () => {
     const store = new FileSigningKeyStore(path.join(dir, "signing-key"));
     expect(await store.loadRecord()).toBeNull();
     expect(await store.load()).toBeNull();
-    await store.saveRecord({ key: "BASE64URLKEY", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: true });
+    await store.saveRecord({
+      key: "BASE64URLKEY",
+      pinnedAt: "2026-07-06T00:00:00.000Z",
+      rootVerified: true,
+      notBefore: "2026-07-06T00:00:00Z",
+    });
     expect(await store.load()).toBe("BASE64URLKEY");
     expect(await store.pinnedKey()).toBe("BASE64URLKEY");
     expect(await store.loadRecord()).toEqual({
       key: "BASE64URLKEY",
       pinnedAt: "2026-07-06T00:00:00.000Z",
       rootVerified: true,
+      notBefore: "2026-07-06T00:00:00Z",
     });
   });
 
@@ -72,6 +78,7 @@ describe("FileSigningKeyStore", () => {
       key: "LEGACYBAREKEY",
       pinnedAt: null,
       rootVerified: false,
+      notBefore: null,
     });
   });
 });
@@ -83,12 +90,12 @@ describe("resolveSigningKeyPin", () => {
   });
 
   it("is a no-op when the incoming key equals the pin", () => {
-    const cur: PinnedSigningKey = { key: "k1", pinnedAt: null, rootVerified: false };
+    const cur: PinnedSigningKey = { key: "k1", pinnedAt: null, rootVerified: false, notBefore: null };
     expect(resolveSigningKeyPin(cur, "k1", false)).toEqual({ action: "noop" });
   });
 
   it("rejects a changed key with no valid proof, replaces one with a valid proof", () => {
-    const cur: PinnedSigningKey = { key: "k1", pinnedAt: null, rootVerified: true };
+    const cur: PinnedSigningKey = { key: "k1", pinnedAt: null, rootVerified: true, notBefore: null };
     expect(resolveSigningKeyPin(cur, "k2", false)).toEqual({ action: "reject" });
     expect(resolveSigningKeyPin(cur, "k2", true)).toEqual({ action: "replace" });
   });
@@ -140,18 +147,23 @@ describe("persistSigningKeyPin (H-2)", () => {
       now: () => new Date("2026-07-06T00:00:00Z"),
     });
     expect(action).toBe("pin");
-    expect(store.record).toEqual({ key: "k1", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: false });
+    expect(store.record).toEqual({
+      key: "k1",
+      pinnedAt: "2026-07-06T00:00:00.000Z",
+      rootVerified: false,
+      notBefore: null,
+    });
   });
 
   it("is a no-op when the SAME key is re-pushed", async () => {
-    const store = memStore({ key: "k1", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: false });
+    const store = memStore({ key: "k1", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: false, notBefore: null });
     const action = await persistSigningKeyPin({ store, orgId: "org_1", incomingKey: "k1" });
     expect(action).toBe("noop");
     expect(store.record?.key).toBe("k1");
   });
 
   it("REJECTS a changed key with no proof — pin unchanged, rotation logged", async () => {
-    const store = memStore({ key: "k1", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: true });
+    const store = memStore({ key: "k1", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: true, notBefore: null });
     const logged: string[] = [];
     const action = await persistSigningKeyPin({
       store,
@@ -164,9 +176,14 @@ describe("persistSigningKeyPin (H-2)", () => {
     expect(logged).toContain("signing_key_rotation_rejected");
   });
 
-  it("REPLACES a changed key that carries a valid root proof", async () => {
+  it("REPLACES a changed key that carries a valid root proof (newer notBefore)", async () => {
     const root = await makeRootKeypair();
-    const store = memStore({ key: "k1", pinnedAt: "2026-07-06T00:00:00.000Z", rootVerified: true });
+    const store = memStore({
+      key: "k1",
+      pinnedAt: "2026-07-06T00:00:00.000Z",
+      rootVerified: true,
+      notBefore: "2026-07-06T00:00:00Z",
+    });
     const proof = await root.sign("org_1", "k2-authorized", "2026-07-07T00:00:00Z");
     const action = await persistSigningKeyPin({
       store,
@@ -181,12 +198,13 @@ describe("persistSigningKeyPin (H-2)", () => {
       key: "k2-authorized",
       pinnedAt: "2026-07-07T00:00:00.000Z",
       rootVerified: true,
+      notBefore: "2026-07-07T00:00:00Z",
     });
   });
 
   it("REJECTS a changed key whose proof is for a DIFFERENT key (no downgrade)", async () => {
     const root = await makeRootKeypair();
-    const store = memStore({ key: "k1", pinnedAt: null, rootVerified: true });
+    const store = memStore({ key: "k1", pinnedAt: null, rootVerified: true, notBefore: null });
     // Proof authorizes k2, but the pushed key is k3 → verify fails → reject.
     const proof = await root.sign("org_1", "k2", "2026-07-07T00:00:00Z");
     const action = await persistSigningKeyPin({
@@ -198,5 +216,79 @@ describe("persistSigningKeyPin (H-2)", () => {
     });
     expect(action).toBe("reject");
     expect(store.record?.key).toBe("k1");
+  });
+
+  // H-2b · monotonic notBefore — a replayed OLDER root proof must not roll the pin
+  // back to a prior key, even though its signature is valid.
+  it("REJECTS a replayed proof whose notBefore is OLDER than the pinned floor (no rollback)", async () => {
+    const root = await makeRootKeypair();
+    // Pinned to k2 with an accepted proof floor at 2026-07-07.
+    const store = memStore({
+      key: "k2",
+      pinnedAt: "2026-07-07T00:00:00.000Z",
+      rootVerified: true,
+      notBefore: "2026-07-07T00:00:00Z",
+    });
+    const logged: Array<{ msg: string; fields?: Record<string, unknown> }> = [];
+    // A validly-signed but STALE proof (notBefore 2026-07-01 < floor) authorizing
+    // a prior key k1 — the rollback attempt a compromised hub / MITM would replay.
+    const stale = await root.sign("org_1", "k1", "2026-07-01T00:00:00Z");
+    const action = await persistSigningKeyPin({
+      store,
+      orgId: "org_1",
+      incomingKey: "k1",
+      keyProof: stale,
+      verifyProof: useFixtureRoot(root.anchor),
+      log: (msg, fields) => logged.push({ msg, fields }),
+    });
+    expect(action).toBe("reject");
+    expect(store.record?.key).toBe("k2"); // pin untouched — no rollback
+    expect(logged.some((l) => l.msg === "signing_key_rotation_rejected")).toBe(true);
+  });
+
+  it("REJECTS a proof whose notBefore EQUALS the pinned floor (strict monotonicity)", async () => {
+    const root = await makeRootKeypair();
+    const store = memStore({
+      key: "k2",
+      pinnedAt: "2026-07-07T00:00:00.000Z",
+      rootVerified: true,
+      notBefore: "2026-07-07T00:00:00Z",
+    });
+    const same = await root.sign("org_1", "k9", "2026-07-07T00:00:00Z");
+    const action = await persistSigningKeyPin({
+      store,
+      orgId: "org_1",
+      incomingKey: "k9",
+      keyProof: same,
+      verifyProof: useFixtureRoot(root.anchor),
+    });
+    expect(action).toBe("reject");
+    expect(store.record?.key).toBe("k2");
+  });
+
+  it("ACCEPTS a genuine forward rotation (newer notBefore) and advances the floor", async () => {
+    const root = await makeRootKeypair();
+    const store = memStore({
+      key: "k2",
+      pinnedAt: "2026-07-07T00:00:00.000Z",
+      rootVerified: true,
+      notBefore: "2026-07-07T00:00:00Z",
+    });
+    const forward = await root.sign("org_1", "k3", "2026-07-09T00:00:00Z");
+    const action = await persistSigningKeyPin({
+      store,
+      orgId: "org_1",
+      incomingKey: "k3",
+      keyProof: forward,
+      verifyProof: useFixtureRoot(root.anchor),
+      now: () => new Date("2026-07-09T00:00:00Z"),
+    });
+    expect(action).toBe("replace");
+    expect(store.record).toEqual({
+      key: "k3",
+      pinnedAt: "2026-07-09T00:00:00.000Z",
+      rootVerified: true,
+      notBefore: "2026-07-09T00:00:00Z",
+    });
   });
 });

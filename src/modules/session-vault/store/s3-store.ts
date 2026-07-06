@@ -45,6 +45,7 @@ import {
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
 import { artifactObject, canonicalObject, stagingObject } from "./keys.js";
+import { maxCanonicalBytes } from "./limits.js";
 
 export interface S3StoreConfig {
   region: string;
@@ -103,6 +104,10 @@ export class S3Store implements SessionStore {
     const r = await this.s3.send(
       new GetObjectCommand({ Bucket: this.bucket, Key: stagingObject(key, chunkId) }),
     );
+    // M-9c · reject an oversized chunk from the response's ContentLength BEFORE
+    // materializing it into a string (a hostile / buggy signed-URL upload could be
+    // arbitrarily large → OOM on read + re-parse). Fail-closed, no extra round trip.
+    if ((r.ContentLength ?? 0) > maxCanonicalBytes()) throw new Error("chunk_too_large");
     return r.Body ? r.Body.transformToString("utf-8") : "";
   }
 
@@ -131,9 +136,14 @@ export class S3Store implements SessionStore {
     }
 
     if (currentSize >= MULTIPART_MIN_PART) {
+      // Server-side multipart copy — no bytes materialize in the fortress here.
       await this.multipartAppend(canonical, staging);
     } else {
       const [cur, chunk] = await Promise.all([this.getBytes(canonical), this.getBytes(staging)]);
+      // M-9c · this read-modify-write is the only path that loads canonical+chunk
+      // into memory; cap the combined size (fail-closed) so a giant staged chunk
+      // can't OOM the fortress. (The multipart branch above never loads bytes.)
+      if (cur.length + chunk.length > maxCanonicalBytes()) throw new Error("canonical_too_large");
       await this.s3.send(
         new PutObjectCommand({
           Bucket: this.bucket,

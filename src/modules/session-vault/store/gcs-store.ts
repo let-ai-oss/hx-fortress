@@ -27,6 +27,7 @@ import {
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
 import { artifactObject, canonicalObject, sessionPrefix, stagingObject } from "./keys.js";
+import { maxCanonicalBytes } from "./limits.js";
 
 export interface GcsStoreConfig {
   projectId: string;
@@ -76,7 +77,13 @@ export class GcsStore implements SessionStore {
   }
 
   async readChunkText(key: SessionKey, chunkId: string): Promise<string> {
-    const [buf] = await this.bucket().file(stagingObject(key, chunkId)).download();
+    const file = this.bucket().file(stagingObject(key, chunkId));
+    // M-9c · reject an oversized chunk from its metadata size BEFORE downloading it
+    // (a hostile / buggy signed-URL upload could be arbitrarily large → OOM on the
+    // download + re-parse). Fail-closed.
+    const [meta] = await file.getMetadata();
+    if (Number(meta.size ?? 0) > maxCanonicalBytes()) throw new Error("chunk_too_large");
+    const [buf] = await file.download();
     return buf.toString("utf8");
   }
 

@@ -40,7 +40,15 @@ export function canonicalObject(k: SessionKey): string {
 // naming ".staging/…", "log.jsonl", or a traversal path.
 const ARTIFACT_ALLOWLIST = new Set(["session.json", "tasks.json", "plan.json"]);
 
+// The workbench also writes/reads a per-run workflow artifact named
+// `workflow-<runId>.json` (workflowArtifactName). runId varies per run, so a fixed
+// Set can't hold it — a STRICT pattern admits it while the `[A-Za-z0-9_-]` charset
+// (no ".", no "/") keeps it traversal-safe just like an assertSegment segment.
+const WORKFLOW_ARTIFACT = /^workflow-[A-Za-z0-9_-]{4,200}\.json$/;
+
 export function artifactObject(k: SessionKey, name: string): string {
-  if (!ARTIFACT_ALLOWLIST.has(name)) throw new Error(`artifact not allowed: ${name}`);
+  if (!ARTIFACT_ALLOWLIST.has(name) && !WORKFLOW_ARTIFACT.test(name)) {
+    throw new Error(`artifact not allowed: ${name}`);
+  }
   return `${sessionPrefix(k)}/${name}`;
 }

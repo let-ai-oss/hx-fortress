@@ -19,6 +19,11 @@ export interface ModuleLoaderDeps {
   logger: HostLogger;
 }
 
+/** Lowercase hex sha256 of the artifact bytes (integrity check). */
+function sha256Hex(data: Uint8Array): string {
+  return new Bun.CryptoHasher("sha256").update(data).digest("hex");
+}
+
 export class ModuleLoader implements ModuleLifecycleHandler {
   constructor(private readonly deps: ModuleLoaderDeps) {}
 
@@ -55,6 +60,19 @@ export class ModuleLoader implements ModuleLifecycleHandler {
       throw new Error(
         `Module ${moduleId} has no signature and signature enforcement is enabled`,
       );
+    }
+
+    // INTEGRITY pre-check, in addition to the signature gate above. This is NOT
+    // authenticity (a compromised hub can advertise a matching hash for tampered
+    // bytes — only the signature closes that), but with SIGNATURE_ENFORCE off and
+    // no signature published it is the ONLY defense against a corrupted / truncated
+    // / substituted artifact, so keep it fail-closed even in the verify-if-present
+    // window. Runs BEFORE saveArtifact so a mismatched artifact is never persisted.
+    if (checksum) {
+      const actual = sha256Hex(data);
+      if (actual !== checksum) {
+        throw new Error(`Module ${moduleId} integrity check failed: checksum mismatch`);
+      }
     }
 
     await this.deps.saveArtifact(artifactPath, data);

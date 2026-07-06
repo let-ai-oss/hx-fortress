@@ -36,8 +36,11 @@ const PATTERNS: RegExp[] = [
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
   // Database connection strings that embed credentials (scheme://user:pass@host).
   /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqps?):\/\/[^\s"'<>]+/gi,
-  // Email address (PII).
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b/g,
+  // Email address (PII). Every quantifier is BOUNDED so matching stays linear —
+  // the unbounded `(?:\.[label]+)+` form was O(n²) and froze the single-thread Bun
+  // loop on an adversarial `.a.a.a…` input (H-7 ReDoS). RFC-max local part {1,64},
+  // each DNS label {1,63}, and a capped run of labels {1,10}.
+  /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,10}\b/g,
   // US Social Security number.
   /\b\d{3}-\d{2}-\d{4}\b/g,
   // Phone number (loose international / US, separator-tolerant).

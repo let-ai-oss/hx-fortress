@@ -17,7 +17,10 @@ export interface McpTunnelDeps {
   /** Verifies a tunnel MCP read grant against the pinned per-org signing key.
    *  Built in main.ts over signingKeyStore.pinnedKey() + the enrolled org id.
    *  Omit to disable grant verification (a present grant then fails closed). */
-  verifyGrant?: (token: string, opts: { purpose: "ingest" | "read" }) => Promise<GrantClaims>;
+  verifyGrant?: (
+    token: string,
+    opts: { purpose: "ingest" | "read"; requireScope?: boolean },
+  ) => Promise<GrantClaims>;
 }
 
 function toolError(content: unknown): McpTunnelResult {
@@ -50,7 +53,9 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
       if (req.grant) {
         if (!deps.verifyGrant) return toolError({ error: "unauthorized" });
         try {
-          grant = await deps.verifyGrant(req.grant, { purpose: "read" });
+          // A tunnel MCP read is SCOPE-BOUND — checkScopeGrant recomputes the
+          // args scope against the grant's committed scopeHash — so requireScope:true.
+          grant = await deps.verifyGrant(req.grant, { purpose: "read", requireScope: true });
         } catch {
           return toolError({ error: "unauthorized" });
         }

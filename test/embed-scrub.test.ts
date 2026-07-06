@@ -52,6 +52,20 @@ describe("scrubSecrets — new secret/PII shapes (H-7)", () => {
     expect(elapsed).toBeLessThan(2000);
     expect(out).toContain("[REDACTED]");
   });
+
+  test("email regex is LINEAR on the `.a.a.a…` adversarial input (email ReDoS guard)", () => {
+    // The OLD unbounded email pattern `(?:\.[label]+)+` was O(n²) on a long run of
+    // `.a` — measured 40 K ≈ 1.4 s and worse from there — freezing the whole
+    // single-thread fortress. `".a".repeat(200000)` (400 KB) is that exact worst
+    // case; with the bounded pattern it must finish in well under 100 ms and, since
+    // it contains no `@`, match nothing (returned unchanged).
+    const adversarial = ".a".repeat(200_000);
+    const started = performance.now();
+    const out = scrubSecrets(adversarial);
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(100);
+    expect(out).toBe(adversarial);
+  });
 });
 
 describe("hxSemanticSearch — query text is scrubbed before egress (H-7)", () => {

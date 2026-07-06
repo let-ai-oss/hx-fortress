@@ -96,6 +96,11 @@ export interface RunEmbedPassDeps {
 const DEFAULT_MAX_PER_PASS = 500;
 const DEFAULT_BATCH_SIZE = 96;
 const DEFAULT_CONCURRENCY = 2;
+// H-7 · hard slice on a turn's text BEFORE scrub, so one pathological multi-MB
+// turn can't monopolize the single-thread scrub pass. The OpenAI embedder already
+// caps its input at ~24k chars (openai.ts), so this generous ceiling (2×) never
+// drops content a turn would actually be embedded on — it only bounds scrub cost.
+const MAX_TURN_SCRUB_CHARS = 50_000;
 // A uuid that never exists — used as a single-element sentinel so the claim's
 // `NOT IN (...)` exclusion list is never empty (keeps the query shape constant).
 const NO_EXCLUDE_SENTINEL = "00000000-0000-0000-0000-000000000000";
@@ -187,9 +192,11 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
 
   if (candidates.length === 0) return emptyResult();
 
-  // 2. SCRUB + hash (content_hash is over the SCRUBBED text).
+  // 2. SCRUB + hash (content_hash is over the SCRUBBED text). Slice the turn to a
+  // hard ceiling first (H-7) so a pathological multi-MB turn can't stall the pass.
   const prepared = candidates.map((c) => {
-    const scrubbed = scrub(c.text);
+    const bounded = c.text.length > MAX_TURN_SCRUB_CHARS ? c.text.slice(0, MAX_TURN_SCRUB_CHARS) : c.text;
+    const scrubbed = scrub(bounded);
     return { id: c.id, scrubbed, hash: sha256Hex(scrubbed) };
   });
 

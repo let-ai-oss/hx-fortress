@@ -21,6 +21,7 @@ import type {
 } from "../host/types";
 import type { GrantClaims } from "../gateway/capability-token";
 import { isTunnelGrantEnforcing } from "../gateway/capability-token";
+import { sanitizeDbError } from "../host/postgres/sanitize";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { CloudCredential, CredentialStore } from "./credentials";
@@ -55,7 +56,10 @@ export interface WsCloudConnectionDeps {
    *  (H-4). Built in main.ts over signingKeyStore.pinnedKey() + the enrolled org
    *  id. Omit to disable tunnel grant verification (a present grant then fails
    *  closed on the vault RPC path). */
-  verifyGrant?: (token: string, opts: { purpose: "ingest" | "read" }) => Promise<GrantClaims>;
+  verifyGrant?: (
+    token: string,
+    opts: { purpose: "ingest" | "read"; requireScope?: boolean },
+  ) => Promise<GrantClaims>;
   enrollToken?: string;
   /** Called once immediately after a successful enrollment and credential save.
    *  Use to clear the pending enrollment token and propagate identity to modules. */
@@ -79,7 +83,9 @@ export async function dispatchMcpFrame(
     const result = await mcp.handle(frame.req);
     send({ t: "mcpRpcResult", id: frame.id, result });
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    // This error crosses the wire back to the hub/agent — redact any DSN /
+    // signed-URL a DB or driver error could carry before it leaves the fortress.
+    const error = sanitizeDbError(err);
     logger.error(`mcp tunnel error: ${error}`, err);
     send({ t: "mcpRpcError", id: frame.id, error });
   }
@@ -236,8 +242,10 @@ export class WsCloudConnection implements CloudConnection {
       const raw = typeof event.data === "string" ? event.data : String(event.data);
       // Drop an oversized frame BEFORE parsing it (DoS guard), and use the
       // non-throwing decoder so a malformed envelope returns without dispatch
-      // instead of throwing out of the read loop.
-      if (raw.length > this.maxFrameBytes) return;
+      // instead of throwing out of the read loop. Measure BYTES (UTF-8), not
+      // `raw.length` (UTF-16 code units), so a multi-byte payload can't sneak past
+      // the byte ceiling.
+      if (Buffer.byteLength(raw) > this.maxFrameBytes) return;
       const decoded = safeDecodeFrame<HubToFortressFrame>(raw);
       if (!decoded.ok) return;
       void this.handleFrame(decoded.frame, send, settle);
@@ -351,8 +359,13 @@ export class WsCloudConnection implements CloudConnection {
               break;
             }
             try {
+              // Vault RPCs are OWN-OBJECT: a read grant is sub-bound with NO
+              // scopeHash (the boundary is key.userId === grant.sub, enforced in
+              // handleVaultRpc) — requireScope:false, or every tunnel read would
+              // throw `unauthorized` once grants ship. (No-op for ingest writes.)
               const grant = await this.deps.verifyGrant(frame.grant, {
                 purpose: vaultRpcPurpose(method),
+                requireScope: false,
               });
               authz = { sub: grant.sub, scopeHash: grant.scopeHash };
             } catch {

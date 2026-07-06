@@ -137,7 +137,11 @@ async function enforceRoutePurpose(
     const token = bearerToken(req);
     if (!key || !ownOrgId || !token) return json({ error: "unauthorized" }, 401);
     try {
-      await verifyGrant(token, key, ownOrgId, { purpose });
+      // The HTTP `/sessions/*` reads are OWN-OBJECT (sub-bound; the boundary is
+      // token principal === object owner, enforced below via claims.sub), so a
+      // read grant here carries no scopeHash — requireScope:false. (Ignored for
+      // ingest, which never checks scopeHash.)
+      await verifyGrant(token, key, ownOrgId, { purpose, requireScope: false });
       return null;
     } catch {
       return json({ error: "grant_invalid" }, 403);
@@ -162,7 +166,9 @@ async function mcpGrant(
     const token = bearerToken(req);
     if (!key || !ownOrgId || !token) return { res: json({ error: "unauthorized" }, 401) };
     try {
-      return { grant: await verifyGrant(token, key, ownOrgId, { purpose: "read" }) };
+      // The /mcp reads are SCOPE-BOUND — the grant commits to a scopeHash that
+      // checkScopeGrant recomputes over the tool args — so requireScope:true.
+      return { grant: await verifyGrant(token, key, ownOrgId, { purpose: "read", requireScope: true }) };
     } catch {
       return { res: json({ error: "grant_invalid" }, 403) };
     }

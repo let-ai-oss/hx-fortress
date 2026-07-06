@@ -6,11 +6,15 @@ import { verifyKeyProof } from "../host/trust/signing-keys";
 
 /** The persisted signing-key record (H-2). `key` is the org Ed25519 public key
  *  (base64url) the hub pushes; `pinnedAt` is when it was first pinned; `rootVerified`
- *  records whether the pin (or its last accepted rotation) carried a valid root proof. */
+ *  records whether the pin (or its last accepted rotation) carried a valid root proof.
+ *  `notBefore` is the accepted root proof's authenticated `notBefore` (null for a
+ *  legacy/proofless pin) — the MONOTONIC floor a rotation must strictly exceed, so
+ *  a replayed OLDER root proof can't roll the pin back to a prior key (H-2b). */
 export interface PinnedSigningKey {
   key: string;
   pinnedAt: string | null;
   rootVerified: boolean;
+  notBefore: string | null;
 }
 
 /** Persists the org Ed25519 public key (base64url) the hub pushes over the
@@ -51,6 +55,7 @@ export class FileSigningKeyStore {
             key: parsed.key,
             pinnedAt: typeof parsed.pinnedAt === "string" ? parsed.pinnedAt : null,
             rootVerified: parsed.rootVerified === true,
+            notBefore: typeof parsed.notBefore === "string" ? parsed.notBefore : null,
           };
         }
         return null;
@@ -58,8 +63,8 @@ export class FileSigningKeyStore {
         return null;
       }
     }
-    // Legacy bare-string key (pre-H-2): treat as an unverified pin.
-    return { key: raw, pinnedAt: null, rootVerified: false };
+    // Legacy bare-string key (pre-H-2): treat as an unverified pin with no floor.
+    return { key: raw, pinnedAt: null, rootVerified: false, notBefore: null };
   }
 
   /** Atomically persist the pinned record as JSON with 0600 perms. */
@@ -106,21 +111,51 @@ export interface PersistSigningKeyPinArgs {
   log?: (msg: string, fields?: Record<string, unknown>) => void;
 }
 
+/** H-2b · is `incoming` a valid timestamp STRICTLY newer than the stored floor?
+ *  A null / absent / unparseable incoming is never newer (fail-closed); a null
+ *  stored floor (legacy pin or proofless TOFU) admits any valid incoming proof. */
+function isNewerNotBefore(incoming: string | null, stored: string | null): boolean {
+  if (!incoming) return false;
+  const inMs = Date.parse(incoming);
+  if (Number.isNaN(inMs)) return false;
+  if (!stored) return true;
+  const stMs = Date.parse(stored);
+  if (Number.isNaN(stMs)) return true; // corrupt stored floor → don't block a valid forward proof
+  return inMs > stMs;
+}
+
 /** Apply the H-2 pin-floor to a pushed org signing key and persist the outcome.
  *  Returns the decision taken so callers/tests can assert on it. A rejected key
- *  change leaves the existing pin untouched and logs `signing_key_rotation_rejected`. */
+ *  change leaves the existing pin untouched and logs `signing_key_rotation_rejected`.
+ *
+ *  H-2b · a key CHANGE is accepted only when its root proof is valid AND its
+ *  authenticated `notBefore` is strictly newer than the pinned floor — so a
+ *  replayed OLDER root proof (a compromised hub / MITM) can't roll the pin back to
+ *  a prior key. A same-key re-push stays a no-op; a genuine forward rotation wins. */
 export async function persistSigningKeyPin(args: PersistSigningKeyPinArgs): Promise<KeyPinDecision["action"]> {
   const current = await args.store.loadRecord();
   const verify = args.verifyProof ?? verifyKeyProof;
   const proofValid = args.keyProof ? await verify(args.orgId, args.incomingKey, args.keyProof) : false;
+  // Only a VALID proof's notBefore is trustworthy (it is bound into the signed
+  // message); an absent/invalid proof carries no floor.
+  const incomingNotBefore = proofValid && args.keyProof ? args.keyProof.notBefore : null;
   const decision = resolveSigningKeyPin(current, args.incomingKey, proofValid);
   const now = args.now ?? (() => new Date());
+
+  // Monotonic rollback guard: downgrade an otherwise-authorized REPLACE to REJECT
+  // when the incoming proof's notBefore is not strictly newer than the pinned one.
+  if (decision.action === "replace" && !isNewerNotBefore(incomingNotBefore, current?.notBefore ?? null)) {
+    args.log?.("signing_key_rotation_rejected", { orgId: args.orgId, reason: "stale_not_before" });
+    return "reject";
+  }
+
   switch (decision.action) {
     case "pin":
       await args.store.saveRecord({
         key: args.incomingKey,
         pinnedAt: now().toISOString(),
         rootVerified: decision.rootVerified,
+        notBefore: incomingNotBefore,
       });
       break;
     case "replace":
@@ -128,6 +163,7 @@ export async function persistSigningKeyPin(args: PersistSigningKeyPinArgs): Prom
         key: args.incomingKey,
         pinnedAt: now().toISOString(),
         rootVerified: true,
+        notBefore: incomingNotBefore,
       });
       break;
     case "noop":

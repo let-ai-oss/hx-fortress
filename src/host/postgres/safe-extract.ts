@@ -23,8 +23,13 @@ export function resolveBin(name: string): string {
   return resolved;
 }
 
+// Cap the captured `tar -t…` listing — a tampered archive with billions of
+// members would otherwise stream an unbounded listing into memory. A real
+// pgvector/zonky listing is a few KB; 16 MiB is orders of magnitude of headroom.
+const MAX_LISTING_BYTES = 16 * 1024 * 1024;
+
 async function capture(spawner: Spawner, cmd: string[]): Promise<string> {
-  const { code, stdout, stderr } = await spawner.run(cmd);
+  const { code, stdout, stderr } = await spawner.run(cmd, { maxStdoutBytes: MAX_LISTING_BYTES });
   if (code !== 0) throw new Error(`${cmd[0]} failed: ${stderr.trim()}`);
   return stdout ?? "";
 }
@@ -56,21 +61,41 @@ export async function assertSafeTar(
 
   // Pass 1: clean member names (one per line) for the path-escape checks.
   const names = await capture(spawner, [tar, `-t${flags}f`, tarPath]);
+  let memberCount = 0;
   for (const line of names.split("\n")) {
     const name = line.trim();
     if (name.length === 0) continue;
     assertSafeMemberPath(name, tarPath);
+    memberCount += 1;
+  }
+  // Fail CLOSED on an empty listing: zero members means the audit inspected
+  // nothing, so extracting would be unaudited. A legitimate archive always lists
+  // at least one member (and an empty stdout is how a mis-behaving spawner would
+  // silently defeat the guard), so reject rather than fall through.
+  if (memberCount === 0) {
+    throw new Error(`refusing to extract ${tarPath}: archive listing is empty (unaudited)`);
   }
 
-  // Pass 2: verbose listing for type detection. The first character of each
-  // line is the member's type (`l` symlink, `h` hardlink) across GNU and BSD
-  // tar; the ` -> ` / ` link to ` markers are a belt-and-suspenders backstop.
+  // Pass 2: verbose listing for type detection. The first character of each line
+  // is the member's type across GNU and BSD tar — reject anything that isn't a
+  // regular file / directory: `l` symlink, `h` hardlink, `b`/`c` device, `p` FIFO,
+  // `s` socket (a device/FIFO member is never part of a code artifact and could be
+  // abused). The ` -> ` / ` link to ` markers are a belt-and-suspenders backstop.
   const verbose = await capture(spawner, [tar, `-tv${flags}f`, tarPath]);
   for (const line of verbose.split("\n")) {
     if (line.trim().length === 0) continue;
     const type = line[0];
-    if (type === "l" || type === "h" || line.includes(" -> ") || line.includes(" link to ")) {
-      throw new Error(`unsafe tar member (symlink/hardlink) in ${tarPath}: ${line.trim()}`);
+    if (
+      type === "l" ||
+      type === "h" ||
+      type === "b" ||
+      type === "c" ||
+      type === "p" ||
+      type === "s" ||
+      line.includes(" -> ") ||
+      line.includes(" link to ")
+    ) {
+      throw new Error(`unsafe tar member (symlink/hardlink/device/fifo) in ${tarPath}: ${line.trim()}`);
     }
   }
 }
