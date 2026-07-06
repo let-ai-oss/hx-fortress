@@ -42,6 +42,7 @@ import { FileStatusStore } from "./status";
 import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
+import { verifyGrant, type GrantClaims } from "../gateway/capability-token";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
 import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 
@@ -153,6 +154,21 @@ export async function runFortressHost(
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
   const signingKeyStore = new FileSigningKeyStore(paths.signingKey);
 
+  // H-4 · verify a tunnel/reverse-tunnel capability GRANT offline against the
+  // PINNED per-org signing key + the enrolled org id. Shared by the cloud
+  // connection (vault RPC) and the reverse-tunnel MCP handler. Throws (⇒ the
+  // caller rejects the grant) before the key is pinned or the org id is known.
+  const verifyGrantFn = async (
+    token: string,
+    opts: { purpose: "ingest" | "read" },
+  ): Promise<GrantClaims> => {
+    const key = await signingKeyStore.pinnedKey();
+    if (!key) throw new Error("no pinned signing key");
+    const orgId = (await credentialStore.load().catch(() => null))?.orgId ?? null;
+    if (!orgId) throw new Error("fortress org id unknown");
+    return verifyGrant(token, key, orgId, opts);
+  };
+
   // Cloud-service run mode: materialize storage credentials + a pending
   // enrollment from the environment before reading them off disk, so a fresh
   // container enrolls with zero interaction. No-op when the headless env is
@@ -253,6 +269,7 @@ export async function runFortressHost(
     },
     logger,
     signingKeyStore,
+    verifyGrant: verifyGrantFn,
     mcp: mcpTunnel,
     enrollToken: pendingEnrollment?.token,
     async onEnrolled(cred) {
@@ -323,6 +340,8 @@ export async function runFortressHost(
     db: resolveHxDbRead,
     store: () => vaultModule.getStore(),
     embedder,
+    // H-4 · a tunnel MCP read runs under a verified read grant (scope-bound).
+    verifyGrant: verifyGrantFn,
   }).handle;
 
   let gatewayHandle: GatewayHandle | null = null;

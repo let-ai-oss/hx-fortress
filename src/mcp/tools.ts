@@ -10,10 +10,12 @@
 // productivity (hx_sessions_aggregate over the per-session hx.session_facts index,
 // §13-A4).
 
+import { hashFortressScope } from "../protocol";
 import type { HxDb } from "../host/postgres/db";
 import { capToolOutput } from "./output-limit";
 import type { Embedder } from "../modules/embed-worker/openai";
 import type { SessionStore } from "../modules/session-vault/store/types";
+import type { GrantClaims } from "../gateway/capability-token";
 import { hxSessionsAggregate } from "../query/aggregate";
 import { hxSessionGet } from "../query/get-session";
 import { hxSessionReadEvents } from "../query/read-events";
@@ -28,6 +30,10 @@ export interface McpToolContext {
   /** The fortress's OpenAI embedder, used by hx_semantic_search to embed the
    *  query text. null ⇒ no key configured ⇒ semantic degrades to keyword. */
   embedder?: Embedder | null;
+  /** The verified read grant this call runs under (A5 · H-4), threaded from the
+   *  transport. The scope binding is enforced by checkScopeGrant BEFORE the tool
+   *  runs; carried here for completeness/future per-tool use. */
+  grant?: GrantClaims;
 }
 
 export interface McpToolResult {
@@ -61,6 +67,25 @@ function err(value: unknown): McpToolResult {
 }
 function needDb(ctx: McpToolContext): McpToolResult | null {
   return ctx.db ? null : err({ error: "postgres_not_ready" });
+}
+
+/** A5 · H-4 scope binding for a tools/call. When a read grant is present, the
+ *  tool-args scope must hash to the grant's committed `scopeHash` (tamper-evident);
+ *  a mismatch fails closed with `scope_not_granted`. When NO grant is present, the
+ *  call is admitted UNLESS `enforce` (the transport's grant-enforce flag) is set,
+ *  in which case it is denied. Returns an isError result to short-circuit, or null
+ *  to proceed. Absent-grant enforcement is the transport's decision — the HTTP and
+ *  tunnel surfaces pass their own flag — so it lives here beside the hash check. */
+export function checkScopeGrant(
+  args: unknown,
+  grant: GrantClaims | undefined,
+  enforce: boolean,
+): McpToolResult | null {
+  if (grant) {
+    const computed = hashFortressScope(parseScope(rec(args).scope));
+    return computed === grant.scopeHash ? null : err({ error: "scope_not_granted" });
+  }
+  return enforce ? err({ error: "scope_not_granted" }) : null;
 }
 
 // ── shared input-schema fragments ────────────────────────────────────────────

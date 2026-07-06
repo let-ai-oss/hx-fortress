@@ -4,8 +4,10 @@ import {
   type FortressIdentity,
   type FortressToHubFrame,
   type HubToFortressFrame,
+  type KeyProof,
   type McpTunnelRequest,
   type McpTunnelResult,
+  type MsgData,
 } from "../protocol";
 import type {
   CloudConnection,
@@ -17,6 +19,10 @@ import type {
   MessageDispatcher,
   ModuleLifecycleHandler,
 } from "../host/types";
+import type { GrantClaims } from "../gateway/capability-token";
+import { isTunnelGrantEnforcing } from "../gateway/capability-token";
+import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
+import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { CloudCredential, CredentialStore } from "./credentials";
 
 export const SUPPORTED_PROTOCOL_VERSION = 1;
@@ -38,9 +44,18 @@ export interface WsCloudConnectionDeps {
   logger: HostLogger;
   identity: FortressIdentity;
   moduleLoader?: ModuleLifecycleHandler;
-  /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled,
-   *  so the gateway can verify capability tokens offline. */
-  signingKeyStore?: { save(key: string): Promise<void> };
+  /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled, so
+   *  the gateway can verify capability tokens offline. H-2: the store PINS the key
+   *  on first sight; a later CHANGE without a valid root proof is rejected. */
+  signingKeyStore?: {
+    loadRecord(): Promise<PinnedSigningKey | null>;
+    saveRecord(record: PinnedSigningKey): Promise<void>;
+  };
+  /** Verifies a tunnel capability GRANT against the pinned per-org signing key
+   *  (H-4). Built in main.ts over signingKeyStore.pinnedKey() + the enrolled org
+   *  id. Omit to disable tunnel grant verification (a present grant then fails
+   *  closed on the vault RPC path). */
+  verifyGrant?: (token: string, opts: { purpose: "ingest" | "read" }) => Promise<GrantClaims>;
   enrollToken?: string;
   /** Called once immediately after a successful enrollment and credential save.
    *  Use to clear the pending enrollment token and propagate identity to modules. */
@@ -271,7 +286,7 @@ export class WsCloudConnection implements CloudConnection {
           this.ws?.close();
           return;
         }
-        await this.persistSigningKey(frame.signingPublicKey);
+        await this.persistSigningKey(frame.orgId, frame.signingPublicKey, frame.keyProof);
         // The one-time token is now spent; reconnects must authenticate with the
         // saved credential via hello, never re-send the consumed token.
         this.activeEnrollToken = null;
@@ -307,7 +322,7 @@ export class WsCloudConnection implements CloudConnection {
           this.ws?.close();
           return;
         }
-        await this.persistSigningKey(frame.signingPublicKey);
+        await this.persistSigningKey(frame.orgId, frame.signingPublicKey, frame.keyProof);
         this._reason = null;
         this._message = null;
         this._state = "connected";
@@ -322,12 +337,40 @@ export class WsCloudConnection implements CloudConnection {
         break;
       }
       case "rpc": {
-        const msgData = {
+        const method = (frame.req as { method?: string }).method ?? "";
+        // H-4 · authorize the vault RPC with its cloud-signed grant. selfTest is
+        // an object-free liveness probe and is never gated. A present grant is
+        // fully verified and its principal bound into the RPC (authz); a present-
+        // but-invalid grant fails closed. An ABSENT grant is admitted only while
+        // FORTRESS_TUNNEL_GRANT_ENFORCE is off, so current traffic keeps working.
+        let authz: VaultAuthz | undefined;
+        if (method !== "selfTest") {
+          if (frame.grant) {
+            if (!this.deps.verifyGrant) {
+              send({ t: "rpcError", id: frame.id, error: "unauthorized" });
+              break;
+            }
+            try {
+              const grant = await this.deps.verifyGrant(frame.grant, {
+                purpose: vaultRpcPurpose(method),
+              });
+              authz = { sub: grant.sub, scopeHash: grant.scopeHash };
+            } catch {
+              send({ t: "rpcError", id: frame.id, error: "unauthorized" });
+              break;
+            }
+          } else if (isTunnelGrantEnforcing()) {
+            send({ t: "rpcError", id: frame.id, error: "unauthorized" });
+            break;
+          }
+        }
+        const msgData: MsgData & { authz?: VaultAuthz } = {
           module: "session_vault",
           id: frame.id,
-          kind: "request" as const,
+          kind: "request",
           payload: frame.req,
         };
+        if (authz) msgData.authz = authz;
         const reply = await this.deps.dispatcher.dispatch(msgData);
         if (reply) {
           if (reply.ok) {
@@ -398,10 +441,24 @@ export class WsCloudConnection implements CloudConnection {
     }
   }
 
-  private async persistSigningKey(signingPublicKey?: string): Promise<void> {
+  private async persistSigningKey(
+    orgId: string,
+    signingPublicKey?: string,
+    keyProof?: KeyProof,
+  ): Promise<void> {
     if (!signingPublicKey) return;
+    const store = this.deps.signingKeyStore;
+    if (!store) return;
     try {
-      await this.deps.signingKeyStore?.save(signingPublicKey);
+      // H-2 pin-floor: pin on first sight; reject a later CHANGE that lacks a
+      // valid root proof (keeps the existing pin, logs signing_key_rotation_rejected).
+      await persistSigningKeyPin({
+        store,
+        orgId,
+        incomingKey: signingPublicKey,
+        keyProof,
+        log: (msg, fields) => this.deps.logger.error(msg, fields),
+      });
     } catch (err) {
       this.deps.logger.error("Failed to persist org signing key", err);
     }

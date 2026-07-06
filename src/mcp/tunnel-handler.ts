@@ -6,12 +6,22 @@ import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import type { HxDb } from "../host/postgres/db";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import type { Embedder } from "../modules/embed-worker/openai";
-import { MCP_TOOLS } from "./tools";
+import type { GrantClaims } from "../gateway/capability-token";
+import { isTunnelGrantEnforcing } from "../gateway/capability-token";
+import { checkScopeGrant, MCP_TOOLS } from "./tools";
 
 export interface McpTunnelDeps {
   db: () => HxDb | null;
   store: () => SessionStore | null;
   embedder?: Embedder | null;
+  /** Verifies a tunnel MCP read grant against the pinned per-org signing key.
+   *  Built in main.ts over signingKeyStore.pinnedKey() + the enrolled org id.
+   *  Omit to disable grant verification (a present grant then fails closed). */
+  verifyGrant?: (token: string, opts: { purpose: "ingest" | "read" }) => Promise<GrantClaims>;
+}
+
+function toolError(content: unknown): McpTunnelResult {
+  return { method: "callTool", content: JSON.stringify(content), isError: true };
 }
 
 /** Build the `mcp.handle` the cloud connection dispatches tunnel MCP frames to. */
@@ -28,12 +38,33 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
       }
       const tool = MCP_TOOLS.find((t) => t.name === req.name);
       if (!tool) {
-        return { method: "callTool", content: JSON.stringify({ error: "unknown_tool", name: req.name }), isError: true };
+        return toolError({ error: "unknown_tool", name: req.name });
       }
+
+      // H-4 · a tunnel MCP read is authorized by a cloud-signed read grant bound
+      // to (principal, scope). Verify it offline, bind sub↔userId, then require the
+      // args scope to match the grant's committed scopeHash. A present-but-invalid
+      // grant always fails closed; an ABSENT grant is admitted only when the tunnel
+      // enforce flag is off (checkScopeGrant), so current grant-less reads keep working.
+      let grant: GrantClaims | undefined;
+      if (req.grant) {
+        if (!deps.verifyGrant) return toolError({ error: "unauthorized" });
+        try {
+          grant = await deps.verifyGrant(req.grant, { purpose: "read" });
+        } catch {
+          return toolError({ error: "unauthorized" });
+        }
+        if (grant.sub !== req.userId) return toolError({ error: "principal_object_mismatch" });
+      }
+
+      const gate = checkScopeGrant(req.arguments, grant, isTunnelGrantEnforcing());
+      if (gate) return { method: "callTool", content: gate.content[0]?.text ?? "", isError: true };
+
       const res = await tool.handle(req.arguments, {
         db: deps.db(),
         store: deps.store(),
         embedder: deps.embedder ?? null,
+        grant,
       });
       return { method: "callTool", content: res.content[0]?.text ?? "", isError: res.isError };
     },

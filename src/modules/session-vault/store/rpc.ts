@@ -113,16 +113,67 @@ export interface VaultRpcError {
   error: string;
 }
 
+/** The verified authorization a tunnel grant carries into a vault RPC (H-4): the
+ *  principal (`sub`) the cloud minted the grant for, plus the read grant's scope
+ *  commitment. Present only when the connection verified a grant; absent in the
+ *  compat window (see connection.ts). */
+export interface VaultAuthz {
+  sub: string;
+  scopeHash?: string;
+}
+
+/** The vault RPCs that MUTATE stored objects — each is bound to its `key.userId`
+ *  owner, so a grant may only drive them for its own principal (H-4). */
+const VAULT_WRITE_METHODS: ReadonlySet<string> = new Set([
+  "signStagingUpload",
+  "appendChunkToCanonical",
+  "writeArtifact",
+  "ingestCommit",
+  "ingestAgentCommit",
+]);
+
+/** True for a mutating vault RPC method (drives the ingest vs read grant purpose). */
+export function isVaultWriteMethod(method: string): boolean {
+  return VAULT_WRITE_METHODS.has(method);
+}
+
+/** The capability-grant purpose a vault RPC method requires: writes need an
+ *  `ingest` grant, everything else a `read` grant. */
+export function vaultRpcPurpose(method: string): "ingest" | "read" {
+  return isVaultWriteMethod(method) ? "ingest" : "read";
+}
+
+/** The user id the request's object belongs to, or null for object-free methods
+ *  (`selfTest`). Writes and object reads both carry a `key`; the list reads carry
+ *  a bare `userId`. */
+function objectUserId(req: VaultRpcRequest): string | null {
+  if ("key" in req && req.key) return req.key.userId;
+  if ("userId" in req) return req.userId;
+  return null;
+}
+
 /**
  * Execute one RPC request against a local SessionStore. The vault calls this for
  * each request the tunnel forwards. Throws on unknown methods or store errors;
  * the caller maps the throw to a VaultRpcError on the wire.
+ *
+ * H-4 · when `authz` is present (the connection verified a grant), the object the
+ * RPC touches must belong to the grant's principal — `key.userId === authz.sub`
+ * (or `userId === authz.sub` for the list reads). A mismatch fails closed with
+ * `principal_object_mismatch`. `selfTest` carries no object and is never gated.
  */
 export async function handleVaultRpc(
   store: SessionStore,
   req: VaultRpcRequest,
   db: HxDb | null = null,
+  authz?: VaultAuthz,
 ): Promise<VaultRpcResult> {
+  if (authz && req.method !== "selfTest") {
+    const owner = objectUserId(req);
+    if (owner !== null && owner !== authz.sub) {
+      throw new Error("principal_object_mismatch");
+    }
+  }
   switch (req.method) {
     case "signStagingUpload":
       return { method: req.method, value: await store.signStagingUpload(req.key, req.chunkId) };

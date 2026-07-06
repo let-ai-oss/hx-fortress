@@ -15,7 +15,8 @@
 // handler runs (a missing/invalid token never reaches here — it gets a 401).
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { MCP_TOOLS, type McpToolContext } from "./tools";
+import { isGrantEnforcing } from "../gateway/capability-token";
+import { checkScopeGrant, MCP_TOOLS, type McpToolContext } from "./tools";
 
 const PROTOCOL_FALLBACK = "2025-06-18";
 
@@ -80,11 +81,16 @@ async function dispatch(msg: JsonRpcMessage, deps: McpServeDeps): Promise<object
       const params = (msg.params ?? {}) as { name?: string; arguments?: unknown };
       const tool = MCP_TOOLS.find((t) => t.name === params.name);
       if (!tool) return rpcError(id, -32602, `Unknown tool: ${String(params.name)}`);
+      // A5 · H-4 · a read grant (when present) must commit to exactly this call's
+      // scope; under FORTRESS_GRANT_ENFORCE a call with no grant is denied.
+      const gate = checkScopeGrant(params.arguments ?? {}, deps.grant, isGrantEnforcing());
+      if (gate) return result(id, gate);
       try {
         const out = await tool.handle(params.arguments ?? {}, {
           db: deps.db,
           store: deps.store,
           embedder: deps.embedder ?? null,
+          grant: deps.grant,
         });
         return result(id, out);
       } catch (e) {

@@ -58,6 +58,25 @@ function noopDispatcher(): MessageDispatcher {
   return { async dispatch(): Promise<undefined> { return undefined; } };
 }
 
+/** Captures the authz the connection threads alongside the vault RPC payload. */
+function capturingDispatcher(sink: { authz?: unknown }): MessageDispatcher {
+  return {
+    async dispatch(data: MsgData): Promise<MsgReply> {
+      sink.authz = (data as { authz?: unknown }).authz;
+      return { ok: true, payload: { echoed: data.payload } };
+    },
+  };
+}
+
+const GRANT_STUB = async (_token: string, opts: { purpose: "ingest" | "read" }) => ({
+  v: 2,
+  purpose: opts.purpose,
+  org: "o",
+  aud: "o",
+  sub: "user_1",
+  scopeHash: "H",
+});
+
 describe("WsCloudConnection", () => {
   let hub: FakeHub;
 
@@ -378,5 +397,112 @@ describe("WsCloudConnection", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, TEST_TIMING.heartbeatMs * 2));
     const countAfter = hub.received().filter((f) => f.t === "heartbeat").length;
     expect(countAfter).toBe(countBefore);
+  });
+
+  // H-4 · the reverse-tunnel vault RPC grant path.
+  describe("vault RPC grant (H-4)", () => {
+    const cred: CloudCredential = { orgId: "o", fortressId: "f", credential: "c" };
+
+    test("verifies a present grant and threads {sub, scopeHash} to the dispatcher", async () => {
+      const sink: { authz?: unknown } = {};
+      const conn = new WsCloudConnection({
+        dispatcher: capturingDispatcher(sink),
+        credentialStore: makeCredentialStore(cred),
+        logger: silentLogger(),
+        identity: IDENTITY,
+        verifyGrant: GRANT_STUB,
+        ...TEST_TIMING,
+      });
+      await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+      hub.send({ t: "rpc", id: "r1", req: { method: "listSessionMetadata", userId: "user_1" }, grant: "G" });
+      await new Promise<void>((r) => setTimeout(r, 40));
+
+      const result = hub.received().find((f) => f.t === "rpcResult");
+      expect(result).toBeDefined();
+      expect(sink.authz).toEqual({ sub: "user_1", scopeHash: "H" });
+
+      await conn.close();
+    });
+
+    test("rejects the RPC (rpcError unauthorized) when the grant fails verification", async () => {
+      const conn = new WsCloudConnection({
+        dispatcher: capturingDispatcher({}),
+        credentialStore: makeCredentialStore(cred),
+        logger: silentLogger(),
+        identity: IDENTITY,
+        verifyGrant: async () => {
+          throw new Error("bad grant");
+        },
+        ...TEST_TIMING,
+      });
+      await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+      hub.send({ t: "rpc", id: "r2", req: { method: "listSessionMetadata", userId: "u" }, grant: "BAD" });
+      await new Promise<void>((r) => setTimeout(r, 40));
+
+      const err = hub.received().find((f) => f.t === "rpcError");
+      expect(err).toBeDefined();
+      if (err?.t !== "rpcError") throw new Error("expected rpcError");
+      expect(err.error).toBe("unauthorized");
+
+      await conn.close();
+    });
+
+    test("a grant-less WRITE is rejected under FORTRESS_TUNNEL_GRANT_ENFORCE", async () => {
+      const prior = process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+      process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = "1";
+      try {
+        const conn = new WsCloudConnection({
+          dispatcher: capturingDispatcher({}),
+          credentialStore: makeCredentialStore(cred),
+          logger: silentLogger(),
+          identity: IDENTITY,
+          ...TEST_TIMING,
+        });
+        await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+        hub.send({
+          t: "rpc",
+          id: "r3",
+          req: { method: "appendChunkToCanonical", key: { userId: "u", family: "c", sessionId: "s" }, chunkId: "c1" },
+        });
+        await new Promise<void>((r) => setTimeout(r, 40));
+
+        const err = hub.received().find((f) => f.t === "rpcError" && f.id === "r3");
+        expect(err).toBeDefined();
+
+        await conn.close();
+      } finally {
+        if (prior === undefined) delete process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+        else process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = prior;
+      }
+    });
+
+    test("selfTest is never gated — allowed grant-less even under enforcement", async () => {
+      const prior = process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+      process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = "1";
+      try {
+        const conn = new WsCloudConnection({
+          dispatcher: capturingDispatcher({}),
+          credentialStore: makeCredentialStore(cred),
+          logger: silentLogger(),
+          identity: IDENTITY,
+          ...TEST_TIMING,
+        });
+        await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+        hub.send({ t: "rpc", id: "r4", req: { method: "selfTest" } });
+        await new Promise<void>((r) => setTimeout(r, 40));
+
+        const result = hub.received().find((f) => f.t === "rpcResult" && f.id === "r4");
+        expect(result).toBeDefined();
+
+        await conn.close();
+      } finally {
+        if (prior === undefined) delete process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+        else process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = prior;
+      }
+    });
   });
 });
