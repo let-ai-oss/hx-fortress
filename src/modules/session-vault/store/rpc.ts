@@ -11,7 +11,7 @@ import {
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
-import { maxCanonicalBytes } from "./limits.js";
+import { maxTunnelResultBytes } from "./limits.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -183,8 +183,13 @@ export async function handleVaultRpc(
   switch (req.method) {
     case "signStagingUpload":
       return { method: req.method, value: await store.signStagingUpload(req.key, req.chunkId) };
-    case "readChunkText":
-      return { method: req.method, value: await store.readChunkText(req.key, req.chunkId) };
+    case "readChunkText": {
+      const value = await store.readChunkText(req.key, req.chunkId);
+      // Bound the tunnel result so its base64 can't exceed the peer's frame cap
+      // (which would drop the socket). Fail fast with a typed reason instead.
+      if (Buffer.byteLength(value) > maxTunnelResultBytes()) throw new Error("chunk_too_large");
+      return { method: req.method, value };
+    }
     case "appendChunkToCanonical":
       return {
         method: req.method,
@@ -196,8 +201,10 @@ export async function handleVaultRpc(
       return { method: req.method, value: await store.statCanonical(req.key) };
     case "readCanonical": {
       // M-9c · reject an oversized whole-object read before fetching it into memory.
+      // The tunnel-result cap (< frame cap) also prevents the base64 payload from
+      // exceeding the peer's maxPayload and dropping the socket.
       const size = await store.statCanonical(req.key);
-      if (size !== null && size > maxCanonicalBytes()) throw new Error("canonical_too_large");
+      if (size !== null && size > maxTunnelResultBytes()) throw new Error("canonical_too_large");
       const { url } = await store.signCanonicalDownload(req.key);
       // Low · a thrown fetch error can embed the signed URL — swallow the original
       // and surface a URL-free reason so the signed URL never reaches logs/replies.
@@ -212,6 +219,9 @@ export async function handleVaultRpc(
       }
       if (!res.ok) throw new Error(`canonical_fetch_failed:${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
+      // Belt-and-suspenders: enforce the tunnel cap on the actual bytes too (stat
+      // can be null/racey), so the base64 result never overflows the frame.
+      if (buf.byteLength > maxTunnelResultBytes()) throw new Error("canonical_too_large");
       return { method: req.method, value: { base64: buf.toString("base64") } };
     }
     case "writeArtifact":

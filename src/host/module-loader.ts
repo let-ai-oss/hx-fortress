@@ -70,7 +70,9 @@ export class ModuleLoader implements ModuleLifecycleHandler {
     // window. Runs BEFORE saveArtifact so a mismatched artifact is never persisted.
     if (checksum) {
       const actual = sha256Hex(data);
-      if (actual !== checksum) {
+      // Normalize both sides (hub checksums may be upper-case / whitespace-padded)
+      // so a legit install can't fail-closed on a formatting mismatch.
+      if (actual !== checksum.trim().toLowerCase()) {
         throw new Error(`Module ${moduleId} integrity check failed: checksum mismatch`);
       }
     }
