@@ -22,9 +22,12 @@ export interface SessionVaultModule extends Module {
 }
 
 export interface SessionVaultDeps {
-  /** Resolves the hx-db handle so tunnel-relayed commits can be mirrored into
-   *  the fortress Postgres. Null until Postgres is ready. */
+  /** Resolves the RW (DML) hx-db handle so tunnel-relayed commits can be mirrored
+   *  into the fortress Postgres. Null until Postgres is ready. */
   db?: () => HxDb | null;
+  /** Resolves the SELECT-only RO hx-db handle for the "my sessions" metadata read
+   *  (least-privilege). Falls back to `db` when omitted. Null until Postgres ready. */
+  dbRead?: () => HxDb | null;
   /** Push a realtime invalidation to the cloud after a tunnel-relayed ingest
    *  (MC-2415). Best-effort; omitted in tests. */
   notify?: (evt: HxIngestNotification) => void;
@@ -74,7 +77,13 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       // (H-4) — fortress-internal, never on the wire MsgData contract.
       const authz = (data as { authz?: VaultAuthz }).authz;
       try {
-        const result = await handleVaultRpc(store, req, deps.db?.() ?? null, authz);
+        const result = await handleVaultRpc(
+          store,
+          req,
+          deps.db?.() ?? null,
+          authz,
+          deps.dbRead?.() ?? null,
+        );
         // A relayed commit just changed this user's sessions — tell the cloud to
         // refresh their live list (MC-2415). Best-effort, after the write landed.
         if (req.method === "ingestCommit" || req.method === "ingestAgentCommit") {

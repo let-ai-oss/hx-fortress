@@ -17,6 +17,7 @@ import {
   type CommitOutput,
 } from "./handlers";
 import {
+  GRANT_REQUIRED_ERROR,
   isGrantEnforcing,
   isV2Claims,
   verifyCapabilityToken,
@@ -147,7 +148,7 @@ async function enforceRoutePurpose(
       return json({ error: "grant_invalid" }, 403);
     }
   }
-  if (isGrantEnforcing()) return json({ error: "grant_required" }, 401);
+  if (isGrantEnforcing()) return json({ error: GRANT_REQUIRED_ERROR }, 401);
   return null;
 }
 
@@ -173,7 +174,7 @@ async function mcpGrant(
       return { res: json({ error: "grant_invalid" }, 403) };
     }
   }
-  if (isGrantEnforcing()) return { res: json({ error: "grant_required" }, 401) };
+  if (isGrantEnforcing()) return { res: json({ error: GRANT_REQUIRED_ERROR }, 401) };
   return {};
 }
 

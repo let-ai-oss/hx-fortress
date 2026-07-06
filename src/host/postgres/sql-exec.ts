@@ -12,10 +12,12 @@ export function makeMigrationExec(dsn: string): MigrationExec {
         await client.end();
       }
     },
-    async query<T = Record<string, unknown>>(statement: string): Promise<T[]> {
+    async query<T = Record<string, unknown>>(statement: string, params?: unknown[]): Promise<T[]> {
       const client = new Bun.SQL(dsn);
       try {
-        const rows = await client.unsafe(statement);
+        // `unsafe(sql, params)` uses the extended protocol so `$1…` bind safely;
+        // no params ⇒ the plain simple-query path (unchanged behavior).
+        const rows = params ? await client.unsafe(statement, params) : await client.unsafe(statement);
         return rows as T[];
       } finally {
         await client.end();

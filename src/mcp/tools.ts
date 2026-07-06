@@ -15,7 +15,7 @@ import type { HxDb } from "../host/postgres/db";
 import { capToolOutput } from "./output-limit";
 import type { Embedder } from "../modules/embed-worker/openai";
 import type { SessionStore } from "../modules/session-vault/store/types";
-import type { GrantClaims } from "../gateway/capability-token";
+import { GRANT_REQUIRED_ERROR, type GrantClaims } from "../gateway/capability-token";
 import { hxSessionsAggregate } from "../query/aggregate";
 import { hxSessionGet } from "../query/get-session";
 import { hxSessionReadEvents } from "../query/read-events";
@@ -73,9 +73,11 @@ function needDb(ctx: McpToolContext): McpToolResult | null {
  *  tool-args scope must hash to the grant's committed `scopeHash` (tamper-evident);
  *  a mismatch fails closed with `scope_not_granted`. When NO grant is present, the
  *  call is admitted UNLESS `enforce` (the transport's grant-enforce flag) is set,
- *  in which case it is denied. Returns an isError result to short-circuit, or null
- *  to proceed. Absent-grant enforcement is the transport's decision — the HTTP and
- *  tunnel surfaces pass their own flag — so it lives here beside the hash check. */
+ *  in which case it is denied with `grant_required` (the SAME absent-grant code the
+ *  HTTP gateway + tunnel use — distinct from the scope-mismatch code above). Returns
+ *  an isError result to short-circuit, or null to proceed. Absent-grant enforcement
+ *  is the transport's decision — HTTP and tunnel pass their own flag — so it lives
+ *  here beside the hash check. */
 export function checkScopeGrant(
   args: unknown,
   grant: GrantClaims | undefined,
@@ -85,7 +87,7 @@ export function checkScopeGrant(
     const computed = hashFortressScope(parseScope(rec(args).scope));
     return computed === grant.scopeHash ? null : err({ error: "scope_not_granted" });
   }
-  return enforce ? err({ error: "scope_not_granted" }) : null;
+  return enforce ? err({ error: GRANT_REQUIRED_ERROR }) : null;
 }
 
 // ── shared input-schema fragments ────────────────────────────────────────────

@@ -207,9 +207,10 @@ describe.if(!!DSN)("hx-fortress embed — worker drain + dead-letter (A3)", () =
   }, 30_000);
 
   test("stops the pass once today's OpenAI token budget is spent (M-9e)", async () => {
-    // Record a spend that already exceeds a tiny budget for the current UTC day.
+    // Record a spend that already exceeds a tiny budget for the current UTC day —
+    // key on the SAME UTC-date expression the worker reads/upserts on.
     await sqlx.exec(
-      `INSERT INTO hx.embed_budget (day, tokens) VALUES (CURRENT_DATE, 1000000)
+      `INSERT INTO hx.embed_budget (day, tokens) VALUES ((now() at time zone 'utc')::date, 1000000)
        ON CONFLICT (day) DO UPDATE SET tokens = 1000000`,
     );
     try {
@@ -222,7 +223,7 @@ describe.if(!!DSN)("hx-fortress embed — worker drain + dead-letter (A3)", () =
       expect(r.claimed).toBe(0);
       expect(r.openaiTexts).toBe(0);
     } finally {
-      await sqlx.exec(`DELETE FROM hx.embed_budget WHERE day = CURRENT_DATE`);
+      await sqlx.exec(`DELETE FROM hx.embed_budget WHERE day = (now() at time zone 'utc')::date`);
     }
   }, 30_000);
 });

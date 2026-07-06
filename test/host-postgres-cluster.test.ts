@@ -152,6 +152,12 @@ describe("ensureAppRoles (idempotent least-privilege roles)", () => {
     ).toBe(true);
     expect(stmts.some((s) => s.includes("GRANT USAGE ON ALL SEQUENCES IN SCHEMA hx TO hx_app_rw"))).toBe(true);
     expect(stmts.some((s) => s.startsWith("ALTER DEFAULT PRIVILEGES IN SCHEMA hx"))).toBe(true);
+    // The migration journal's writes are revoked back from the DML role.
+    expect(
+      stmts.some((s) =>
+        /REVOKE INSERT, UPDATE, DELETE ON hx\.schema_migrations FROM hx_app_rw/.test(s),
+      ),
+    ).toBe(true);
     // hx_app_rw never gets DDL/superuser via this path.
     expect(stmts.some((s) => /CREATE TABLE|SUPERUSER|CREATEROLE|CREATEDB/.test(s))).toBe(false);
   });

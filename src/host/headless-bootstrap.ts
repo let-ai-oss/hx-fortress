@@ -15,6 +15,7 @@ import {
   type VaultCredentials,
   type VaultStorageKind,
 } from "../modules/session-vault/credentials";
+import { parseBooleanEnv } from "../env";
 
 export interface HeadlessLogger {
   info(message: string, fields?: Record<string, unknown>): void;
@@ -64,7 +65,7 @@ export function parseVaultCredentialsFromEnv(
   if (region) creds.region = region;
   const endpoint = env.FORTRESS_S3_ENDPOINT?.trim();
   if (endpoint) creds.endpoint = endpoint;
-  if (parseBoolean(env.FORTRESS_S3_FORCE_PATH_STYLE)) creds.forcePathStyle = true;
+  if (parseBooleanEnv(env.FORTRESS_S3_FORCE_PATH_STYLE)) creds.forcePathStyle = true;
   const s3 = parseS3Credentials(env);
   if (s3) creds.s3 = s3;
   return creds;
@@ -174,9 +175,4 @@ function decodeBase64(value: string): string | null {
   } catch {
     return null;
   }
-}
-
-function parseBoolean(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
 }

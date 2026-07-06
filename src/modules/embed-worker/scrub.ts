@@ -45,10 +45,17 @@ const PATTERNS: RegExp[] = [
   /\b\d{3}-\d{2}-\d{4}\b/g,
   // Phone number (loose international / US, separator-tolerant).
   /\b\+?\d{1,3}[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
-  // AWS 40-char secret access key — exactly 40 base64-ish chars, boundaried so a
-  // longer blob doesn't partially match.
-  /(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/g,
 ];
+
+// AWS 40-char secret access key — exactly 40 base64-ish chars, boundaried so a
+// longer blob doesn't partially match. Applied via a callback (below) rather than
+// inline in PATTERNS so it can SPARE an all-lowercase-hex run: that shape is a git
+// commit SHA (coding sessions are full of them), never an AWS secret (AWS secret
+// keys are base64 of random bytes and are effectively never all-hex). A real
+// secret carries uppercase / `+` / `/` characters, so it still redacts.
+const AWS_SECRET_40 = /(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/g;
+/** A 40-char run that is ALL lowercase hex — a git SHA, not an AWS secret. */
+const GIT_SHA_40 = /^[0-9a-f]{40}$/;
 
 // Candidate credit-card runs: 13–19 digits, each optionally followed by a single
 // space or hyphen. Only runs whose digits pass the Luhn checksum are redacted, so
@@ -84,5 +91,8 @@ export function scrubSecrets(text: string): string {
   for (const pattern of PATTERNS) {
     out = out.replace(pattern, REDACTED);
   }
+  // AWS 40-char secret pass LAST (was the final PATTERNS entry) — redact a
+  // boundaried base64-ish run but spare an all-lowercase-hex git SHA.
+  out = out.replace(AWS_SECRET_40, (m) => (GIT_SHA_40.test(m) ? m : REDACTED));
   return out;
 }

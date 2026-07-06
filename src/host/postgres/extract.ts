@@ -2,7 +2,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { assertSafeTar, resolveBin } from "./safe-extract";
+import { assertSafeTar, assertSafeZip, resolveBin } from "./safe-extract";
 import type { Spawner } from "./spawn";
 
 export function makeExtractor(
@@ -11,6 +11,9 @@ export function makeExtractor(
   return async (jarPath, destDir) => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "hx-pg-extract-"));
     try {
+      // Audit the OUTER jar (zip) for symlink / path-escape members before unzip,
+      // the same guard the inner .txz gets below (don't rely on unzip's own zip-slip).
+      await assertSafeZip(spawner, jarPath);
       await run(spawner, [resolveBin("unzip"), "-o", jarPath, "-d", tmp]);
       const inner = (await readdir(tmp)).find((f) => f.endsWith(".txz"))
         ?? path.basename(jarPath).replace(/\.jar$/, ".txz");

@@ -20,7 +20,7 @@ import type {
   ModuleLifecycleHandler,
 } from "../host/types";
 import type { GrantClaims } from "../gateway/capability-token";
-import { isTunnelGrantEnforcing } from "../gateway/capability-token";
+import { GRANT_REQUIRED_ERROR, isTunnelGrantEnforcing } from "../gateway/capability-token";
 import { sanitizeDbError } from "../host/postgres/sanitize";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
@@ -373,7 +373,9 @@ export class WsCloudConnection implements CloudConnection {
               break;
             }
           } else if (isTunnelGrantEnforcing()) {
-            send({ t: "rpcError", id: frame.id, error: "unauthorized" });
+            // Absent grant under enforcement — the SAME code the HTTP gateway + MCP
+            // layer use (a present-but-invalid grant stays `unauthorized` above).
+            send({ t: "rpcError", id: frame.id, error: GRANT_REQUIRED_ERROR });
             break;
           }
         }

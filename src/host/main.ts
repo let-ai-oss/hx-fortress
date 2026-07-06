@@ -45,6 +45,7 @@ import { startGatewayServer, type GatewayHandle } from "../gateway/server";
 import { verifyGrant, type GrantClaims } from "../gateway/capability-token";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
 import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
+import { parseBooleanEnv } from "../env";
 
 export interface HostMainDependencies {
   root?: string;
@@ -67,11 +68,6 @@ export function wsOrigin(u: string): string | null {
   } catch {
     return null;
   }
-}
-
-function parseBooleanEnv(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
 }
 
 /** M-8 · decide whether a pending-enrollment.json should be honored at startup.
@@ -148,7 +144,14 @@ export async function runFortressHost(
     handle: async () => ({ method: "callTool", content: JSON.stringify({ error: "mcp_tunnel_not_ready" }), isError: true }),
   };
   const emitIngest = (evt: HxIngestNotification): void => hubNotify.send(evt);
-  const vaultModule = createSessionVaultModule({ db: resolveHxDb, notify: emitIngest });
+  // The vault RPC dispatch takes both handles: writes (ingest RPCs) run on the RW
+  // handle; the "my sessions" metadata read (listSessions) runs on the SELECT-only
+  // RO handle (least-privilege — the read branch never needs DML).
+  const vaultModule = createSessionVaultModule({
+    db: resolveHxDb,
+    dbRead: resolveHxDbRead,
+    notify: emitIngest,
+  });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
   const pendingEnrollmentStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);

@@ -30,6 +30,10 @@ import {
 import { assertHttpsDownloadUrl, isLoopbackHost } from "./host/config";
 import { SIGNATURE_ENFORCE, verifyFetchedArtifact } from "./host/trust/verify";
 
+/** Hard ceiling on the decompressed self-update binary — a gzip-bomb guard. Well
+ *  above a real single-file fortress binary, so it never trips on a legit build. */
+const MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024;
+
 export interface UpdateProgress {
   phase: "download" | "unpack" | "verify";
   pct: number;
@@ -132,7 +136,11 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
   });
 
   onProgress({ phase: "unpack", pct: 90 });
-  const binBytes = gunzipSync(gzBytes);
+  // Bound the decompressed size BEFORE materializing it: a compromised origin
+  // could serve a gzip bomb that expands to gigabytes and OOMs the updater.
+  // `maxOutputLength` makes gunzipSync throw ERR_BUFFER_TOO_LARGE past the cap
+  // (fail-closed). 512 MiB is orders of magnitude above a real fortress binary.
+  const binBytes = gunzipSync(gzBytes, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
   const shaText = (await fetchBytes(shaUrl)).toString("utf8").trim();
 
   // sha256sum format: "<hex>  <filename>" or bare hex.
@@ -162,6 +170,9 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
     url: `${downloadBase}/${asset}`,
     bytes: binBytes,
     enforce: SIGNATURE_ENFORCE,
+    // Surface the "proceeding unverified" SECURITY warning (verify-if-present) —
+    // without a log it is silently swallowed on every update.
+    log,
   });
 
   await mkdir(dirname(binPath), { recursive: true });

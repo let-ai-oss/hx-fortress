@@ -16,14 +16,39 @@ function assertSegment(v: string, label: string): void {
   if (!SEG.test(v) || v === "." || v === "..") throw new Error(`invalid ${label} segment`);
 }
 
-/** `${userId}/${family}/${sessionId}` with every segment validated. The
- *  sessionId may be the composite `${sessionId}:a:${agentId}` (agent lanes), so
- *  it is split on ":" and each part validated. */
+/** Validate a sessionId, which is EITHER a plain colon-free segment OR the agent-
+ *  lane composite `${sessionId}:a:${agentId}` (built by the gateway, exactly three
+ *  parts with the literal `a` marker in the middle). A plain sessionId (a UUID)
+ *  must contain NO `:`, so a crafted multi-colon id ("S:b:c", "S:a:A:B", a stray
+ *  ":") can't fabricate a nested prefix or masquerade as an agent lane. */
+function assertSessionId(sessionId: string): void {
+  if (!sessionId.includes(":")) {
+    assertSegment(sessionId, "sessionId");
+    return;
+  }
+  const parts = sessionId.split(":");
+  if (parts.length !== 3 || parts[1] !== "a") {
+    throw new Error("invalid sessionId segment");
+  }
+  assertSegment(parts[0], "sessionId"); // the base session id
+  assertSegment(parts[2], "sessionId"); // the agent id (marker `a` is fixed)
+}
+
+/** `${userId}/${family}/${sessionId}` with every segment validated (the sessionId
+ *  via `assertSessionId` — plain, or the agent-lane composite). */
 export function sessionPrefix(k: SessionKey): string {
   assertSegment(k.userId, "userId");
   assertSegment(k.family, "family");
-  for (const p of k.sessionId.split(":")) assertSegment(p, "sessionId");
+  assertSessionId(k.sessionId);
   return `${k.userId}/${k.family}/${k.sessionId}`;
+}
+
+/** The `${userId}/` list prefix for one user's objects, with the segment validated
+ *  — parity with the per-object key builders so an untrusted userId can never widen
+ *  a listing beyond its own prefix (M-6). */
+export function listPrefix(userId: string): string {
+  assertSegment(userId, "userId");
+  return `${userId}/`;
 }
 
 export function stagingObject(k: SessionKey, chunkId: string): string {

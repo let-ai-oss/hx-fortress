@@ -9,10 +9,7 @@
 // internal network), and support an optional host allowlist. Throws on violation
 // (fail-closed — the store is not built).
 
-function parseBool(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-}
+import { parseBooleanEnv } from "../../../env";
 
 /** Reject a host whose SHAPE is an OBFUSCATED IP literal — an integer, hex, or
  *  octal encoding a browser/agent/S3 SDK would still dial (e.g. `2852039166`,
@@ -84,7 +81,7 @@ export function assertS3EndpointSafe(
   const raw = endpoint?.trim();
   if (!raw) return;
 
-  const allowPrivate = parseBool(env.FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT);
+  const allowPrivate = parseBooleanEnv(env.FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT);
 
   let url: URL;
   try {

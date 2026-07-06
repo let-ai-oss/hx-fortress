@@ -162,11 +162,12 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
 
   // 0b. BUDGET GATE (M-9e) — if today's recorded OpenAI token spend already
   // crossed the budget, no-op this pass entirely (nothing claimed ⇒ nothing
-  // dead-lettered). The counter is keyed on CURRENT_DATE, so a UTC day rollover
-  // resets the ceiling. Skipped when unlimited (no DB accounting then).
+  // dead-lettered). The counter is keyed on the UTC date (NOT server-local
+  // CURRENT_DATE), so the ceiling resets at the true UTC day rollover regardless
+  // of the DB session timezone. Skipped when unlimited (no DB accounting then).
   if (dailyTokenBudget > 0) {
     const spentRows = (await sql`
-      SELECT tokens FROM hx.embed_budget WHERE day = CURRENT_DATE
+      SELECT tokens FROM hx.embed_budget WHERE day = (now() at time zone 'utc')::date
     `) as Array<{ tokens: number | string | bigint }>;
     const spentToday = Number(spentRows[0]?.tokens ?? 0);
     if (isEmbedBudgetExceeded(spentToday, dailyTokenBudget)) {
@@ -252,7 +253,7 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
   // reset on every crash and blow past the budget).
   if (dailyTokenBudget > 0 && spentTokensThisPass > 0) {
     await sql`
-      INSERT INTO hx.embed_budget (day, tokens) VALUES (CURRENT_DATE, ${spentTokensThisPass})
+      INSERT INTO hx.embed_budget (day, tokens) VALUES ((now() at time zone 'utc')::date, ${spentTokensThisPass})
       ON CONFLICT (day) DO UPDATE SET tokens = hx.embed_budget.tokens + EXCLUDED.tokens
     `;
   }

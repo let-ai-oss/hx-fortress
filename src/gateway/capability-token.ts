@@ -1,5 +1,7 @@
 import { importJWK, jwtVerify } from "jose";
 
+import { parseBooleanEnv } from "../env";
+
 export interface CapabilityClaims {
   org: string;
   project?: string;
@@ -32,10 +34,13 @@ export interface GrantClaims {
   deviceId?: string;
 }
 
-function parseBooleanEnv(value: string | undefined): boolean {
-  const v = value?.trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
-}
+/** The wire error code for the "enforcement is on and the caller presented NO
+ *  grant" condition — unified across the HTTP gateway (`enforceRoutePurpose` /
+ *  `mcpGrant`), the MCP tool layer (`checkScopeGrant`), and the reverse tunnel
+ *  (vault-RPC dispatch) so a client sees ONE code regardless of surface. Kept
+ *  distinct from a PRESENT-but-invalid grant (`grant_invalid` / `unauthorized`)
+ *  and from a scope-hash mismatch (`scope_not_granted`). */
+export const GRANT_REQUIRED_ERROR = "grant_required";
 
 /** The ONE place the "require a grant" decision is encoded for the HTTP surface
  *  (gateway upload/read routes + POST /mcp). Default OFF: a grant is verified

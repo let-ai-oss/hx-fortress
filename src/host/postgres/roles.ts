@@ -45,7 +45,9 @@ function generateSecret(): string {
 /** Persist the secrets 0600 via a temp file + chmod + atomic rename, so a reader
  *  never observes a partially-written file and the bytes are never world-readable. */
 async function writeSecrets(secretsPath: string, secrets: RoleSecrets): Promise<void> {
-  await mkdir(path.dirname(secretsPath), { recursive: true });
+  // 0700 the containing dir so the role passwords (0600 files) sit in an owner-only
+  // directory — a defense-in-depth pair with the file mode below.
+  await mkdir(path.dirname(secretsPath), { recursive: true, mode: 0o700 });
   const tmp = `${secretsPath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(tmp, JSON.stringify(secrets), { mode: 0o600 });
   await chmod(tmp, 0o600);

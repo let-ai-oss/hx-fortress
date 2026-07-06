@@ -34,11 +34,13 @@ describe("checkScopeGrant", () => {
     expect(gate?.content[0]?.text).toContain("scope_not_granted");
   });
 
-  test("no grant: enforce → scope_not_granted, otherwise admitted", () => {
+  test("no grant: enforce → grant_required, otherwise admitted", () => {
     expect(checkScopeGrant({ scope: SCOPE }, undefined, false)).toBeNull();
     const gate = checkScopeGrant({ scope: SCOPE }, undefined, true);
     expect(gate?.isError).toBe(true);
-    expect(gate?.content[0]?.text).toContain("scope_not_granted");
+    // Absent grant under enforcement uses the unified `grant_required` code,
+    // distinct from the scope-mismatch `scope_not_granted` above.
+    expect(gate?.content[0]?.text).toContain("grant_required");
   });
 });
 
@@ -103,7 +105,8 @@ describe("createMcpTunnelHandler grant binding", () => {
         userId: "u1",
       });
       expect(res.isError).toBe(true);
-      expect(res.content).toContain("scope_not_granted");
+      // Absent grant under enforcement → the unified `grant_required` code.
+      expect(res.content).toContain("grant_required");
     } finally {
       if (prior === undefined) delete process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
       else process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = prior;

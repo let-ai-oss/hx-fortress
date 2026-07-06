@@ -44,7 +44,7 @@ import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
-import { artifactObject, canonicalObject, stagingObject } from "./keys.js";
+import { artifactObject, canonicalObject, listPrefix, stagingObject } from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
 
 export interface S3StoreConfig {
@@ -208,7 +208,7 @@ export class S3Store implements SessionStore {
       const page = await this.s3.send(
         new ListObjectsV2Command({
           Bucket: this.bucket,
-          Prefix: `${userId}/`,
+          Prefix: listPrefix(userId),
           ContinuationToken: token,
         }),
       );

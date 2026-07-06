@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   artifactObject,
   canonicalObject,
+  listPrefix,
   sessionPrefix,
   stagingObject,
 } from "../src/modules/session-vault/store/keys";
@@ -33,8 +34,20 @@ describe("session object-key builders", () => {
     ["single-dot sessionId part", { ...OK, sessionId: "." }],
     ["empty family", { ...OK, family: "" }],
     ["slash smuggled via composite part", { ...OK, sessionId: "ok:a:../evil" }],
+    // A raw ":" is allowed ONLY in a well-formed `X:a:Y` composite — everything
+    // else is rejected so a crafted id can't fabricate/masquerade an agent lane.
+    ["stray colon in a plain sessionId", { ...OK, sessionId: "foo:bar" }],
+    ["wrong agent-lane marker", { ...OK, sessionId: "foo:b:bar" }],
+    ["over-long composite", { ...OK, sessionId: "foo:a:bar:baz" }],
+    ["trailing colon", { ...OK, sessionId: "foo:a:" }],
   ])("rejects %s", (_name, key) => {
     expect(() => sessionPrefix(key as SessionKey)).toThrow(/invalid .* segment/);
+  });
+
+  test("listPrefix validates the userId segment", () => {
+    expect(listPrefix("user-1")).toBe("user-1/");
+    expect(() => listPrefix("../etc")).toThrow(/invalid userId segment/);
+    expect(() => listPrefix("a/b")).toThrow(/invalid userId segment/);
   });
 
   test("rejects a traversal chunkId", () => {

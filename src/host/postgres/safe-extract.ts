@@ -99,3 +99,43 @@ export async function assertSafeTar(
     }
   }
 }
+
+/**
+ * Audit a ZIP archive (the OUTER zonky jar) BEFORE extraction, the zip analogue
+ * of `assertSafeTar`: reject any member with an absolute path, a `..` traversal,
+ * or a symlink. `unzip` extracts such members faithfully, so — like the inner
+ * `.txz` — we LIST the jar first and refuse to extract if any member is unsafe.
+ *   • `unzip -Z1` → bare member names (no header/footer) for the path-escape checks.
+ *   • `unzip -Z`  → zipinfo verbose; the first char of each entry line flags a
+ *     symlink (`l`), the ` -> ` marker is a backstop. (Zip can't carry device/FIFO
+ *     nodes, so only symlinks need the type check.)
+ * Fail-closed on an empty listing (audited nothing).
+ */
+export async function assertSafeZip(spawner: Spawner, zipPath: string): Promise<void> {
+  const unzip = resolveBin("unzip");
+
+  // Pass 1: clean member names (one per line) for the path-escape checks.
+  const names = await capture(spawner, [unzip, "-Z1", zipPath]);
+  let memberCount = 0;
+  for (const line of names.split("\n")) {
+    const name = line.trim();
+    if (name.length === 0) continue;
+    assertSafeMemberPath(name, zipPath);
+    memberCount += 1;
+  }
+  if (memberCount === 0) {
+    throw new Error(`refusing to extract ${zipPath}: archive listing is empty (unaudited)`);
+  }
+
+  // Pass 2: verbose zipinfo — the first char of an entry line is `l` for a symlink.
+  // Header/footer lines ("Archive:", "Zip file size:", the entry-count trailer)
+  // never start with `l` and carry no ` -> `, so they pass by.
+  const verbose = await capture(spawner, [unzip, "-Z", zipPath]);
+  for (const line of verbose.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    if (trimmed[0] === "l" || line.includes(" -> ")) {
+      throw new Error(`unsafe zip member (symlink) in ${zipPath}: ${trimmed}`);
+    }
+  }
+}

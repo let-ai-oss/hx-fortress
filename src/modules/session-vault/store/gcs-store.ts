@@ -26,7 +26,7 @@ import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
-import { artifactObject, canonicalObject, sessionPrefix, stagingObject } from "./keys.js";
+import { artifactObject, canonicalObject, listPrefix, sessionPrefix, stagingObject } from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
 
 export interface GcsStoreConfig {
@@ -175,7 +175,7 @@ export class GcsStore implements SessionStore {
   }
 
   async listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
-    const [files] = await this.bucket().getFiles({ prefix: `${userId}/` });
+    const [files] = await this.bucket().getFiles({ prefix: listPrefix(userId) });
     const out: SessionMetadata[] = [];
     const seen = new Set<string>();
     const canonicalFallbacks: SessionMetadata[] = [];

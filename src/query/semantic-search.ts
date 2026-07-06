@@ -54,8 +54,13 @@ const MAX_K = 100;
 // (defense-in-depth atop the now-linear scrub regexes) and before it egresses to
 // OpenAI. A semantic query is a short natural-language phrase; anything past a few
 // KB is abusive (a multi-MB query would burn scrub time and OpenAI would reject it
-// on its ~8k-token cap anyway), so trim to this ceiling.
-const MAX_QUERY_TEXT_CHARS = 8_000;
+// on its ~8k-token cap anyway), so trim to this ceiling. Override via
+// FORTRESS_MAX_QUERY_TEXT_CHARS (mirrors the other DoS caps).
+const DEFAULT_MAX_QUERY_TEXT_CHARS = 8_000;
+function maxQueryTextChars(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.FORTRESS_MAX_QUERY_TEXT_CHARS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_QUERY_TEXT_CHARS;
+}
 // Over-fetch factor: the HNSW filters scope AFTER the distance scan, so pull more
 // candidates than k and truncate post-filter to avoid starving a small scope.
 const OVERFETCH = 5;
@@ -107,8 +112,8 @@ export async function hxSemanticSearch(
   try {
     // Cap the query length BEFORE scrub + egress (H-7 DoS guard), then scrub any
     // secret/PII shapes out of it before it leaves the fortress for OpenAI.
-    const capped =
-      queryText.length > MAX_QUERY_TEXT_CHARS ? queryText.slice(0, MAX_QUERY_TEXT_CHARS) : queryText;
+    const cap = maxQueryTextChars();
+    const capped = queryText.length > cap ? queryText.slice(0, cap) : queryText;
     [queryVec] = await embedder.embed([scrubSecrets(capped)]);
   } catch (err) {
     // An account-level error (unfunded / invalid key) is a CREDENTIAL problem —

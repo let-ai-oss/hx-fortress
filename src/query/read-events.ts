@@ -144,15 +144,17 @@ export async function hxSessionReadEvents(
   try {
     text = await store.readCanonicalText(key);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
     // Benign per-session miss (one blob absent) → soft not-found. Any other read
     // failure is an INFRA/credential problem affecting ALL blob reads → FAIL-FAST
     // with an explicit `unavailable` so the caller tells the user (never a silent
-    // degrade that presents a partial answer as complete).
+    // degrade that presents a partial answer as complete). The raw SDK error
+    // `detail` can carry bucket/object identifiers and crosses back to the agent,
+    // so surface only the generic reason (the benign-miss vs infra-fault split is
+    // preserved — that's the actionable signal).
     if (isBenignBlobMiss(err)) {
       return { events: [], total: 0, error: "session_not_found" };
     }
-    return { events: [], total: 0, unavailable: { reason: "vault_store_unreachable", detail } };
+    return { events: [], total: 0, unavailable: { reason: "vault_store_unreachable" } };
   }
 
   const all = classifyChunk(text);

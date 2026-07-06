@@ -182,4 +182,13 @@ export async function ensureAppRoles(sql: ClusterSql, secrets: RoleSecrets): Pro
     PG_DATABASE,
     `ALTER DEFAULT PRIVILEGES IN SCHEMA ${PG_SCHEMA} GRANT USAGE ON SEQUENCES TO ${PG_APP_RW_ROLE}`,
   );
+  // The migration journal is the migration runner's ledger (written only by the
+  // superuser DSN — see buildPostgresProvider.migrate), so the app DML role has no
+  // business writing it. The blanket ALL-TABLES grant above covers it, so REVOKE
+  // its writes back (SELECT stays — reading the journal is harmless). Runs after
+  // the grant every boot, so the revoke always wins.
+  await sql.run(
+    PG_DATABASE,
+    `REVOKE INSERT, UPDATE, DELETE ON ${PG_SCHEMA}.schema_migrations FROM ${PG_APP_RW_ROLE}`,
+  );
 }

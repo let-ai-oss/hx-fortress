@@ -161,12 +161,18 @@ function objectUserId(req: VaultRpcRequest): string | null {
  * RPC touches must belong to the grant's principal — `key.userId === authz.sub`
  * (or `userId === authz.sub` for the list reads). A mismatch fails closed with
  * `principal_object_mismatch`. `selfTest` carries no object and is never gated.
+ *
+ * `db` is the RW (DML) handle used by the ingest write branches; `dbRead` is the
+ * SELECT-only RO handle for the `listSessions` metadata read (least-privilege).
+ * `dbRead` falls back to `db` when omitted, so callers with a single handle (tests,
+ * external Postgres) keep their exact prior behavior.
  */
 export async function handleVaultRpc(
   store: SessionStore,
   req: VaultRpcRequest,
   db: HxDb | null = null,
   authz?: VaultAuthz,
+  dbRead: HxDb | null = null,
 ): Promise<VaultRpcResult> {
   if (authz && req.method !== "selfTest") {
     const owner = objectUserId(req);
@@ -216,10 +222,14 @@ export async function handleVaultRpc(
     case "listSessionMetadata":
       return { method: req.method, value: await store.listSessionMetadata(req.userId) };
     case "listSessions": {
-      if (!db) throw new Error("postgres_not_ready");
+      // Least-privilege: the "my sessions" metadata read is SELECT-only, so it
+      // runs on the RO handle (falling back to the RW handle when a single handle
+      // was passed — external Postgres / tests).
+      const readDb = dbRead ?? db;
+      if (!readDb) throw new Error("postgres_not_ready");
       return {
         method: req.method,
-        value: await listSessionsForUser(db, { userId: req.userId, limit: req.limit }),
+        value: await listSessionsForUser(readDb, { userId: req.userId, limit: req.limit }),
       };
     }
     case "ingestCommit": {

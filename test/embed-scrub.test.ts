@@ -28,6 +28,16 @@ describe("scrubSecrets — new secret/PII shapes (H-7)", () => {
     expect(out).not.toMatch(/sk_live_abcd|rk_test_abcd|whsec_abcd|github_pat_11|s3cr3t|alice\.doe|123-45-6789|415-555-0123/);
   });
 
+  test("preserves a 40-hex git commit SHA (not an AWS secret)", () => {
+    // A coding session is full of commit SHAs; they must survive embedding + search.
+    const sha = "0123456789abcdef0123456789abcdef01234567"; // 40 lowercase hex
+    expect(scrubSecrets(`fixed in commit ${sha} today`)).toContain(sha);
+    // …but a real 40-char base64-ish AWS secret (non-hex chars) still redacts.
+    const awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // 40 chars, has / + uppercase
+    expect(scrubSecrets(`aws ${awsSecret} end`)).toContain("[REDACTED]");
+    expect(scrubSecrets(`aws ${awsSecret} end`)).not.toContain(awsSecret);
+  });
+
   test("redacts a Luhn-valid credit card but preserves a non-card long number", () => {
     expect(scrubSecrets("card 4111 1111 1111 1111 on file")).toContain("[REDACTED]");
     expect(scrubSecrets("card 4111 1111 1111 1111 on file")).not.toContain("4111");
