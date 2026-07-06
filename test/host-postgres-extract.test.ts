@@ -67,7 +67,7 @@ describe("extractor", () => {
     expect(calls.some((c) => c.includes("-o"))).toBe(false);
   });
 
-  test("rejects an outer jar with a symlink member", async () => {
+  test("rejects an outer jar symlink whose target is absolute", async () => {
     const spawner: Spawner = {
       run: async (cmd) => {
         if (base(cmd) === "unzip" && cmd.includes("-Z1")) {
@@ -79,7 +79,52 @@ describe("extractor", () => {
         return { code: 0, stdout: "", stderr: "" };
       },
     };
-    await expect(makeExtractor(spawner)("/cache/pg.jar", "/pg/18.4.0")).rejects.toThrow(/symlink/);
+    await expect(makeExtractor(spawner)("/cache/pg.jar", "/pg/18.4.0")).rejects.toThrow(/absolute target/);
+  });
+
+  // DEFECT-1 regression guard: the genuine zonky Postgres bundle ships relative,
+  // in-tree `.so` version symlinks (libpq.so -> libpq.so.5.18, …). These are SAFE
+  // and MUST extract — a categorical symlink reject bricked the embedded-PG boot.
+  test("accepts relative in-tree symlinks (real bundle .so version links)", async () => {
+    const calls: string[][] = [];
+    const spawner: Spawner = {
+      run: async (cmd) => {
+        calls.push(cmd);
+        if (base(cmd) === "unzip" && cmd.includes("-Z1")) return { code: 0, stdout: "postgres/pg.txz\n", stderr: "" };
+        if (base(cmd) === "unzip" && cmd.includes("-Z"))
+          return { code: 0, stdout: "-rw-r--r--  2.0 unx 100 tx defN 26-Jan-01 12:00 postgres/pg.txz\n", stderr: "" };
+        if (base(cmd) === "tar" && cmd.some((a) => a.startsWith("-tv")))
+          return {
+            code: 0,
+            stdout:
+              "lrwxrwxrwx 0/0 0 2026-01-01 12:00 lib/libpq.so -> libpq.so.5.18\n" +
+              "lrwxrwxrwx 0/0 0 2026-01-01 12:00 lib/libecpg.so -> libecpg.so.6.18\n" +
+              "-rwxr-xr-x 0/0 100 2026-01-01 12:00 lib/libpq.so.5.18\n",
+            stderr: "",
+          };
+        if (base(cmd) === "tar" && cmd.some((a) => a.startsWith("-t")))
+          return { code: 0, stdout: "lib/libpq.so\nlib/libecpg.so\nlib/libpq.so.5.18\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await makeExtractor(spawner)("/cache/pg.jar", "/pg/18.4.0"); // must NOT throw
+    expect(calls.some((c) => base(c) === "tar" && c.includes("-xJf"))).toBe(true);
+  });
+
+  test("rejects a symlink whose target escapes the tree", async () => {
+    const spawner: Spawner = {
+      run: async (cmd) => {
+        if (base(cmd) === "unzip" && cmd.includes("-Z1")) return { code: 0, stdout: "postgres/pg.txz\n", stderr: "" };
+        if (base(cmd) === "unzip" && cmd.includes("-Z"))
+          return { code: 0, stdout: "-rw-r--r--  2.0 unx 100 tx defN 26-Jan-01 12:00 postgres/pg.txz\n", stderr: "" };
+        if (base(cmd) === "tar" && cmd.some((a) => a.startsWith("-tv")))
+          return { code: 0, stdout: "lrwxrwxrwx 0/0 0 2026-01-01 12:00 lib/evil -> ../../../etc/passwd\n", stderr: "" };
+        if (base(cmd) === "tar" && cmd.some((a) => a.startsWith("-t")))
+          return { code: 0, stdout: "lib/evil\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    };
+    await expect(makeExtractor(spawner)("/cache/pg.jar", "/pg/18.4.0")).rejects.toThrow(/escapes archive root/);
   });
 
   // Fail-closed archive audit (security caps): an empty listing means the audit

@@ -9,6 +9,8 @@
 // hostile $PATH can't shadow `tar`/`unzip`; if resolution fails we fall back to
 // the bare name (dev machines where which() misses but the tool is on PATH).
 
+import path from "node:path";
+
 import type { Spawner } from "./spawn";
 
 const binCache = new Map<string, string>();
@@ -46,6 +48,25 @@ function assertSafeMemberPath(name: string, tarPath: string): void {
   }
 }
 
+/** A symlink/hardlink member is SAFE iff its target stays INSIDE the archive
+ *  tree — a relative, non-escaping link. Real artifacts legitimately ship these
+ *  (the zonky Postgres bundle carries `.so` version symlinks like
+ *  `lib/libpq.so -> libpq.so.5.18`). We reject only an ABSOLUTE target or one
+ *  that resolves outside the root, which a later member could then be written
+ *  THROUGH to escape. `linkFrom` is the member's own path (a relative symlink
+ *  target resolves against its directory); a hardlink target is archive-root
+ *  relative, so pass `linkFrom=""`. */
+function assertSafeLinkTarget(linkFrom: string, target: string, archivePath: string): void {
+  if (target.startsWith("/")) {
+    throw new Error(`unsafe link (absolute target) in ${archivePath}: ${linkFrom} -> ${target}`);
+  }
+  const base = path.posix.dirname(linkFrom.replace(/^\.\/+/, ""));
+  const resolved = path.posix.normalize(path.posix.join(base === "." ? "" : base, target));
+  if (resolved === ".." || resolved.startsWith("../")) {
+    throw new Error(`unsafe link (escapes archive root) in ${archivePath}: ${linkFrom} -> ${target}`);
+  }
+}
+
 /**
  * Audit a tar archive BEFORE extraction: reject any symlink/hardlink member,
  * absolute path, or `..` traversal. `flags` carries the compression selector
@@ -77,25 +98,32 @@ export async function assertSafeTar(
   }
 
   // Pass 2: verbose listing for type detection. The first character of each line
-  // is the member's type across GNU and BSD tar — reject anything that isn't a
-  // regular file / directory: `l` symlink, `h` hardlink, `b`/`c` device, `p` FIFO,
-  // `s` socket (a device/FIFO member is never part of a code artifact and could be
-  // abused). The ` -> ` / ` link to ` markers are a belt-and-suspenders backstop.
+  // is the member's type across GNU and BSD tar. Device/FIFO/socket members are
+  // never part of a code artifact — reject them. Symlinks (`<name> -> <target>`)
+  // and hardlinks (`<name> link to <target>`) are allowed ONLY when the target
+  // stays inside the tree (real bundles ship relative `.so` version symlinks);
+  // an absolute or escaping target is rejected.
   const verbose = await capture(spawner, [tar, `-tv${flags}f`, tarPath]);
   for (const line of verbose.split("\n")) {
     if (line.trim().length === 0) continue;
     const type = line[0];
-    if (
-      type === "l" ||
-      type === "h" ||
-      type === "b" ||
-      type === "c" ||
-      type === "p" ||
-      type === "s" ||
-      line.includes(" -> ") ||
-      line.includes(" link to ")
-    ) {
-      throw new Error(`unsafe tar member (symlink/hardlink/device/fifo) in ${tarPath}: ${line.trim()}`);
+    if (type === "b" || type === "c" || type === "p" || type === "s") {
+      throw new Error(`unsafe tar member (device/fifo/socket) in ${tarPath}: ${line.trim()}`);
+    }
+    const arrow = line.indexOf(" -> ");
+    if (arrow !== -1) {
+      const name = (line.slice(0, arrow).trim().split(/\s+/).pop() ?? "");
+      assertSafeLinkTarget(name, line.slice(arrow + 4).trim(), tarPath);
+      continue;
+    }
+    const link = line.indexOf(" link to ");
+    if (link !== -1) {
+      assertSafeMemberPath(line.slice(link + 9).trim(), tarPath); // hardlink target is root-relative
+      continue;
+    }
+    // A link type with no parseable target line — fail closed (can't validate it).
+    if (type === "l" || type === "h") {
+      throw new Error(`unsafe tar member (unparseable link) in ${tarPath}: ${line.trim()}`);
     }
   }
 }
@@ -129,13 +157,20 @@ export async function assertSafeZip(spawner: Spawner, zipPath: string): Promise<
 
   // Pass 2: verbose zipinfo — the first char of an entry line is `l` for a symlink.
   // Header/footer lines ("Archive:", "Zip file size:", the entry-count trailer)
-  // never start with `l` and carry no ` -> `, so they pass by.
+  // never start with `l` and carry no ` -> `. A symlink (`<name> -> <target>`) is
+  // allowed only when its target stays inside the tree; absolute/escaping → reject.
   const verbose = await capture(spawner, [unzip, "-Z", zipPath]);
   for (const line of verbose.split("\n")) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
-    if (trimmed[0] === "l" || line.includes(" -> ")) {
-      throw new Error(`unsafe zip member (symlink) in ${zipPath}: ${trimmed}`);
+    const arrow = line.indexOf(" -> ");
+    if (arrow !== -1) {
+      const name = (line.slice(0, arrow).trim().split(/\s+/).pop() ?? "");
+      assertSafeLinkTarget(name, line.slice(arrow + 4).trim(), zipPath);
+      continue;
+    }
+    if (trimmed[0] === "l") {
+      throw new Error(`unsafe zip member (unparseable symlink) in ${zipPath}: ${trimmed}`);
     }
   }
 }
