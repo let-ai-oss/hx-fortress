@@ -21,10 +21,10 @@ function scalarInt(res: unknown): number {
 
 export async function computeCollectionStats(db: HxDb): Promise<CollectionStats> {
   const sessions = scalarInt(
-    await db.execute(sql`SELECT count(*)::int AS n FROM hx.sessions WHERE deleted_at IS NULL`),
+    await db.execute(sql`SELECT count(*)::bigint AS n FROM hx.sessions WHERE deleted_at IS NULL`),
   );
   const turns = scalarInt(
-    await db.execute(sql`SELECT count(*)::int AS n FROM hx.turns WHERE deleted_at IS NULL`),
+    await db.execute(sql`SELECT count(*)::bigint AS n FROM hx.turns WHERE deleted_at IS NULL`),
   );
 
   // to_regclass returns NULL (never errors) when hx.embeddings is absent, so the
@@ -34,7 +34,7 @@ export async function computeCollectionStats(db: HxDb): Promise<CollectionStats>
   const present = (reg[0] as { rel?: string | null } | undefined)?.rel != null;
   if (present) {
     embeddings = scalarInt(
-      await db.execute(sql`SELECT count(*)::int AS n FROM hx.embeddings WHERE deleted_at IS NULL`),
+      await db.execute(sql`SELECT count(*)::bigint AS n FROM hx.embeddings WHERE deleted_at IS NULL`),
     );
   }
 
