@@ -7,7 +7,7 @@
         "@aws-sdk/client-s3": "^3.1068.0",
         "@aws-sdk/s3-request-presigner": "^3.1068.0",
         "@google-cloud/storage": "^7.21.0",
-        "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#112d2608d117196417d017d83159fa339b418d6a",
+        "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#8fe07bcd84dbf5cb511fe79c496a94e9eaff3963",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "drizzle-orm": "^0.45.2",
         "jose": "^6.2.3",
@@ -176,7 +176,7 @@
 
     "@humanwhocodes/retry": ["@humanwhocodes/retry@0.4.3", "", {}, "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ=="],
 
-    "@let-ai/hx-protocol": ["@let-ai/hx-protocol@github:let-ai-oss/hx-protocol#112d260", {}, "let-ai-oss-hx-protocol-112d260"],
+    "@let-ai/hx-protocol": ["@let-ai/hx-protocol@github:let-ai-oss/hx-protocol#8fe07bc", {}, "let-ai-oss-hx-protocol-8fe07bc"],
 
     "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.29.0", "", { "dependencies": { "@hono/node-server": "^1.19.9", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ=="],
 
