@@ -2,7 +2,7 @@
 // vault tunnel (the transport for a fortress with NO public URL / behind NAT).
 // Reuses the SAME tool set as the HTTP-MCP path (src/mcp/tools.ts) + src/gateway
 // — one tool registry, two transports (tunnel default, HTTP when reachable).
-import type { McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
+import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import type { HxDb } from "../host/postgres/db";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import type { Embedder } from "../modules/embed-worker/openai";

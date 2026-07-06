@@ -7,8 +7,8 @@
 
 import type { ServerWebSocket } from "bun";
 import { createServer } from "node:net";
-import { decodeFrame, encodeFrame } from "../src/protocol/codec";
-import type { FortressToHubFrame, HubToFortressFrame } from "../src/protocol/frames";
+import { decodeFrame, encodeFrame } from "../src/protocol";
+import type { FortressToHubFrame, HubToFortressFrame } from "../src/protocol";
 import { SUPPORTED_PROTOCOL_VERSION } from "../src/cloud/connection";
 
 export interface FakeHubOptions {

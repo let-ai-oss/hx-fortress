@@ -1,6 +1,12 @@
-import { decodeFrame, encodeFrame } from "../protocol/codec";
-import type { FortressToHubFrame, HubToFortressFrame, McpTunnelRequest, McpTunnelResult } from "../protocol/frames";
-import type { FortressIdentity } from "../protocol/identity";
+import {
+  decodeFrame,
+  encodeFrame,
+  type FortressIdentity,
+  type FortressToHubFrame,
+  type HubToFortressFrame,
+  type McpTunnelRequest,
+  type McpTunnelResult,
+} from "../protocol";
 import type {
   CloudConnection,
   ConnectionState,
