@@ -20,6 +20,27 @@ Workbench origin:
 curl -fsSL https://<workbench-origin>/install/hx-fortress.sh | sh
 ```
 
+## Install from sources
+
+If you'd rather build the binary yourself instead of downloading a prebuilt
+one, clone this repo and run the from-source installer. It reaches the same
+running, enrolled Fortress as the `curl … | sh` path above — it just compiles
+the binary locally with [Bun](https://bun.sh) first.
+
+Prerequisite: Bun. Get the one-time `<token>` and the `<cloud-url>` from your
+let.ai Workbench (Org Settings → self-hosted vault), exactly as for the binary
+installer.
+
+```sh
+git clone https://github.com/let-ai-oss/hx-fortress && cd hx-fortress
+./scripts/install-from-source.sh <token> --cloud <cloud-url>
+```
+
+The script installs dependencies, builds `hx-fortress`, installs it to
+`~/.let/bin/hx-fortress` (ad-hoc code-signed on macOS), and hands off to the
+interactive enroll wizard. Bun users can equivalently run
+`bun run install:enroll <token> --cloud <cloud-url>`.
+
 ## Commands
 
 The Fortress CLI surface is:
