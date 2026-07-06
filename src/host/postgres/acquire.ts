@@ -46,12 +46,12 @@ export async function acquireBinaries(deps: AcquireDeps): Promise<string> {
     throw new Error(`Postgres binary checksum mismatch for ${url}`);
   }
 
-  await mkdir(deps.cacheDir, { recursive: true });
+  await mkdir(deps.cacheDir, { recursive: true, mode: 0o700 });
   const jarPath = path.join(deps.cacheDir, `${deps.classifier}-${deps.version}.jar`);
   await writeFile(jarPath, jarBytes);
 
   await rm(deps.versionDir, { recursive: true, force: true });
-  await mkdir(deps.versionDir, { recursive: true });
+  await mkdir(deps.versionDir, { recursive: true, mode: 0o700 });
   await deps.extract(jarPath, deps.versionDir);
   await writeFile(sentinel, `${deps.version}\n`);
   return binDir;

@@ -205,4 +205,24 @@ describe.if(!!DSN)("hx-fortress embed — worker drain + dead-letter (A3)", () =
     expect(await embedCount(SID_DL)).toBe(2); // the 2 good turns indexed
     expect(lastClaimed).toBe(0); // poison no longer re-claimed (dead-lettered)
   }, 30_000);
+
+  test("stops the pass once today's OpenAI token budget is spent (M-9e)", async () => {
+    // Record a spend that already exceeds a tiny budget for the current UTC day.
+    await sqlx.exec(
+      `INSERT INTO hx.embed_budget (day, tokens) VALUES (CURRENT_DATE, 1000000)
+       ON CONFLICT (day) DO UPDATE SET tokens = 1000000`,
+    );
+    try {
+      const worker = createEmbedWorker({ dsn, embedder: fakeEmbedder, maxPerPass: 100, dailyTokenBudget: 500_000 });
+      const r = await worker.runOnce();
+      await worker.stop();
+      // The gate fires BEFORE the claim, so nothing is claimed (⇒ nothing
+      // dead-lettered) and OpenAI is never called.
+      expect(r.budgetExceeded).toBe(true);
+      expect(r.claimed).toBe(0);
+      expect(r.openaiTexts).toBe(0);
+    } finally {
+      await sqlx.exec(`DELETE FROM hx.embed_budget WHERE day = CURRENT_DATE`);
+    }
+  }, 30_000);
 });

@@ -11,6 +11,7 @@ import {
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
+import { maxCanonicalBytes } from "./limits.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -137,8 +138,18 @@ export async function handleVaultRpc(
     case "statCanonical":
       return { method: req.method, value: await store.statCanonical(req.key) };
     case "readCanonical": {
+      // M-9c · reject an oversized whole-object read before fetching it into memory.
+      const size = await store.statCanonical(req.key);
+      if (size !== null && size > maxCanonicalBytes()) throw new Error("canonical_too_large");
       const { url } = await store.signCanonicalDownload(req.key);
-      const res = await fetch(url);
+      // Low · a thrown fetch error can embed the signed URL — swallow the original
+      // and surface a URL-free reason so the signed URL never reaches logs/replies.
+      let res: Response;
+      try {
+        res = await fetch(url);
+      } catch {
+        throw new Error("canonical_fetch_failed:network");
+      }
       if (!res.ok) throw new Error(`canonical_fetch_failed:${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
       return { method: req.method, value: { base64: buf.toString("base64") } };

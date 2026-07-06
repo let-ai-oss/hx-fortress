@@ -47,4 +47,17 @@ describe("gateway health endpoints", () => {
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ ok: false, ready: false });
   });
+
+  // M-9a · a body over the 4 MiB ceiling is rejected at the HTTP layer (413)
+  // before any handler runs, so a single upload can't exhaust memory.
+  test("rejects a request body over the size ceiling", async () => {
+    const oversized = "x".repeat(5 * 1024 * 1024);
+    const res = await fetch(`http://localhost:${handle.port}/sessions/commit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: oversized,
+    }).catch(() => null);
+    // Bun aborts an oversized body with 413 Payload Too Large.
+    expect(res?.status).toBe(413);
+  });
 });

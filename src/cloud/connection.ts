@@ -1,6 +1,6 @@
 import {
-  decodeFrame,
   encodeFrame,
+  safeDecodeFrame,
   type FortressIdentity,
   type FortressToHubFrame,
   type HubToFortressFrame,
@@ -24,6 +24,13 @@ export const SUPPORTED_PROTOCOL_VERSION = 1;
 const HEARTBEAT_MS = 30_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+// Low · drop any frame larger than this before parsing it (DoS guard).
+const DEFAULT_MAX_FRAME_BYTES = 32 * 1024 * 1024;
+
+function parseMaxFrameBytes(value: string | undefined): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_FRAME_BYTES;
+}
 
 export interface WsCloudConnectionDeps {
   dispatcher: MessageDispatcher;
@@ -79,12 +86,14 @@ export class WsCloudConnection implements CloudConnection {
   private readonly heartbeatMs: number;
   private readonly reconnectMinMs: number;
   private readonly reconnectMaxMs: number;
+  private readonly maxFrameBytes: number;
   private closeResolve: (() => void) | null = null;
 
   constructor(private readonly deps: WsCloudConnectionDeps) {
     this.reconnectMinMs = deps.reconnectMinMs ?? RECONNECT_MIN_MS;
     this.reconnectMaxMs = deps.reconnectMaxMs ?? RECONNECT_MAX_MS;
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS;
+    this.maxFrameBytes = parseMaxFrameBytes(process.env.FORTRESS_MAX_FRAME_BYTES);
     this.backoff = this.reconnectMinMs;
     this.activeEnrollToken = deps.enrollToken ?? null;
   }
@@ -209,14 +218,14 @@ export class WsCloudConnection implements CloudConnection {
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
-      let frame: HubToFortressFrame;
-      try {
-        const raw = typeof event.data === "string" ? event.data : String(event.data);
-        frame = decodeFrame<HubToFortressFrame>(raw);
-      } catch {
-        return;
-      }
-      void this.handleFrame(frame, send, settle);
+      const raw = typeof event.data === "string" ? event.data : String(event.data);
+      // Drop an oversized frame BEFORE parsing it (DoS guard), and use the
+      // non-throwing decoder so a malformed envelope returns without dispatch
+      // instead of throwing out of the read loop.
+      if (raw.length > this.maxFrameBytes) return;
+      const decoded = safeDecodeFrame<HubToFortressFrame>(raw);
+      if (!decoded.ok) return;
+      void this.handleFrame(decoded.frame, send, settle);
     });
 
     ws.addEventListener("close", () => {

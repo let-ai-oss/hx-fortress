@@ -17,6 +17,7 @@ import { and, eq } from "drizzle-orm";
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxUsers } from "../host/postgres/schema";
 import { classifyChunk, type ClassifiedEvent } from "../ingest/classify";
+import { maxCanonicalBytes } from "../modules/session-vault/store/limits";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import { scopePredicate, type FortressScope } from "./scope";
 
@@ -120,13 +121,28 @@ export async function hxSessionReadEvents(
   if (!session) return { events: [], total: 0, error: "session_not_found" };
   if (!store) return { events: [], total: 0, unavailable: { reason: "vault_unavailable" } };
 
+  const key = {
+    userId: session.userExternalId,
+    family: session.family,
+    sessionId: session.sessionId,
+  };
+
+  // M-9c · a whole-object read materializes the full transcript in memory. Stat
+  // first and fail-fast on an oversized session rather than OOM the fortress. A
+  // stat failure isn't authoritative — fall through to the read, which classifies
+  // benign-miss vs infra and fails-fast on its own.
+  try {
+    const size = await store.statCanonical(key);
+    if (size !== null && size > maxCanonicalBytes()) {
+      return { events: [], total: 0, unavailable: { reason: "session_too_large" } };
+    }
+  } catch {
+    // ignore — the read below handles a genuinely unreachable store
+  }
+
   let text: string;
   try {
-    text = await store.readCanonicalText({
-      userId: session.userExternalId,
-      family: session.family,
-      sessionId: session.sessionId,
-    });
+    text = await store.readCanonicalText(key);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     // Benign per-session miss (one blob absent) → soft not-found. Any other read

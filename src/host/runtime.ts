@@ -22,6 +22,9 @@ export interface HostRuntimeDependencies {
   /** Called after the cloud connection opens and before modules start. Use to
    *  propagate the Fortress identity into the module supervisor. */
   afterConnect?: () => Promise<void>;
+  /** Optional secret-free view of the session_vault storage config, folded into
+   *  each status snapshot. Returns null when no vault is configured (Low). */
+  vaultStatus?: () => Record<string, unknown> | null;
 }
 
 export class HostRuntime {
@@ -106,6 +109,9 @@ export class HostRuntime {
   }
 
   private async writeStatus(updatedAt: string): Promise<void> {
+    // Secret-free vault view (Low) — only included when a vault is configured, so
+    // a snapshot without one keeps its exact prior shape.
+    const vault = this.dependencies.vaultStatus?.() ?? null;
     const snapshot: HostStatusSnapshot = {
       schemaVersion: 1,
       host: {
@@ -118,6 +124,7 @@ export class HostRuntime {
       connection: this.dependencies.connection.status(),
       postgres: this.dependencies.postgres.status(),
       modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
+      ...(vault ? { vault } : {}),
     };
     try {
       await this.dependencies.statusStore.write(snapshot);

@@ -39,6 +39,11 @@ export interface FortressScope {
   ownerGate?: { activeMemberExternalIds: string[] };
 }
 
+// M-9d · cap on the enumerated in-scope identities. Truncation only NARROWS the
+// match set, so it is fail-closed-safe — an oversized scope is almost certainly
+// abusive (or a bug) rather than a legitimate 10k-session consent.
+const MAX_SCOPE_IDENTITIES = 10_000;
+
 function asString(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
@@ -59,6 +64,12 @@ export function parseScope(raw: unknown): FortressScope {
     if (userExternalId && family && sessionId) {
       identities.push({ userExternalId, family, sessionId });
     }
+  }
+  if (identities.length > MAX_SCOPE_IDENTITIES) {
+    console.warn(
+      `parseScope: truncating ${identities.length} scope identities to ${MAX_SCOPE_IDENTITIES}`,
+    );
+    identities.length = MAX_SCOPE_IDENTITIES;
   }
   let ownerGate: FortressScope["ownerGate"];
   if (obj.ownerGate && typeof obj.ownerGate === "object") {

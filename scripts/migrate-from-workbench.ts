@@ -9,7 +9,6 @@
 //   FORTRESS_S3_BUCKET=… FORTRESS_S3_REGION=… (+ AWS creds) \
 //   bun scripts/migrate-from-workbench.ts [--limit N] [--embed]
 import { createHxDb } from "../src/host/postgres/db";
-import { makeMigrationExec } from "../src/host/postgres/sql-exec";
 import { ingestCommit } from "../src/ingest/ingest";
 import { S3Store } from "../src/modules/session-vault/store/s3-store";
 import { createEmbedWorker, createOpenAIEmbedder } from "../src/modules/embed-worker";
@@ -42,7 +41,7 @@ async function main() {
     console.log("[migrate] safety gate: fallback path is OFF. Primary fill = hx daemon auto-reupload. To run this fallback, set HX_MIGRATE_FROM_WORKBENCH=1 or pass --run.");
     process.exit(0);
   }
-  const fortSqlx = makeMigrationExec(FORTRESS_DSN);
+  const fortSql = new Bun.SQL(FORTRESS_DSN);
   const db = createHxDb(FORTRESS_DSN);
   const wb = new Bun.SQL(WORKBENCH_DSN, { max: 4 });
   const store = s3FromEnv();
@@ -54,8 +53,10 @@ async function main() {
   let migrated = 0, skipped = 0, empty = 0;
   for (const s of sessions) {
     const key = { userId: s.user_id, family: s.family, sessionId: s.session_id };
-    // idempotent: skip if the fortress already holds this identity's session
-    const [exists] = await fortSqlx.query<{ n: number }>(`SELECT count(*)::int n FROM hx.sessions ss JOIN hx.users u ON u.id=ss.user_id WHERE u.external_id='${s.user_id}' AND ss.family='${s.family}' AND ss.session_id='${s.session_id}' AND ss.deleted_at IS NULL`);
+    // idempotent: skip if the fortress already holds this identity's session.
+    // Bound tagged-template params (never string-interpolated) so a session's
+    // user_id/family/session_id can't inject SQL.
+    const [exists] = await fortSql`SELECT count(*)::int AS n FROM hx.sessions ss JOIN hx.users u ON u.id=ss.user_id WHERE u.external_id=${s.user_id} AND ss.family=${s.family} AND ss.session_id=${s.session_id} AND ss.deleted_at IS NULL` as Array<{ n: number }>;
     if (exists.n > 0) { skipped++; continue; }
     const canonical = await canonicalFromWorkbench(wb, s.id);
     if (!canonical.trim()) { empty++; continue; }

@@ -187,9 +187,15 @@ async function ingestAgentCommitMetadata(
   }
 }
 
+// M-9a · cap request bodies so a single upload can't exhaust memory. The ingest
+// surface streams chunk bytes to signed URLs, not through this JSON API, so 4 MiB
+// is ample for the control-plane JSON (commit metadata, MCP JSON-RPC).
+const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+
 export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
   const server = Bun.serve({
     port: deps.port,
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
     fetch: async (req) => {
       const url = new URL(req.url);
 

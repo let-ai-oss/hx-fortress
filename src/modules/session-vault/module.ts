@@ -7,6 +7,7 @@ import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials } from "./credentials.js";
 import { buildStore } from "./store.js";
 import type { HxDb } from "../../host/postgres/db.js";
+import { sanitizeDbError } from "../../host/postgres/sanitize.js";
 import type {
   HxIngestNotification,
   Module,
@@ -81,7 +82,9 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
         }
         return { ok: true, payload: result };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        // The error string is logged AND returned to the cloud on the wire, so
+        // redact any DSN a Postgres/driver error might have echoed (Low).
+        const message = sanitizeDbError(err);
         logger?.error("vault RPC failed", { method: req.method, error: message });
         return { ok: false, error: message };
       }

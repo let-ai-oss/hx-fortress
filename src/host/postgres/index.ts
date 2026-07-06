@@ -84,7 +84,7 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       }),
     ensureCluster: (binDir) => ensureCluster({ spawner, binDir, dataDir }),
     startServer: async (binDir) => {
-      await mkdir(socketDir, { recursive: true });
+      await mkdir(socketDir, { recursive: true, mode: 0o700 });
       const { code, stderr } = await spawner.run([
         path.join(binDir, "pg_ctl"),
         "-D",

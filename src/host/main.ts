@@ -9,6 +9,7 @@ import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
 import {
   readVaultCredentials,
+  redactCredentials,
   writeVaultCredentials,
 } from "../modules/session-vault/credentials.js";
 import { applyHeadlessBootstrap } from "./headless-bootstrap";
@@ -55,6 +56,41 @@ export async function resolvePendingEnrollmentForStartup(
   pendingEnrollmentStore: FilePendingEnrollmentStore,
 ): Promise<PendingEnrollment | null> {
   return pendingEnrollmentStore.load().catch(() => null);
+}
+
+/** ws(s) origin (protocol + host + port) of a URL, or null when unparseable. */
+export function wsOrigin(u: string): string | null {
+  try {
+    const url = new URL(u);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return null;
+  }
+}
+
+function parseBooleanEnv(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+/** M-8 · decide whether a pending-enrollment.json should be honored at startup.
+ *  A pending enrollment is the operator's fresh (re-)bootstrap intent, but a file
+ *  an attacker drops next to an ALREADY-ENROLLED fortress would otherwise re-home
+ *  it (its own token + its own cloud origin) to the attacker's org — handing over
+ *  the fortress's bucket + data. So once a credential is saved, honor a pending
+ *  enrollment only when its cloudUrl shares the enrolled cloud origin, unless
+ *  FORTRESS_ALLOW_REENROLL is explicitly set. */
+export function isPendingEnrollmentTrusted(args: {
+  savedCredentialExists: boolean;
+  pendingCloudUrl: string;
+  enrolledCloudUrl: string | null;
+  allowReenroll: boolean;
+}): boolean {
+  if (!args.savedCredentialExists) return true; // fresh install — nothing to hijack
+  if (args.allowReenroll) return true; // explicit operator opt-in
+  const enrolled = args.enrolledCloudUrl ? wsOrigin(args.enrolledCloudUrl) : null;
+  const pending = wsOrigin(args.pendingCloudUrl);
+  return enrolled !== null && pending !== null && enrolled === pending;
 }
 
 export async function runFortressHost(
@@ -118,12 +154,37 @@ export async function runFortressHost(
     logger: bus.scopeFor("fortress"),
   });
 
-  const pendingEnrollment = await resolvePendingEnrollmentForStartup(
+  let pendingEnrollment = await resolvePendingEnrollmentForStartup(
     pendingEnrollmentStore,
   );
 
   if (pendingEnrollment) {
-    await ensureEnrollmentConfig(paths, pendingEnrollment.cloudUrl);
+    // M-8 · gate a hijack-drop pending enrollment BEFORE its config/token loads:
+    // once a credential is saved, only honor a pending enrollment at the same
+    // enrolled cloud origin (or under FORTRESS_ALLOW_REENROLL).
+    const savedCredential = await credentialStore.load().catch(() => null);
+    const enrolledConfig = await new FileConfigStore(paths).load().catch(() => null);
+    const trusted = isPendingEnrollmentTrusted({
+      savedCredentialExists: savedCredential !== null,
+      pendingCloudUrl: pendingEnrollment.cloudUrl,
+      enrolledCloudUrl: enrolledConfig?.cloud.url ?? null,
+      allowReenroll: parseBooleanEnv(process.env.FORTRESS_ALLOW_REENROLL),
+    });
+    if (trusted) {
+      await ensureEnrollmentConfig(paths, pendingEnrollment.cloudUrl);
+    } else {
+      bus.scopeFor("fortress").warn(
+        "ignoring a pending enrollment for an already-enrolled fortress: its cloudUrl origin " +
+          "differs from the enrolled one; set FORTRESS_ALLOW_REENROLL to re-enroll",
+        {
+          enrolledOrigin: enrolledConfig ? wsOrigin(enrolledConfig.cloud.url) : null,
+          pendingOrigin: wsOrigin(pendingEnrollment.cloudUrl),
+        },
+      );
+      // Fall through to `hello` with the saved credential — the hijack token
+      // never loads (enrollToken below reads pendingEnrollment?.token).
+      pendingEnrollment = null;
+    }
   }
   await ensureGatewayPublicUrlConfigured(paths);
   await ensureCoreModulesEnabled(paths);
@@ -202,6 +263,8 @@ export async function runFortressHost(
     supervisor: registry,
     statusStore: new FileStatusStore(paths),
     logger,
+    // Low · fold a secret-free vault view into each status snapshot (never keys).
+    vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
     async afterConnect() {
       // Load the saved Fortress identity and make it available to modules.
       // Works for both the fresh-enrollment path (onEnrolled already set it)
@@ -230,6 +293,17 @@ export async function runFortressHost(
         baseUrl: embedConfig.baseUrl,
       })
     : null;
+  // H-7 · loud one-time warning when conversational text is embedded against the
+  // PUBLIC OpenAI endpoint — it carries no zero-retention/DPA guarantee. Steer the
+  // operator at a zero-retention endpoint via FORTRESS_OPENAI_BASE_URL.
+  if (embedConfig.enabled && embedConfig.baseUrl === "https://api.openai.com/v1") {
+    bus
+      .scopeFor("embed-worker")
+      .warn(
+        "embeddings egress to the public OpenAI endpoint (no zero-retention/DPA guarantee); " +
+          "set FORTRESS_OPENAI_BASE_URL to a zero-retention endpoint",
+      );
+  }
 
   // Tunnel-MCP now has db+store+embedder — repoint the holder to the real
   // handler so the reverse tunnel serves the same hx_* tools as the HTTP gateway.
@@ -274,6 +348,7 @@ export async function runFortressHost(
       maxPerPass: embedConfig.maxPerPass,
       debounceMs: embedConfig.debounceMs,
       maxWaitMs: embedConfig.maxWaitMs,
+      dailyTokenBudget: embedConfig.dailyTokenBudget,
       logger: bus.scopeFor("embed-worker"),
     });
     setEmbedSignalHandler(() => embedWorker?.signal());

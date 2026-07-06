@@ -69,6 +69,10 @@ export interface HostStatusSnapshot {
     reason: string | null;
   };
   modules: ModuleRuntimeStatus[];
+  /** Optional secret-free view of the session_vault storage config (store, bucket,
+   *  region, identity label). Absent when no vault credentials are configured;
+   *  NEVER contains private keys or S3 secrets (see redactCredentials). */
+  vault?: Record<string, unknown>;
 }
 
 export interface StatusStore {

@@ -35,6 +35,7 @@
 // it re-arms IMMEDIATELY so a boot-time backfill drains to completion instead of
 // stranding everything past the first batch.
 
+import { sanitizeDbError } from "../../host/postgres/sanitize";
 import { scrubSecrets } from "./scrub";
 import { EmbedAccountError, type Embedder } from "./openai";
 
@@ -56,6 +57,22 @@ export interface EmbedPassResult {
    *  re-claiming one after a threshold, so a single poison input can't stall the
    *  pass forever. */
   failedIds: string[];
+  /** M-9e · set when the pass no-oped because today's OpenAI token spend already
+   *  crossed FORTRESS_EMBED_DAILY_TOKEN_BUDGET (resets at the UTC day rollover). */
+  budgetExceeded?: boolean;
+}
+
+/** M-9e · rough token estimate for budgeting — ~4 chars/token (OpenAI guidance). */
+export function estimateEmbedTokens(texts: string[]): number {
+  let n = 0;
+  for (const t of texts) n += Math.ceil(t.length / 4);
+  return n;
+}
+
+/** M-9e · has today's recorded OpenAI token spend crossed the daily budget?
+ *  budget <= 0 ⇒ unlimited (never exceeded). */
+export function isEmbedBudgetExceeded(spentToday: number, dailyTokenBudget: number): boolean {
+  return dailyTokenBudget > 0 && spentToday >= dailyTokenBudget;
 }
 
 export interface RunEmbedPassDeps {
@@ -71,6 +88,9 @@ export interface RunEmbedPassDeps {
   /** Turn ids the scheduler has dead-lettered — excluded from the claim so a
    *  permanently-unembeddable turn doesn't get re-claimed every pass. */
   excludeIds?: string[];
+  /** M-9e · daily OpenAI token budget. 0 (or omitted) ⇒ unlimited: no budget row
+   *  is read or written, so unbudgeted callers keep their exact prior behavior. */
+  dailyTokenBudget?: number;
 }
 
 const DEFAULT_MAX_PER_PASS = 500;
@@ -127,12 +147,27 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
   const batchSize = deps.batchSize ?? DEFAULT_BATCH_SIZE;
   const concurrency = deps.concurrency ?? DEFAULT_CONCURRENCY;
   const excludeIds = deps.excludeIds && deps.excludeIds.length > 0 ? deps.excludeIds : [NO_EXCLUDE_SENTINEL];
+  const dailyTokenBudget = deps.dailyTokenBudget ?? 0;
 
   // 0. GUARD — pgvector may be absent (the embeddings table ships via a gated
   // migration). Without it the claim's LEFT JOIN hx.embeddings would throw
   // "relation does not exist" every pass; no-op cleanly instead.
   const reg = (await sql`SELECT to_regclass('hx.embeddings') AS r`) as Array<{ r: string | null }>;
   if (!reg[0]?.r) return emptyResult();
+
+  // 0b. BUDGET GATE (M-9e) — if today's recorded OpenAI token spend already
+  // crossed the budget, no-op this pass entirely (nothing claimed ⇒ nothing
+  // dead-lettered). The counter is keyed on CURRENT_DATE, so a UTC day rollover
+  // resets the ceiling. Skipped when unlimited (no DB accounting then).
+  if (dailyTokenBudget > 0) {
+    const spentRows = (await sql`
+      SELECT tokens FROM hx.embed_budget WHERE day = CURRENT_DATE
+    `) as Array<{ tokens: number | string | bigint }>;
+    const spentToday = Number(spentRows[0]?.tokens ?? 0);
+    if (isEmbedBudgetExceeded(spentToday, dailyTokenBudget)) {
+      return { ...emptyResult(), budgetExceeded: true };
+    }
+  }
 
   // 1. CLAIM — the schema-enforced anti-join (gate on kind, never text alone:
   // an empty tool row must not be claimed). Dead-lettered turns are excluded.
@@ -187,6 +222,7 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
   const newByHash = new Map<string, number[]>();
   let openaiTexts = 0;
   let requests = 0;
+  let spentTokensThisPass = 0;
   await Promise.all(
     chunk(needHashes, batchSize).map((batch) =>
       limiter(async () => {
@@ -194,6 +230,8 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
         const vectors = await embedder.embed(texts);
         requests += 1;
         openaiTexts += texts.length;
+        // M-9e · count the OpenAI token spend of each successfully-issued batch.
+        if (dailyTokenBudget > 0) spentTokensThisPass += estimateEmbedTokens(texts);
         batch.forEach((h, i) => {
           const v = vectors[i];
           if (v && v.length > 0) newByHash.set(h, v);
@@ -201,6 +239,16 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
       }),
     ),
   );
+
+  // M-9e · record this pass's estimated OpenAI token spend against today's budget
+  // row so the ceiling is durable across restarts (an in-memory counter would
+  // reset on every crash and blow past the budget).
+  if (dailyTokenBudget > 0 && spentTokensThisPass > 0) {
+    await sql`
+      INSERT INTO hx.embed_budget (day, tokens) VALUES (CURRENT_DATE, ${spentTokensThisPass})
+      ON CONFLICT (day) DO UPDATE SET tokens = hx.embed_budget.tokens + EXCLUDED.tokens
+    `;
+  }
 
   // 5. INSERT … WHERE EXISTS(live turn) … ON CONFLICT DO NOTHING. The unique
   // index is the write fence; the WHERE EXISTS closes the orphan-on-replace race.
@@ -234,6 +282,7 @@ export async function runEmbedPass(deps: RunEmbedPassDeps): Promise<EmbedPassRes
 export interface EmbedWorkerLogger {
   error(message: string, fields?: Record<string, unknown>): void;
   info?(message: string, fields?: Record<string, unknown>): void;
+  warn?(message: string, fields?: Record<string, unknown>): void;
 }
 
 export interface EmbedWorkerOptions {
@@ -257,6 +306,8 @@ export interface EmbedWorkerOptions {
   /** Consecutive per-turn embed failures before the turn is dead-lettered
    *  (excluded from future claims for this process lifetime). */
   deadLetterThreshold?: number;
+  /** M-9e · daily OpenAI token budget (0 ⇒ unlimited). */
+  dailyTokenBudget?: number;
   logger?: EmbedWorkerLogger;
 }
 
@@ -327,7 +378,12 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
     batchSize: options.batchSize,
     concurrency: options.concurrency,
     excludeIds: [...deadLetter],
+    dailyTokenBudget: options.dailyTokenBudget,
   });
+
+  // M-9e · warn ONCE per budget-exceeded episode (reset when a later pass is back
+  // under budget, i.e. after the UTC day rolls over).
+  let budgetWarned = false;
 
   let sqlHandle: SqlClient | null = null;
   function ensureSql(): SqlClient | null {
@@ -375,13 +431,22 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
     try {
       const result = await executePass(sql);
       claimedFull = result.claimed >= effectiveMaxPerPass;
+      if (result.budgetExceeded && !budgetWarned) {
+        budgetWarned = true;
+        logger?.warn?.(
+          "daily embed token budget reached; pausing new OpenAI embeds until the UTC day rolls over",
+          { dailyTokenBudget: options.dailyTokenBudget },
+        );
+      } else if (!result.budgetExceeded) {
+        budgetWarned = false;
+      }
       if (result.written > 0 || result.failedIds.length > 0) logger?.info?.("embed pass", { ...result });
     } catch (err) {
       // An EmbedAccountError (quota/auth) aborts the pass: nothing in it can
       // succeed, so we stop and retry on the next signal (e.g. after the
       // operator funds the account). Any other error is logged the same way.
       logger?.error("embed pass failed", {
-        error: err instanceof Error ? err.message : String(err),
+        error: sanitizeDbError(err),
         account: err instanceof EmbedAccountError,
       });
     }

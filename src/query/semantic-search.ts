@@ -18,6 +18,7 @@ import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
 import { hxEmbeddings } from "../host/postgres/schema/embeddings";
 import { EmbedAccountError, type Embedder } from "../modules/embed-worker/openai";
+import { scrubSecrets } from "../modules/embed-worker/scrub";
 import { scopePredicate, type FortressScope } from "./scope";
 
 export interface SemanticSearchInput {
@@ -97,7 +98,9 @@ export async function hxSemanticSearch(
 
   let queryVec: number[] | null | undefined;
   try {
-    [queryVec] = await embedder.embed([queryText]);
+    // The query text is third-party egress just like an indexed turn — scrub any
+    // secret/PII shapes out of it before it leaves the fortress for OpenAI (H-7).
+    [queryVec] = await embedder.embed([scrubSecrets(queryText)]);
   } catch (err) {
     // An account-level error (unfunded / invalid key) is a CREDENTIAL problem —
     // name it so the operator/user knows to fix the key; anything else is transient.

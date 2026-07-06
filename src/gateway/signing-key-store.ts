@@ -17,7 +17,7 @@ export class FileSigningKeyStore {
   }
 
   async save(publicKeyB64url: string): Promise<void> {
-    await mkdir(path.dirname(this.keyPath), { recursive: true });
+    await mkdir(path.dirname(this.keyPath), { recursive: true, mode: 0o700 });
     const tmp = `${this.keyPath}.${process.pid}.tmp`;
     await writeFile(tmp, publicKeyB64url, { mode: 0o600 });
     await chmod(tmp, 0o600);
