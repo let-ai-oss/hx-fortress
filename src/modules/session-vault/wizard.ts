@@ -25,7 +25,10 @@ import {
   type S3Credentials,
 } from "./credentials.js";
 import { buildStore } from "./store.js";
+import { acquireEnrollmentKey } from "./acquire-key.js";
 import { FileCredentialStore, FilePendingEnrollmentStore } from "../../cloud/credentials.js";
+import { startFortress } from "../../cli-lifecycle.js";
+import { getServiceManager } from "../../service/index.js";
 import {
   assertGatewayPublicUrl,
   DEFAULT_GATEWAY_PUBLIC_URL,
@@ -44,6 +47,18 @@ export interface WizardOpts {
   log: Log;
   /** Override the Fortress root directory (default: ~/.let/fortress). */
   fortressRoot?: string;
+}
+
+/**
+ * Entry-point opts for {@link runEnrollWizard}: the token is optional here
+ * because the wizard acquires it up front when it's absent. Every downstream
+ * step still receives a resolved {@link WizardOpts} with a concrete token.
+ */
+export type WizardEntryOpts = Omit<WizardOpts, "token"> & { token?: string };
+
+/** Injectable seam for tests — defaults to the real key-acquisition flow. */
+export interface EnrollWizardDeps {
+  acquireKey?: typeof acquireEnrollmentKey;
 }
 
 export function resolveGatewayPublicUrlInput(input: string): string {
@@ -75,28 +90,50 @@ export async function maybeKeepExistingVaultConfig(
   return true;
 }
 
-export async function runEnrollWizard(opts: WizardOpts): Promise<void> {
+export async function runEnrollWizard(
+  opts: WizardEntryOpts,
+  deps: EnrollWizardDeps = {},
+): Promise<void> {
   const { log } = opts;
+  const acquireKey = deps.acquireKey ?? acquireEnrollmentKey;
   log("");
   log("let.ai · Session Vault installer");
   log("Transcripts rest in the organization's own bucket, under its own keys; the");
   log("storage credentials never leave this host.");
   log("");
 
-  if (await maybeKeepExistingVaultConfig(opts)) return;
+  // Already-enrolled guard: a re-run with no explicit token must not clobber a
+  // live install (nor prompt for a fresh key). An explicit token means the
+  // operator deliberately wants to re-enroll, so we skip the guard.
+  if (!opts.token) {
+    const paths = fortressPaths(opts.fortressRoot);
+    const existing = await new FileCredentialStore(paths.credentials).load().catch(() => null);
+    if (existing) {
+      log("This host is already enrolled. Start it with:  hx-fortress start");
+      log("(To re-enroll, pass an explicit token to `hx-fortress enroll`.)");
+      return;
+    }
+  }
+
+  // Acquire the enrollment key up front so auth failures surface before any
+  // storage configuration work.
+  const token = opts.token ?? (await acquireKey({ cloudUrl: opts.cloudUrl, log }));
+  const resolved: WizardOpts = { ...opts, token };
+
+  if (await maybeKeepExistingVaultConfig(resolved)) return;
 
   // MC-2382: hx uploads relay over the reverse tunnel, so the fortress needs no
   // public URL — we no longer ask for one. The gateway URL stays at its
   // local-only default; operators wanting the dormant fortress-direct path set
   // FORTRESS_PUBLIC_URL instead (see resolveGatewayConfig).
-  await ensureGatewayConfig(opts);
+  await ensureGatewayConfig(resolved);
 
   const store = await selectPrompt<"gcs" | "s3">("Storage backend for session transcripts:", [
     { label: "Google Cloud Storage", value: "gcs" },
     { label: "Amazon S3", value: "s3" },
   ]);
-  if (store === "gcs") return enrollGcs(opts);
-  return enrollS3(opts);
+  if (store === "gcs") return enrollGcs(resolved);
+  return enrollS3(resolved);
 }
 
 async function enrollGcs(opts: WizardOpts): Promise<void> {
@@ -301,7 +338,16 @@ async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: 
 
   log("");
   log(`Session Vault credentials saved. Transcripts will rest in ${current.bucket}.`);
-  log("Start Fortress to activate:  hx-fortress start");
+  if (await confirmPrompt("Start hx-fortress now? (Y/n)", { default: true })) {
+    await startFortress({
+      manager: getServiceManager(),
+      executablePath: process.execPath,
+      paths: fortressPaths(opts.fortressRoot),
+      writeLine: log,
+    });
+  } else {
+    log("Start Fortress when ready:  hx-fortress start");
+  }
 }
 
 async function pasteKeyOrDefer(ctx: TemplateContext, opts: WizardOpts): Promise<void> {

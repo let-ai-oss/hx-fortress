@@ -10,7 +10,7 @@ import { runFortressHost } from "./host/main";
 import { fortressPaths } from "./host/paths";
 import {
   runEnrollWizard,
-  type WizardOpts,
+  type WizardEntryOpts,
 } from "./modules/session-vault/wizard";
 import { ProgressBar } from "./progress";
 import { FileStatusReader } from "./status-reader";
@@ -25,7 +25,7 @@ import {
 } from "./update";
 
 type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
-type RunEnrollWizard = (options: WizardOpts) => Promise<void>;
+type RunEnrollWizard = (options: WizardEntryOpts) => Promise<void>;
 type RunTui = () => Promise<number>;
 type RunUpdate = (opts: { downloadBaseUrl: string; binPath?: string; log?: (msg: string) => void; onProgress?: (ev: UpdateProgress) => void }) => Promise<UpdateResult>;
 
@@ -53,11 +53,12 @@ export async function runCli(
       case undefined:
         return await (dependencies.runTui ?? runFortressTui)();
       case "enroll": {
-        const token = args[1];
         const cloudIdx = args.indexOf("--cloud");
         const cloudUrl = cloudIdx >= 0 ? args[cloudIdx + 1] : undefined;
-        if (!token || token.startsWith("--") || !cloudUrl) {
-          throw new Error("usage: hx-fortress enroll <token> --cloud <url>");
+        const maybeToken = args[1];
+        const token = maybeToken && !maybeToken.startsWith("--") ? maybeToken : undefined;
+        if (!cloudUrl) {
+          throw new Error("usage: hx-fortress enroll [token] --cloud <url>");
         }
         await (dependencies.runEnrollWizard ?? runEnrollWizard)({
           token,
