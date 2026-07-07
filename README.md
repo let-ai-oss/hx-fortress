@@ -39,9 +39,12 @@ git clone https://github.com/let-ai-oss/hx-fortress && cd hx-fortress
 
 The script installs dependencies, builds `hx-fortress`, installs it to
 `~/.let/bin/hx-fortress` (ad-hoc code-signed on macOS), and hands off to the
-interactive enroll wizard. Bun users can equivalently run
-`bun run install:enroll`. Pass a token and/or `--cloud <url>` explicitly if
-you already have them: `./install-from-source.sh <token> --cloud <cloud-url>`.
+interactive enroll wizard. Once credentials are verified, the wizard asks
+"Start hx-fortress now?" — accept to have it register as a service and start
+immediately, or decline and run `hx-fortress start` yourself later. Bun users
+can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
+<url>` explicitly if you already have them: `./install-from-source.sh <token>
+--cloud <cloud-url>`.
 
 ## Commands
 
