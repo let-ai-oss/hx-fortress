@@ -25,21 +25,23 @@ curl -fsSL https://<workbench-origin>/install/hx-fortress.sh | sh
 If you'd rather build the binary yourself instead of downloading a prebuilt
 one, clone this repo and run the from-source installer. It reaches the same
 running, enrolled Fortress as the `curl … | sh` path above — it just compiles
-the binary locally with [Bun](https://bun.sh) first.
+the binary locally with [Bun](https://bun.sh) first (installed automatically
+if missing).
 
-Prerequisite: Bun. Get the one-time `<token>` and the `<cloud-url>` from your
-let.ai Workbench (Org Settings → self-hosted vault), exactly as for the binary
-installer.
+Both parameters are optional: the `--cloud` URL defaults to beta (current
+prod), and if you omit the enrollment token the wizard walks you through
+acquiring one (via browser or paste) once the build finishes.
 
 ```sh
 git clone https://github.com/let-ai-oss/hx-fortress && cd hx-fortress
-./scripts/install-from-source.sh <token> --cloud <cloud-url>
+./install-from-source.sh
 ```
 
 The script installs dependencies, builds `hx-fortress`, installs it to
 `~/.let/bin/hx-fortress` (ad-hoc code-signed on macOS), and hands off to the
 interactive enroll wizard. Bun users can equivalently run
-`bun run install:enroll <token> --cloud <cloud-url>`.
+`bun run install:enroll`. Pass a token and/or `--cloud <url>` explicitly if
+you already have them: `./install-from-source.sh <token> --cloud <cloud-url>`.
 
 ## Commands
 
