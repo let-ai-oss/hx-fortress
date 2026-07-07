@@ -1,6 +1,6 @@
 {
   "name": "hx-fortress",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -27,14 +27,11 @@
     "typescript": "6.0.3",
     "typescript-eslint": "8.61.0"
   },
-  "trustedDependencies": [
-    "@let-ai/hx-protocol"
-  ],
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1068.0",
     "@aws-sdk/s3-request-presigner": "^3.1068.0",
     "@google-cloud/storage": "^7.21.0",
-    "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#9d9861b6bb5c30f0f2cd8359703a52f58a7a7d1e",
+    "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#7d0665497b36297f7699acc95f5a2b466d8ec8a0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.3"

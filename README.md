@@ -85,11 +85,15 @@ re-`hello` with the saved credential instead of re-enrolling).
 | `FORTRESS_S3_SESSION_TOKEN` | no (s3) | S3 session token. |
 | `FORTRESS_S3_ENDPOINT` | no (s3) | S3-compatible endpoint (MinIO, R2, …). |
 | `FORTRESS_S3_FORCE_PATH_STYLE` | no (s3) | `true` for path-style addressing. |
+| `FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT` | no (s3) | Allow a plaintext / private-range `FORTRESS_S3_ENDPOINT` (e.g. MinIO on an internal network); off ⇒ https + public-range required (SSRF guard). |
+| `FORTRESS_S3_ENDPOINT_ALLOWLIST` | no (s3) | Comma-separated host allowlist for `FORTRESS_S3_ENDPOINT`; when set, only these hosts are permitted. |
 | `FORTRESS_DATABASE_URL` | no | Connect to an external Postgres instead of the embedded one. When set, the bundled Postgres is not downloaded or supervised. |
 | `FORTRESS_PG_VERSION` | no | Embedded Postgres version to acquire (default pinned in code). |
 | `FORTRESS_PG_BINARIES_URL` | no | Base URL for Postgres binary archives (default Maven Central); point at a mirror for air-gapped installs. |
 | `FORTRESS_PG_DATA` | no | Data directory for the embedded cluster (default `$FORTRESS_ROOT/pgdata`). |
 | `FORTRESS_PG_PORT` | no | Loopback port for the embedded server (default `54329`). Bound to `127.0.0.1` only. |
+| `FORTRESS_PG_REQUIRE_PINNED` | no | Refuse a Postgres binary with no baked-in pinned SHA-256 (strict supply-chain mode). |
+| `FORTRESS_PG_ALLOW_UNPINNED` | no | Escape hatch that re-permits the network `.sha256` fallback even under require-pinned. |
 
 `FORTRESS_ENROLL_TOKEN` + `FORTRESS_CLOUD_URL` are consumed only on the first
 boot of a fresh volume; once a credential is saved they are ignored. Storage
@@ -118,6 +122,8 @@ tool likewise degrades to keyword. Resolved in `resolveEmbedConfig`
 | `FORTRESS_EMBED_MAX_PER_PASS` | `500` | Maximum turns embedded per worker pass. |
 | `FORTRESS_EMBED_DEBOUNCE_MS` | `5000` | Debounce (ms) after a commit before an embed pass fires. |
 | `FORTRESS_EMBED_MAX_WAIT_MS` | `1800000` | Max-wait cap (ms; 30 min) — embed any turn that has waited at least this long regardless of later chunks. |
+| `FORTRESS_EMBED_DAILY_TOKEN_BUDGET` | `5000000` | Daily OpenAI embed-token ceiling, keyed on the UTC day; `0` ⇒ unlimited. New embeds pause for the day once crossed. |
+| `FORTRESS_MAX_QUERY_TEXT_CHARS` | `8000` | Max `hx_semantic_search` query length before it is trimmed (scrub + egress DoS guard). |
 
 The vector column and its index require a pgvector-enabled Postgres; point the
 fortress at one via `FORTRESS_DATABASE_URL` (the bundled embedded Postgres is
@@ -128,6 +134,21 @@ indexes are skipped and `hx_semantic_search` degrades to keyword.
 route, which is **off by default**. Set `FORTRESS_PUBLIC_URL` to enable the
 gateway and advertise the public address an MCP client connects to; without it
 the fortress advertises no public URL and the MCP data plane is unavailable.
+
+### Security & hardening
+
+Boolean knobs read the truthy spellings `1` / `true` / `yes` / `on`
+(case-insensitive); everything else is off. These default to the conservative
+setting — flip them deliberately.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FORTRESS_GRANT_ENFORCE` | off | REQUIRE a capability grant on the HTTP gateway + `/mcp` (verify-if-present when off). Coordinated-rollout lever — flip together with the workbench's `HX_FORTRESS_SEND_GRANTS`. |
+| `FORTRESS_TUNNEL_GRANT_ENFORCE` | off | The reverse-tunnel equivalent (vault RPC + tunnel MCP). Same coordinated-rollout lever as `HX_FORTRESS_SEND_GRANTS`. |
+| `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose cloud origin differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored). |
+| `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a cloud tunnel frame larger than this (bytes) before parsing — pre-auth DoS guard (32 MiB). |
+| `FORTRESS_MAX_CANONICAL_BYTES` | `67108864` | Reject a whole-object session read above this size (bytes) — OOM guard (64 MiB). |
+| `FORTRESS_SIGNING_KEY` / `FORTRESS_SIGNING_KEYID` | — (CI only) | base64url private Ed25519 JWK + its keyid used by `scripts/sign-artifact.ts` to sign release artifacts; the keyid must match a baked trust anchor. |
 
 ### Embedded Postgres
 

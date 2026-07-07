@@ -10,6 +10,7 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  resolveEmbedConfig,
 } from "../src/host/config";
 import { fortressPaths } from "../src/host/paths";
 
@@ -135,6 +136,48 @@ describe("Fortress config", () => {
     await expect(new FileConfigStore(fortressPaths(root)).load()).rejects.toThrow(
       `Invalid Fortress config: ${reason}`,
     );
+  });
+
+  // H-3 · cleartext ws: is tolerated ONLY to a loopback hub (local dev); any
+  // network-reachable host must be wss: so the enroll token / credential / vault
+  // RPC never crosses the wire in the clear.
+  test("accepts cleartext ws: to a loopback hub", async () => {
+    await writeConfig({
+      schemaVersion: 1,
+      cloud: { url: "ws://localhost:8787" },
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: ["session_vault"] },
+    });
+
+    await expect(new FileConfigStore(fortressPaths(root)).load()).resolves.toMatchObject({
+      cloud: { url: "ws://localhost:8787" },
+    });
+  });
+
+  test("rejects cleartext ws: to a non-loopback host", async () => {
+    await writeConfig({
+      schemaVersion: 1,
+      cloud: { url: "ws://evil.example" },
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: ["session_vault"] },
+    });
+
+    await expect(new FileConfigStore(fortressPaths(root)).load()).rejects.toThrow(
+      "cloud.url must use wss: (cleartext ws: is only allowed to a loopback hub)",
+    );
+  });
+
+  test("accepts wss: to any host", async () => {
+    await writeConfig({
+      schemaVersion: 1,
+      cloud: { url: "wss://hub.let.ai/tunnel" },
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: ["session_vault"] },
+    });
+
+    await expect(new FileConfigStore(fortressPaths(root)).load()).resolves.toMatchObject({
+      cloud: { url: "wss://hub.let.ai/tunnel" },
+    });
   });
 
   async function writeConfig(value: unknown): Promise<void> {
@@ -401,5 +444,36 @@ describe("ensureCoreModulesEnabled", () => {
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored.modules.enabled).toContain("session_vault");
+  });
+});
+
+describe("resolveEmbedConfig — OpenAI base URL (M-5)", () => {
+  const KEY = { FORTRESS_OPENAI_API_KEY: "sk-test-key" };
+
+  test("defaults to the public https endpoint", () => {
+    expect(resolveEmbedConfig({ ...KEY }).baseUrl).toBe("https://api.openai.com/v1");
+  });
+
+  test("accepts an https override and strips a trailing slash", () => {
+    const cfg = resolveEmbedConfig({ ...KEY, FORTRESS_OPENAI_BASE_URL: "https://zdr.example/v1/" });
+    expect(cfg.baseUrl).toBe("https://zdr.example/v1");
+  });
+
+  test("rejects a plaintext http base URL", () => {
+    expect(() => resolveEmbedConfig({ ...KEY, FORTRESS_OPENAI_BASE_URL: "http://zdr.example/v1" })).toThrow(
+      "FORTRESS_OPENAI_BASE_URL must use https:",
+    );
+  });
+
+  test("rejects a malformed base URL", () => {
+    expect(() => resolveEmbedConfig({ ...KEY, FORTRESS_OPENAI_BASE_URL: "not a url" })).toThrow(
+      "FORTRESS_OPENAI_BASE_URL must be a valid URL",
+    );
+  });
+
+  test("caps the daily token budget knob and admits 0 (unlimited)", () => {
+    expect(resolveEmbedConfig({ ...KEY }).dailyTokenBudget).toBe(5_000_000);
+    expect(resolveEmbedConfig({ ...KEY, FORTRESS_EMBED_DAILY_TOKEN_BUDGET: "0" }).dailyTokenBudget).toBe(0);
+    expect(resolveEmbedConfig({ ...KEY, FORTRESS_EMBED_DAILY_TOKEN_BUDGET: "-5" }).dailyTokenBudget).toBe(5_000_000);
   });
 });

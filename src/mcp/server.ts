@@ -14,9 +14,14 @@
 // Auth is the org Ed25519 capability token, enforced by the gateway BEFORE this
 // handler runs (a missing/invalid token never reaches here — it gets a 401).
 
-import { MCP_TOOLS, type McpToolContext } from "./tools";
+import { sanitizeDbError } from "../host/postgres/sanitize";
+import { isGrantEnforcing } from "../gateway/capability-token";
+import { checkScopeGrant, MCP_TOOLS, type McpToolContext } from "./tools";
 
 const PROTOCOL_FALLBACK = "2025-06-18";
+
+// M-9b · maximum messages in one JSON-RPC batch (DoS ceiling).
+const MAX_BATCH_SIZE = 50;
 
 export interface McpServeDeps extends McpToolContext {
   version: string;
@@ -76,17 +81,23 @@ async function dispatch(msg: JsonRpcMessage, deps: McpServeDeps): Promise<object
       const params = (msg.params ?? {}) as { name?: string; arguments?: unknown };
       const tool = MCP_TOOLS.find((t) => t.name === params.name);
       if (!tool) return rpcError(id, -32602, `Unknown tool: ${String(params.name)}`);
+      // A5 · H-4 · a read grant (when present) must commit to exactly this call's
+      // scope; under FORTRESS_GRANT_ENFORCE a call with no grant is denied.
+      const gate = checkScopeGrant(params.arguments ?? {}, deps.grant, isGrantEnforcing());
+      if (gate) return result(id, gate);
       try {
         const out = await tool.handle(params.arguments ?? {}, {
           db: deps.db,
           store: deps.store,
           embedder: deps.embedder ?? null,
+          grant: deps.grant,
         });
         return result(id, out);
       } catch (e) {
         // Tool execution faults surface as an isError tool result (not a
-        // protocol error) so the agent can read the reason and adapt.
-        const message = e instanceof Error ? e.message : String(e);
+        // protocol error) so the agent can read the reason and adapt. The detail
+        // crosses to the agent, so redact any DSN a DB error might have echoed.
+        const message = sanitizeDbError(e);
         return result(id, {
           content: [{ type: "text", text: JSON.stringify({ error: "tool_failed", detail: message }) }],
           isError: true,
@@ -122,6 +133,10 @@ export async function handleMcpRequest(req: Request, deps: McpServeDeps): Promis
   }
 
   const batch = Array.isArray(body);
+  // M-9b · bound a JSON-RPC batch so a single request can't fan out unboundedly.
+  if (batch && (body as unknown[]).length > MAX_BATCH_SIZE) {
+    return jsonResponse(rpcError(null, -32600, "batch too large"), 200);
+  }
   const messages = (batch ? body : [body]) as JsonRpcMessage[];
   const responses: object[] = [];
   for (const m of messages) {

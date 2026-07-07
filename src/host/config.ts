@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { assertModuleId, type fortressPaths } from "./paths";
@@ -95,6 +95,12 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
     if (typeof field !== "string") throw new Error(`postgres.${key} must be a string`);
     result[key] = field;
   }
+  // Artifact download bases must be https (or loopback http for local dev): a
+  // cleartext, non-loopback binaries/pgvector origin is a MITM foothold for the
+  // native code we then load. externalUrl is a DB DSN, not a download base, so
+  // it is not subject to this check.
+  if (result.binariesUrl) assertHttpsDownloadUrl(result.binariesUrl, "postgres.binariesUrl");
+  if (result.pgvectorUrl) assertHttpsDownloadUrl(result.pgvectorUrl, "postgres.pgvectorUrl");
   if (typeof value.port !== "undefined") {
     if (typeof value.port !== "number" || !Number.isInteger(value.port)) {
       throw new Error("postgres.port must be an integer");
@@ -102,6 +108,31 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
     result.port = value.port;
   }
   return result;
+}
+
+/** A loopback host literal (no DNS resolution). Cleartext ws:/http: is only
+ *  tolerable to one of these — anything else is a network-reachable cleartext
+ *  hub / download origin. */
+export function isLoopbackHost(h: string): boolean {
+  const host = h.replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+/** Validate an artifact download base (M-12): https everywhere, with cleartext
+ *  http tolerated ONLY for a loopback host (local dev). A plaintext, remotely
+ *  reachable origin for native binaries we execute/dlopen is rejected
+ *  fail-closed. Shared by config parsing (persisted), resolve.ts (env-sourced),
+ *  and the self-updater's cloud-URL derivation. */
+export function assertHttpsDownloadUrl(value: string, field: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${field} must be a valid URL`);
+  }
+  if (url.protocol === "https:") return;
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return;
+  throw new Error(`${field} must use https: (cleartext http: is only allowed to a loopback host)`);
 }
 
 function assertCloudUrl(value: string): void {
@@ -113,6 +144,12 @@ function assertCloudUrl(value: string): void {
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") {
     throw new Error("cloud.url must use ws: or wss:");
+  }
+  // Cleartext ws: to a non-loopback host would carry the enroll token, the saved
+  // credential, and every tunneled vault RPC in the clear. Permit it only to a
+  // loopback hub (local dev); every real hub must be wss:.
+  if (url.protocol === "ws:" && !isLoopbackHost(url.hostname)) {
+    throw new Error("cloud.url must use wss: (cleartext ws: is only allowed to a loopback hub)");
   }
 }
 
@@ -181,11 +218,42 @@ export interface EmbedConfig {
   maxPerPass: number;
   debounceMs: number;
   maxWaitMs: number;
+  /** M-9e durable daily OpenAI token budget. 0 ⇒ unlimited (no accounting). */
+  dailyTokenBudget: number;
 }
 
 function intEnv(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/** Like intEnv but admits 0 (used where 0 is a meaningful "unlimited" sentinel);
+ *  a negative or non-numeric value still falls back. */
+function intEnvAllowingZero(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+/** M-5 · resolve + validate the OpenAI embeddings base URL. Embeddings are
+ *  third-party egress of conversational text, so the endpoint must be https
+ *  (the default already is); a plaintext or malformed override is rejected
+ *  fail-closed rather than silently downgrading the egress. Trailing slash is
+ *  stripped so `${base}/embeddings` never doubles up. */
+function resolveOpenAiBaseUrl(value: string | undefined): string {
+  const raw = value?.trim();
+  if (!raw) return DEFAULT_OPENAI_BASE_URL;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("FORTRESS_OPENAI_BASE_URL must be a valid URL");
+  }
+  if (url.protocol !== "https:") {
+    throw new Error("FORTRESS_OPENAI_BASE_URL must use https:");
+  }
+  return raw.replace(/\/+$/, "");
 }
 
 // hx.embeddings.embedding is vector(HX_EMBEDDING_DIM = 1024). text-embedding-3-large
@@ -218,13 +286,14 @@ export function resolveEmbedConfig(
     apiKey,
     model: env.FORTRESS_EMBED_MODEL?.trim() || "text-embedding-3-large",
     dimensions: resolveEmbedDimensions(env.FORTRESS_EMBED_DIMENSIONS),
-    baseUrl: env.FORTRESS_OPENAI_BASE_URL?.trim() || "https://api.openai.com/v1",
+    baseUrl: resolveOpenAiBaseUrl(env.FORTRESS_OPENAI_BASE_URL),
     dbMax: intEnv(env.FORTRESS_EMBED_DB_MAX, 4),
     concurrency: intEnv(env.FORTRESS_EMBED_CONCURRENCY, 2),
     batchSize: intEnv(env.FORTRESS_EMBED_BATCH, 96),
     maxPerPass: intEnv(env.FORTRESS_EMBED_MAX_PER_PASS, 500),
     debounceMs: intEnv(env.FORTRESS_EMBED_DEBOUNCE_MS, 5_000),
     maxWaitMs: intEnv(env.FORTRESS_EMBED_MAX_WAIT_MS, 30 * 60_000),
+    dailyTokenBudget: intEnvAllowingZero(env.FORTRESS_EMBED_DAILY_TOKEN_BUDGET, 5_000_000),
   };
 }
 
@@ -305,7 +374,7 @@ export async function ensureDefaultConfig(
     modules: { enabled: [...CORE_MODULE_IDS] },
   };
 
-  await mkdir(path.dirname(paths.config), { recursive: true });
+  await mkdir(path.dirname(paths.config), { recursive: true, mode: 0o700 });
   await writeConfig(paths, config);
 }
 
@@ -332,8 +401,12 @@ export async function ensureEnrollmentConfig(
 }
 
 async function writeConfig(paths: FortressPaths, config: FortressConfig): Promise<void> {
-  await mkdir(path.dirname(paths.config), { recursive: true });
+  // config.json holds the enrolled cloud origin; keep its directory owner-only
+  // (0700) and the file owner-only (0600) — belt-and-suspenders chmod after write
+  // because the writeFile mode is still masked by the process umask.
+  await mkdir(path.dirname(paths.config), { recursive: true, mode: 0o700 });
   const tmp = `${paths.config}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`);
+  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await chmod(tmp, 0o600).catch(() => {});
   await rename(tmp, paths.config);
 }

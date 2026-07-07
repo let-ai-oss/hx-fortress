@@ -39,6 +39,11 @@ export interface FortressScope {
   ownerGate?: { activeMemberExternalIds: string[] };
 }
 
+// M-9d · cap on the enumerated in-scope identities. Truncation only NARROWS the
+// match set, so it is fail-closed-safe — an oversized scope is almost certainly
+// abusive (or a bug) rather than a legitimate 10k-session consent.
+const MAX_SCOPE_IDENTITIES = 10_000;
+
 function asString(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
@@ -60,12 +65,28 @@ export function parseScope(raw: unknown): FortressScope {
       identities.push({ userExternalId, family, sessionId });
     }
   }
+  if (identities.length > MAX_SCOPE_IDENTITIES) {
+    console.warn(
+      `parseScope: truncating ${identities.length} scope identities to ${MAX_SCOPE_IDENTITIES}`,
+    );
+    identities.length = MAX_SCOPE_IDENTITIES;
+  }
   let ownerGate: FortressScope["ownerGate"];
   if (obj.ownerGate && typeof obj.ownerGate === "object") {
     const g = obj.ownerGate as Record<string, unknown>;
     const members = Array.isArray(g.activeMemberExternalIds)
       ? g.activeMemberExternalIds.filter((m): m is string => typeof m === "string")
       : [];
+    // M-9d · cap the owner-gate member list symmetric with MAX_SCOPE_IDENTITIES.
+    // The gate is AND-narrowing (a session is admitted only if its owner is in the
+    // set), so truncating it only NARROWS the match set — fail-closed-safe, and an
+    // oversized gate is abusive rather than a legitimate 10k-owner consent.
+    if (members.length > MAX_SCOPE_IDENTITIES) {
+      console.warn(
+        `parseScope: truncating ${members.length} owner-gate members to ${MAX_SCOPE_IDENTITIES}`,
+      );
+      members.length = MAX_SCOPE_IDENTITIES;
+    }
     ownerGate = { activeMemberExternalIds: members };
   }
   return ownerGate ? { identities, ownerGate } : { identities };

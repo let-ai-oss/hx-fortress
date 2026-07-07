@@ -22,11 +22,14 @@ async function makeBundle(opts: { withVector?: boolean } = {}): Promise<string> 
   return dir;
 }
 
-// Fetch stub that serves the tar bytes + a matching sha256 sidecar.
+// Fetch stub that serves the tar bytes + a matching sha256 sidecar. The `.sig`
+// sidecar 404s (Release A verify-if-present: no signature published yet), so the
+// real verifier warns and proceeds rather than blocking these tests.
 function serving(tarBytes: Uint8Array<ArrayBuffer>, sha?: string): typeof fetch {
   const digest = sha ?? createHash("sha256").update(tarBytes).digest("hex");
   return (async (url: string | URL) => {
     const u = String(url);
+    if (u.endsWith(".sig")) return new Response("not found", { status: 404 });
     if (u.endsWith(".sha256")) return new Response(`${digest}  artifact\n`);
     return new Response(new Blob([tarBytes]));
   }) as unknown as typeof fetch;
@@ -86,6 +89,37 @@ test("downloads + injects vector into the bundle's own lib/extension dirs", asyn
   const extFiles = await readdir(path.join(dir, "share", "postgresql", "extension"));
   expect(extFiles).toContain("vector.control");
   expect(extFiles).toContain("vector--0.8.0.sql");
+});
+
+test("verifies the downloaded tar signature before extracting", async () => {
+  const dir = await makeBundle();
+  const tar = new Uint8Array([1, 2, 3, 4]);
+  const seen: { bytes?: Uint8Array; url?: string; enforce?: boolean } = {};
+  let verified = false;
+  let extractedAfterVerify = false;
+  const r = await ensurePgvectorInstalled({
+    ...base,
+    versionDir: dir,
+    fetchImpl: serving(tar),
+    // Inject a verify spy: record the bytes/url/enforce it was handed…
+    verify: async (o) => {
+      seen.bytes = o.bytes;
+      seen.url = o.url;
+      seen.enforce = o.enforce;
+      verified = true;
+    },
+    // …and prove verification ran BEFORE any extraction touched the bytes.
+    extractTarGz: async (tarPath, destDir) => {
+      expect(verified).toBe(true);
+      extractedAfterVerify = true;
+      return fakeExtractor("so")(tarPath, destDir);
+    },
+  });
+  expect(r).toBe("installed");
+  expect(seen.bytes).toEqual(tar);
+  expect(seen.url).toContain("pgvector-pg18-linux-amd64.tar.gz");
+  expect(seen.enforce).toBe(false);
+  expect(extractedAfterVerify).toBe(true);
 });
 
 test("throws (mandatory, no silent fallback) when the download fails", async () => {

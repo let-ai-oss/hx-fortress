@@ -18,6 +18,7 @@ function start(storeReady: boolean, pgReady: boolean): GatewayHandle {
     store: () => (storeReady ? fakeStore : null),
     postgresReady: () => pgReady,
     db: () => null,
+    dbRead: () => null,
   });
 }
 

@@ -17,6 +17,7 @@ import sql0007TurnKind from "./0007_turn_kind.sql" with { type: "text" };
 import sql0008SessionFacts from "./0008_session_facts.sql" with { type: "text" };
 import sql0010EmbeddingsIndexes from "./0010_embeddings_indexes.sql" with { type: "text" };
 import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "text" };
+import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -41,4 +42,7 @@ export const migrations: Migration[] = [
   // only runner applies it once pgvector is present and skips it otherwise.
   { name: "0010_embeddings_indexes", sql: sql0010EmbeddingsIndexes, requires: "vector" },
   { name: "0011_widen_session_tokens", sql: sql0011WidenTokens },
+  // Net-new durable daily embed-token budget table (M-9e). NOT gated — the embed
+  // worker reads/increments it to hold a per-day OpenAI spend ceiling.
+  { name: "0012_embed_budget", sql: sql0012EmbedBudget },
 ];

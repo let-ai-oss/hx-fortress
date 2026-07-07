@@ -27,6 +27,12 @@ import {
   FORTRESS_VERSION,
   parseStableSemver,
 } from "./version.js";
+import { assertHttpsDownloadUrl, isLoopbackHost } from "./host/config";
+import { SIGNATURE_ENFORCE, verifyFetchedArtifact } from "./host/trust/verify";
+
+/** Hard ceiling on the decompressed self-update binary — a gzip-bomb guard. Well
+ *  above a real single-file fortress binary, so it never trips on a legit build. */
+const MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024;
 
 export interface UpdateProgress {
   phase: "download" | "unpack" | "verify";
@@ -65,14 +71,32 @@ export interface UpdateResult {
  * The download base is:
  *   `https://{host}{prefix}/_api/hx-gateway/download`
  *
- * Transformation: convert ws(s):// to http(s):// and replace the
- * `/vault-tunnel` suffix with `/download`.
+ * Transformation: convert wss:// to https://; convert ws:// to http:// ONLY for
+ * a loopback host (local dev) and otherwise UPGRADE it to https:// (M-2 no
+ * silent downgrade of a remote origin), then replace the `/vault-tunnel` suffix
+ * with `/download`. The result is asserted https-or-loopback (M-12) so a
+ * tampered cloud URL can't point the self-updater at a cleartext remote origin.
  */
 export function downloadBaseFromCloudUrl(cloudUrl: string): string {
-  const httpUrl = cloudUrl
-    .replace(/^wss:\/\//, "https://")
-    .replace(/^ws:\/\//, "http://");
-  return httpUrl.replace(/\/vault-tunnel$/, "/download");
+  let base: string;
+  try {
+    const url = new URL(cloudUrl);
+    if (url.protocol === "wss:") {
+      url.protocol = "https:";
+    } else if (url.protocol === "ws:") {
+      url.protocol = isLoopbackHost(url.hostname) ? "http:" : "https:";
+    }
+    base = url.toString().replace(/\/vault-tunnel\/?$/, "/download");
+  } catch {
+    // Non-URL input (shouldn't happen post config-validation): fall back to a
+    // conservative string map that never downgrades to cleartext.
+    base = cloudUrl
+      .replace(/^wss:\/\//, "https://")
+      .replace(/^ws:\/\//, "https://")
+      .replace(/\/vault-tunnel$/, "/download");
+  }
+  assertHttpsDownloadUrl(base, "cloud.url download base");
+  return base;
 }
 
 export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult> {
@@ -112,7 +136,11 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
   });
 
   onProgress({ phase: "unpack", pct: 90 });
-  const binBytes = gunzipSync(gzBytes);
+  // Bound the decompressed size BEFORE materializing it: a compromised origin
+  // could serve a gzip bomb that expands to gigabytes and OOMs the updater.
+  // `maxOutputLength` makes gunzipSync throw ERR_BUFFER_TOO_LARGE past the cap
+  // (fail-closed). 512 MiB is orders of magnitude above a real fortress binary.
+  const binBytes = gunzipSync(gzBytes, { maxOutputLength: MAX_DECOMPRESSED_BYTES });
   const shaText = (await fetchBytes(shaUrl)).toString("utf8").trim();
 
   // sha256sum format: "<hex>  <filename>" or bare hex.
@@ -132,6 +160,20 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
   if ((await sha256OfFile(binPath)) === actual) {
     return alreadyLatest(asset, binPath, localVersion, remoteVersion?.raw ?? null);
   }
+
+  // Authenticity gate BEFORE the swap: verify the detached signature over the
+  // DECOMPRESSED binary (the CI signs pre-gzip). The sidecar lives at
+  // `${asset}.sig` (not `.gz.sig`). Verify-if-present in Release A — a present
+  // signature must verify; an absent one warns (non-bricking) until CI signs.
+  await verifyFetchedArtifact({
+    fetchImpl: fetch,
+    url: `${downloadBase}/${asset}`,
+    bytes: binBytes,
+    enforce: SIGNATURE_ENFORCE,
+    // Surface the "proceeding unverified" SECURITY warning (verify-if-present) —
+    // without a log it is silently swallowed on every update.
+    log,
+  });
 
   await mkdir(dirname(binPath), { recursive: true });
   const tmpPath = `${binPath}.new`;

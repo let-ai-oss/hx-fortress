@@ -36,7 +36,7 @@ export class FileCredentialStore implements CredentialStore {
 
   async save(credential: CloudCredential): Promise<void> {
     const value = parseCredential(credential);
-    await mkdir(path.dirname(this.credentialPath), { recursive: true });
+    await mkdir(path.dirname(this.credentialPath), { recursive: true, mode: 0o700 });
     const temporaryPath = `${this.credentialPath}.${process.pid}.tmp`;
     await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
       mode: 0o600,
@@ -105,7 +105,7 @@ export class FilePendingEnrollmentStore {
   }
 
   async save(enrollment: PendingEnrollment): Promise<void> {
-    await mkdir(path.dirname(this.enrollmentPath), { recursive: true });
+    await mkdir(path.dirname(this.enrollmentPath), { recursive: true, mode: 0o700 });
     const tmp = `${this.enrollmentPath}.${process.pid}.tmp`;
     await writeFile(tmp, `${JSON.stringify(enrollment, null, 2)}\n`, { mode: 0o600 });
     await chmod(tmp, 0o600);

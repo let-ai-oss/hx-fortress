@@ -19,6 +19,11 @@ import path from "node:path";
 
 import type { ZonkyClassifier } from "./classifier";
 import { pgvectorArtifactUrl, verifySha256 } from "./pgvector-artifact";
+import {
+  SIGNATURE_ENFORCE,
+  verifyFetchedArtifact,
+  type VerifyFetchedArtifactOptions,
+} from "../trust/verify";
 
 export interface EnsurePgvectorDeps {
   /** ~/.let/fortress/postgres/<version> — the extracted zonky bundle root. */
@@ -34,6 +39,9 @@ export interface EnsurePgvectorDeps {
   /** Run a host command (xattr/codesign). Throws on non-zero. */
   spawn: (cmd: string[]) => Promise<void>;
   log: (msg: string, meta?: Record<string, unknown>) => void;
+  /** Signature-verification seam; defaults to the real verifier. Injectable so
+   *  the inject flow unit-tests without a live `.sig` fetch. */
+  verify?: (opts: VerifyFetchedArtifactOptions) => Promise<void>;
 }
 
 export type EnsurePgvectorResult = "present" | "installed";
@@ -52,9 +60,22 @@ export async function ensurePgvectorInstalled(
     fetchBytes(deps.fetchImpl, url),
     fetchText(deps.fetchImpl, `${url}.sha256`),
   ]);
+  // Same-origin `.sha256` is a cheap integrity pre-check (a corrupt download
+  // fails fast here); authenticity is the detached signature gate below.
   if (!verifySha256(tarBytes, expected)) {
     throw new Error(`pgvector inject: checksum mismatch for ${url}`);
   }
+  // Verify the detached Ed25519 signature over the tarball BEFORE extracting or
+  // codesigning any of its bytes. Verify-if-present in Release A: a present
+  // signature must verify; an absent one warns (non-bricking) until CI signs.
+  const verify = deps.verify ?? verifyFetchedArtifact;
+  await verify({
+    fetchImpl: deps.fetchImpl,
+    url,
+    bytes: tarBytes,
+    enforce: SIGNATURE_ENFORCE,
+    log: (msg, fields) => deps.log(msg, fields),
+  });
 
   const tmp = await mkdtemp(path.join(os.tmpdir(), "pgv-inject-"));
   try {

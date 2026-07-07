@@ -129,6 +129,9 @@ describe.if(!!DSN)("hx-fortress query + MCP slice (A4/A5/A6)", () => {
       store: () => null,
       postgresReady: () => true,
       db: () => db,
+      // The /mcp read tools resolve through dbRead (the RO role in production);
+      // this suite runs a single connection so both point at the same handle.
+      dbRead: () => db,
     });
     url = `http://localhost:${handle.port}/mcp`;
 

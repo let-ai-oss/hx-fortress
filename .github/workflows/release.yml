@@ -1,3 +1,7 @@
+# TODO(prod): SHA-pin every third-party action (`uses: owner/repo@<40-char-sha>`)
+# in this workflow — actions/*, oven-sh/setup-bun, docker/*, peter-evans/* — so a
+# moved tag can't inject a malicious action into a release build (supply-chain).
+# Tags are left in place here because the SHAs can't be resolved offline.
 name: Release
 
 on:
@@ -22,6 +26,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # Build-provenance attestation for the published binaries (supply-chain).
+      id-token: write
+      attestations: write
     outputs:
       version: ${{ steps.version.outputs.value }}
     steps:
@@ -55,6 +62,14 @@ jobs:
 
       - name: Compile darwin/linux binaries
         shell: bash
+        env:
+          # Ed25519 release key (private JWK, base64url-JSON) + its keyid. When
+          # the secret is absent the sign step self-skips (Release A verifies
+          # signatures if present), so releases publish unsigned until the key is
+          # provisioned. TODO(prod): once FORTRESS_SIGNING_KEY is set, drop the
+          # in-step skip so an unsigned release fails the build.
+          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}
+          FORTRESS_SIGNING_KEYID: ${{ vars.FORTRESS_SIGNING_KEYID || 'hxf-dev-2026-07' }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -85,10 +100,26 @@ jobs:
               --outfile "$out_path"
             sha256sum "$out_path" | awk -v name="$out_name" '{print $1"  "name}' \
               > "${out_path}.sha256"
+            # Sign the DECOMPRESSED binary (the runtime verifies the sidecar over
+            # the un-gzipped bytes). Sidecar lands at ${out_path}.sig, which the
+            # gzip below leaves untouched and the release glob then uploads.
+            if [[ -n "${FORTRESS_SIGNING_KEY:-}" ]]; then
+              bun run scripts/sign-artifact.ts "$out_path"
+            else
+              echo "::warning::FORTRESS_SIGNING_KEY not set; ${out_name} published UNSIGNED"
+            fi
             gzip -9 -f "$out_path"
             ls -la "${out_path}.gz" "${out_path}.sha256"
             echo "::endgroup::"
           done
+
+      # Cryptographic build-provenance for the compiled binaries (who/what/where
+      # built them), independent of the Ed25519 artifact signature above.
+      # TODO(prod): pin @<sha>.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/hx-fortress-*.gz"
 
       - name: Publish rolling release
         env:
@@ -220,6 +251,14 @@ jobs:
       # every fortress = bump this ref (and re-run the release).
       PGVECTOR_REF: "v0.8.4"
     steps:
+      # Checkout + Bun are needed to run scripts/sign-artifact.ts over the built
+      # tarball (this job otherwise neither checks out the repo nor installs Bun).
+      # TODO(prod): pin @<sha>.
+      - uses: actions/checkout@v4
+      # TODO(prod): pin @<sha>.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
       # pgvector only changes when PGVECTOR_REF / PG_MAJOR change, but the
       # release runs on every push to main. Cache the built artifact keyed on
       # (ref × pg-major × classifier) so a build only happens when the ref bumps;
@@ -270,6 +309,22 @@ jobs:
              "pkg/${out}/share/extension/"
           tar -C "pkg/${out}" -czf "pkgout/${out}.tar.gz" .
           shasum -a 256 "pkgout/${out}.tar.gz" | awk '{print $1}' > "pkgout/${out}.tar.gz.sha256"
+      # Sign the tarball (runs on cache hit too, so a restored artifact still gets
+      # a fresh sidecar). Non-bricking: self-skips when the key secret is absent.
+      - name: Sign pgvector artifact
+        shell: bash
+        env:
+          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}
+          FORTRESS_SIGNING_KEYID: ${{ vars.FORTRESS_SIGNING_KEYID || 'hxf-dev-2026-07' }}
+        run: |
+          set -euo pipefail
+          out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          if [[ -z "${FORTRESS_SIGNING_KEY:-}" ]]; then
+            echo "::warning::FORTRESS_SIGNING_KEY not set; ${out} published UNSIGNED"
+            exit 0
+          fi
+          bun install --frozen-lockfile
+          bun run scripts/sign-artifact.ts "pkgout/${out}.tar.gz"
       - name: Attach to the fortress release(s)
         shell: bash
         env:
@@ -282,14 +337,16 @@ jobs:
         run: |
           set -euo pipefail
           out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          # Upload the tarball + its sha256, plus the .sig sidecar when signing
+          # produced one (absent on an unsigned build — non-bricking).
+          files=( "pkgout/${out}.tar.gz" "pkgout/${out}.tar.gz.sha256" )
+          [[ -f "pkgout/${out}.tar.gz.sig" ]] && files+=( "pkgout/${out}.tar.gz.sig" )
           # The rolling build release is recreated on every release run, so the
           # artifact always (re)lands there — even on a cache hit (dev installs
           # pull builds/*).
-          gh release upload "builds/hx-fortress-${VERSION}" \
-            "pkgout/${out}.tar.gz" "pkgout/${out}.tar.gz.sha256" --clobber
+          gh release upload "builds/hx-fortress-${VERSION}" "${files[@]}" --clobber
           # The immutable release only exists on a manual dispatch; deployed
           # fortresses pull releases/*, so attach there too when it exists.
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            gh release upload "releases/hx-fortress-${VERSION}" \
-              "pkgout/${out}.tar.gz" "pkgout/${out}.tar.gz.sha256" --clobber
+            gh release upload "releases/hx-fortress-${VERSION}" "${files[@]}" --clobber
           fi

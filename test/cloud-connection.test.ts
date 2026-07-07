@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { SUPPORTED_PROTOCOL_VERSION, WsCloudConnection } from "../src/cloud/connection";
+import { verifyGrant, type GrantClaims } from "../src/gateway/capability-token";
 import type { CloudCredential } from "../src/cloud/credentials";
 import type { FortressConfig, HostLogger, MessageDispatcher } from "../src/host/types";
 import type { MsgData, MsgReply } from "../src/protocol";
@@ -56,6 +58,39 @@ function echoDispatcher(): MessageDispatcher {
 
 function noopDispatcher(): MessageDispatcher {
   return { async dispatch(): Promise<undefined> { return undefined; } };
+}
+
+/** Captures the authz the connection threads alongside the vault RPC payload. */
+function capturingDispatcher(sink: { authz?: unknown }): MessageDispatcher {
+  return {
+    async dispatch(data: MsgData): Promise<MsgReply> {
+      sink.authz = (data as { authz?: unknown }).authz;
+      return { ok: true, payload: { echoed: data.payload } };
+    },
+  };
+}
+
+// Mint a REAL own-object vault-RPC read grant (v2, sub-bound, NO scopeHash — the
+// actual on-wire shape) and return a verifyGrant closure over the matching key +
+// org, so the test exercises the ACTUAL verifier contract instead of a canned stub
+// that hides the no-scopeHash case (which the old GRANT_STUB masked with `"H"`).
+async function realReadGrant(sub: string, org = "o"): Promise<{
+  token: string;
+  verify: (token: string, opts: { purpose: "ingest" | "read"; requireScope?: boolean }) => Promise<GrantClaims>;
+}> {
+  const { publicKey, privateKey } = await generateKeyPair("EdDSA", { extractable: true });
+  const rawB64url = (await exportJWK(publicKey)).x as string;
+  const token = await new SignJWT({ v: 2, purpose: "read", org, aud: org, sub })
+    .setProtectedHeader({ alg: "EdDSA" })
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(privateKey);
+  return {
+    token,
+    // Forward the caller's opts (connection.ts passes requireScope:false for the
+    // own-object vault-RPC path) straight to the real verifier.
+    verify: (t, opts) => verifyGrant(t, rawB64url, org, opts),
+  };
 }
 
 describe("WsCloudConnection", () => {
@@ -378,5 +413,116 @@ describe("WsCloudConnection", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, TEST_TIMING.heartbeatMs * 2));
     const countAfter = hub.received().filter((f) => f.t === "heartbeat").length;
     expect(countAfter).toBe(countBefore);
+  });
+
+  // H-4 · the reverse-tunnel vault RPC grant path.
+  describe("vault RPC grant (H-4)", () => {
+    const cred: CloudCredential = { orgId: "o", fortressId: "f", credential: "c" };
+
+    test("verifies a REAL own-object read grant (no scopeHash) and threads its sub to the dispatcher", async () => {
+      const sink: { authz?: unknown } = {};
+      const { token, verify } = await realReadGrant("user_1");
+      const conn = new WsCloudConnection({
+        dispatcher: capturingDispatcher(sink),
+        credentialStore: makeCredentialStore(cred),
+        logger: silentLogger(),
+        identity: IDENTITY,
+        verifyGrant: verify,
+        ...TEST_TIMING,
+      });
+      await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+      hub.send({ t: "rpc", id: "r1", req: { method: "listSessionMetadata", userId: "user_1" }, grant: token });
+      await new Promise<void>((r) => setTimeout(r, 40));
+
+      const result = hub.received().find((f) => f.t === "rpcResult");
+      expect(result).toBeDefined();
+      // The real verifier accepts the own-object read grant (requireScope:false) and
+      // threads its sub with an UNDEFINED scopeHash — the true on-wire contract the
+      // canned GRANT_STUB previously hid behind a fake scopeHash.
+      expect(sink.authz).toEqual({ sub: "user_1", scopeHash: undefined });
+
+      await conn.close();
+    });
+
+    test("rejects the RPC (rpcError unauthorized) when the grant fails verification", async () => {
+      const conn = new WsCloudConnection({
+        dispatcher: capturingDispatcher({}),
+        credentialStore: makeCredentialStore(cred),
+        logger: silentLogger(),
+        identity: IDENTITY,
+        verifyGrant: async () => {
+          throw new Error("bad grant");
+        },
+        ...TEST_TIMING,
+      });
+      await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+      hub.send({ t: "rpc", id: "r2", req: { method: "listSessionMetadata", userId: "u" }, grant: "BAD" });
+      await new Promise<void>((r) => setTimeout(r, 40));
+
+      const err = hub.received().find((f) => f.t === "rpcError");
+      expect(err).toBeDefined();
+      if (err?.t !== "rpcError") throw new Error("expected rpcError");
+      expect(err.error).toBe("unauthorized");
+
+      await conn.close();
+    });
+
+    test("a grant-less WRITE is rejected under FORTRESS_TUNNEL_GRANT_ENFORCE", async () => {
+      const prior = process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+      process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = "1";
+      try {
+        const conn = new WsCloudConnection({
+          dispatcher: capturingDispatcher({}),
+          credentialStore: makeCredentialStore(cred),
+          logger: silentLogger(),
+          identity: IDENTITY,
+          ...TEST_TIMING,
+        });
+        await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+        hub.send({
+          t: "rpc",
+          id: "r3",
+          req: { method: "appendChunkToCanonical", key: { userId: "u", family: "c", sessionId: "s" }, chunkId: "c1" },
+        });
+        await new Promise<void>((r) => setTimeout(r, 40));
+
+        const err = hub.received().find((f) => f.t === "rpcError" && f.id === "r3");
+        expect(err).toBeDefined();
+
+        await conn.close();
+      } finally {
+        if (prior === undefined) delete process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+        else process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = prior;
+      }
+    });
+
+    test("selfTest is never gated — allowed grant-less even under enforcement", async () => {
+      const prior = process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+      process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = "1";
+      try {
+        const conn = new WsCloudConnection({
+          dispatcher: capturingDispatcher({}),
+          credentialStore: makeCredentialStore(cred),
+          logger: silentLogger(),
+          identity: IDENTITY,
+          ...TEST_TIMING,
+        });
+        await conn.open({ ...CONFIG, cloud: { url: hub.url } });
+
+        hub.send({ t: "rpc", id: "r4", req: { method: "selfTest" } });
+        await new Promise<void>((r) => setTimeout(r, 40));
+
+        const result = hub.received().find((f) => f.t === "rpcResult" && f.id === "r4");
+        expect(result).toBeDefined();
+
+        await conn.close();
+      } finally {
+        if (prior === undefined) delete process.env.FORTRESS_TUNNEL_GRANT_ENFORCE;
+        else process.env.FORTRESS_TUNNEL_GRANT_ENFORCE = prior;
+      }
+    });
   });
 });

@@ -153,9 +153,13 @@ describe("ModuleLoader.install", () => {
     expect(reply).toEqual({ ok: true, payload: { value: 42 } });
   });
 
-  test("rejects when checksum does not match", async () => {
-    const { loader, saved } = makeLoader();
+  test("gates install on a checksum-INTEGRITY mismatch (fail-closed, defense in depth)", async () => {
+    const { loader, registry, saved } = makeLoader();
 
+    // With SIGNATURE_ENFORCE off and no signature published, the hub-supplied
+    // `checksum` is the ONLY integrity control — so a mismatched checksum must fail
+    // the install (corrupted / truncated / substituted artifact), and the artifact
+    // is never saved. (It is NOT authenticity — the signature gate covers that.)
     await expect(
       loader.install({
         moduleId: "test_echo",
@@ -163,7 +167,56 @@ describe("ModuleLoader.install", () => {
         artifactUrl: "https://example.com/test_echo-1.0.0.js",
         checksum: "0000000000000000000000000000000000000000000000000000000000000000",
       }),
-    ).rejects.toThrow("Checksum mismatch");
+    ).rejects.toThrow(/integrity|checksum/i);
+
+    expect(registry.has("test_echo")).toBe(false);
+    expect(saved.size).toBe(0);
+  });
+
+  test("rejects a module whose detached signature does not verify", async () => {
+    const { loader, saved } = makeLoader();
+
+    // keyid is a genuinely trusted baked anchor, but the signature bytes are
+    // bogus → verification fails BEFORE the artifact is ever saved.
+    const badSidecar = JSON.stringify({
+      v: 1,
+      alg: "Ed25519",
+      keyid: "hxf-dev-2026-07",
+      sig: "AAAA",
+    });
+
+    await expect(
+      loader.install({
+        moduleId: "test_echo",
+        version: "1.0.0",
+        artifactUrl: "https://example.com/test_echo-1.0.0.js",
+        checksum: "unused",
+        signature: badSidecar,
+      }),
+    ).rejects.toThrow(/signature verification failed/);
+
+    expect(saved.size).toBe(0);
+  });
+
+  test("rejects a module signed by an untrusted key id", async () => {
+    const { loader, saved } = makeLoader();
+
+    const sidecar = JSON.stringify({
+      v: 1,
+      alg: "Ed25519",
+      keyid: "attacker-key",
+      sig: "AAAA",
+    });
+
+    await expect(
+      loader.install({
+        moduleId: "test_echo",
+        version: "1.0.0",
+        artifactUrl: "https://example.com/test_echo-1.0.0.js",
+        checksum: "unused",
+        signature: sidecar,
+      }),
+    ).rejects.toThrow(/untrusted signing key id/);
 
     expect(saved.size).toBe(0);
   });

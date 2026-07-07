@@ -2,11 +2,12 @@
 // Fortress host routes MsgData payloads here. The store (S3/GCS) is built
 // from credentials.json on init. Transport and identity are owned by Fortress.
 
-import { handleVaultRpc, type VaultRpcRequest } from "./store/rpc.js";
+import { handleVaultRpc, type VaultAuthz, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials } from "./credentials.js";
 import { buildStore } from "./store.js";
 import type { HxDb } from "../../host/postgres/db.js";
+import { sanitizeDbError } from "../../host/postgres/sanitize.js";
 import type {
   HxIngestNotification,
   Module,
@@ -21,9 +22,12 @@ export interface SessionVaultModule extends Module {
 }
 
 export interface SessionVaultDeps {
-  /** Resolves the hx-db handle so tunnel-relayed commits can be mirrored into
-   *  the fortress Postgres. Null until Postgres is ready. */
+  /** Resolves the RW (DML) hx-db handle so tunnel-relayed commits can be mirrored
+   *  into the fortress Postgres. Null until Postgres is ready. */
   db?: () => HxDb | null;
+  /** Resolves the SELECT-only RO hx-db handle for the "my sessions" metadata read
+   *  (least-privilege). Falls back to `db` when omitted. Null until Postgres ready. */
+  dbRead?: () => HxDb | null;
   /** Push a realtime invalidation to the cloud after a tunnel-relayed ingest
    *  (MC-2415). Best-effort; omitted in tests. */
   notify?: (evt: HxIngestNotification) => void;
@@ -69,8 +73,17 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
         return { ok: false, error: "session-vault: store not initialized" };
       }
       const req = data.payload as VaultRpcRequest;
+      // The connection attaches the verified grant's authz alongside the payload
+      // (H-4) — fortress-internal, never on the wire MsgData contract.
+      const authz = (data as { authz?: VaultAuthz }).authz;
       try {
-        const result = await handleVaultRpc(store, req, deps.db?.() ?? null);
+        const result = await handleVaultRpc(
+          store,
+          req,
+          deps.db?.() ?? null,
+          authz,
+          deps.dbRead?.() ?? null,
+        );
         // A relayed commit just changed this user's sessions — tell the cloud to
         // refresh their live list (MC-2415). Best-effort, after the write landed.
         if (req.method === "ingestCommit" || req.method === "ingestAgentCommit") {
@@ -81,7 +94,9 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
         }
         return { ok: true, payload: result };
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        // The error string is logged AND returned to the cloud on the wire, so
+        // redact any DSN a Postgres/driver error might have echoed (Low).
+        const message = sanitizeDbError(err);
         logger?.error("vault RPC failed", { method: req.method, error: message });
         return { ok: false, error: message };
       }
