@@ -360,6 +360,7 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
           const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
           // C-1 · a body.userId that disagrees with the token principal is a
           // principal↔object mismatch (403); an absent body.userId is fine.
+          // (This subsumes main's #51 body.userId guard, keyed on claims.sub.)
           if (typeof body.userId === "string" && body.userId !== userId) {
             return json({ error: "principal_object_mismatch" }, 403);
           }

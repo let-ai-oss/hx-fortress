@@ -1,7 +1,8 @@
 {
   "name": "hx-fortress",
-  "version": "0.8.0",
+  "version": "0.9.2",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "hx-fortress": "./src/cli.ts"
@@ -10,6 +11,7 @@
   "scripts": {
     "dev": "bun --watch src/cli.ts",
     "build": "mkdir -p ./dist && bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
+    "install:enroll": "bash scripts/install-from-source.sh",
     "install:local:macos": "bun run build && cp ./dist/hx-fortress $HOME/.let/bin/hx-fortress && codesign --force --sign - $HOME/.let/bin/hx-fortress",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
@@ -29,7 +31,7 @@
     "@aws-sdk/client-s3": "^3.1068.0",
     "@aws-sdk/s3-request-presigner": "^3.1068.0",
     "@google-cloud/storage": "^7.21.0",
-    "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#5775fbbbb152f906ebe736242d435bbe073654b9",
+    "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#89aaf5f08c316422eec9acaff1054c3318a2f414",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.3"

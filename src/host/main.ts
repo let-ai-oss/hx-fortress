@@ -5,6 +5,7 @@ import {
   WsCloudConnection,
 } from "../cloud";
 import type { PendingEnrollment, WsCloudConnectionDeps } from "../cloud";
+import { computeCollectionStats } from "../query/collection-stats";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
 import {
@@ -276,6 +277,11 @@ export async function runFortressHost(
     signingKeyStore,
     verifyGrant: verifyGrantFn,
     mcp: mcpTunnel,
+    // MC-2368: report collection counts on the heartbeat once the DB is ready.
+    collectionStats: async () => {
+      const db = resolveHxDb();
+      return db ? computeCollectionStats(db) : null;
+    },
     enrollToken: pendingEnrollment?.token,
     async onEnrolled(cred) {
       await pendingEnrollmentStore.clear().catch((err) => {

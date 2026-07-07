@@ -1,6 +1,7 @@
 import {
   encodeFrame,
   safeDecodeFrame,
+  type CollectionStats,
   type FortressIdentity,
   type FortressToHubFrame,
   type HubToFortressFrame,
@@ -70,6 +71,9 @@ export interface WsCloudConnectionDeps {
   /** MC-2430 tunnel-MCP: serves the fortress's MCP tools over the reverse
    *  tunnel (the read transport for a fortress with no public URL). Omit to disable. */
   mcp?: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> };
+  /** MC-2368: computes the fortress's collection counts, piggybacked onto the
+   *  heartbeat (throttled). Returns null when the DB isn't ready. Omit to disable. */
+  collectionStats?: () => Promise<CollectionStats | null>;
 }
 
 /** Dispatch one reverse-tunnel MCP request to the fortress tool handler + reply. */
@@ -235,7 +239,24 @@ export class WsCloudConnection implements CloudConnection {
           ...this.deps.identity,
         });
       }
-      this.heartbeatTimer = setInterval(() => send({ t: "heartbeat" }), this.heartbeatMs);
+      let lastStatsAt = 0;
+      const STATS_MIN_INTERVAL_MS = 60_000;
+      this.heartbeatTimer = setInterval(() => {
+        send({ t: "heartbeat" });
+        // MC-2368: piggyback collection counts on the heartbeat tick — no second
+        // timer to leak/stack on reconnect. Throttled + best-effort so a slow or
+        // failed compute never delays the liveness ping.
+        const now = Date.now();
+        if (this.deps.collectionStats && now - lastStatsAt >= STATS_MIN_INTERVAL_MS) {
+          lastStatsAt = now;
+          void this.deps
+            .collectionStats()
+            .then((stats) => {
+              if (stats) send({ t: "collectionStats", stats });
+            })
+            .catch(() => {});
+        }
+      }, this.heartbeatMs);
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
