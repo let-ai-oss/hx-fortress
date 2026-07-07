@@ -5,6 +5,7 @@
 
 import { GcsStore, type GcsStoreConfig } from "./store/gcs-store.js";
 import { S3Store } from "./store/s3-store.js";
+import { assertS3EndpointSafe } from "./store/endpoint-safety.js";
 import type { SessionStore } from "./store/types.js";
 import type { VaultCredentials } from "./credentials.js";
 
@@ -23,6 +24,8 @@ export function buildStore(c: VaultCredentials): SessionStore {
   if (!c.region) {
     throw new Error("s3 storage requires a region in credentials.json");
   }
+  // M-4 · reject an unsafe custom endpoint (plaintext / SSRF-range) before dialing.
+  assertS3EndpointSafe(c.endpoint);
   return new S3Store({
     region: c.region,
     bucketName: c.bucket,

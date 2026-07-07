@@ -11,6 +11,7 @@ import {
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
+import { maxTunnelResultBytes } from "./limits.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -112,21 +113,83 @@ export interface VaultRpcError {
   error: string;
 }
 
+/** The verified authorization a tunnel grant carries into a vault RPC (H-4): the
+ *  principal (`sub`) the cloud minted the grant for, plus the read grant's scope
+ *  commitment. Present only when the connection verified a grant; absent in the
+ *  compat window (see connection.ts). */
+export interface VaultAuthz {
+  sub: string;
+  scopeHash?: string;
+}
+
+/** The vault RPCs that MUTATE stored objects — each is bound to its `key.userId`
+ *  owner, so a grant may only drive them for its own principal (H-4). */
+const VAULT_WRITE_METHODS: ReadonlySet<string> = new Set([
+  "signStagingUpload",
+  "appendChunkToCanonical",
+  "writeArtifact",
+  "ingestCommit",
+  "ingestAgentCommit",
+]);
+
+/** True for a mutating vault RPC method (drives the ingest vs read grant purpose). */
+export function isVaultWriteMethod(method: string): boolean {
+  return VAULT_WRITE_METHODS.has(method);
+}
+
+/** The capability-grant purpose a vault RPC method requires: writes need an
+ *  `ingest` grant, everything else a `read` grant. */
+export function vaultRpcPurpose(method: string): "ingest" | "read" {
+  return isVaultWriteMethod(method) ? "ingest" : "read";
+}
+
+/** The user id the request's object belongs to, or null for object-free methods
+ *  (`selfTest`). Writes and object reads both carry a `key`; the list reads carry
+ *  a bare `userId`. */
+function objectUserId(req: VaultRpcRequest): string | null {
+  if ("key" in req && req.key) return req.key.userId;
+  if ("userId" in req) return req.userId;
+  return null;
+}
+
 /**
  * Execute one RPC request against a local SessionStore. The vault calls this for
  * each request the tunnel forwards. Throws on unknown methods or store errors;
  * the caller maps the throw to a VaultRpcError on the wire.
+ *
+ * H-4 · when `authz` is present (the connection verified a grant), the object the
+ * RPC touches must belong to the grant's principal — `key.userId === authz.sub`
+ * (or `userId === authz.sub` for the list reads). A mismatch fails closed with
+ * `principal_object_mismatch`. `selfTest` carries no object and is never gated.
+ *
+ * `db` is the RW (DML) handle used by the ingest write branches; `dbRead` is the
+ * SELECT-only RO handle for the `listSessions` metadata read (least-privilege).
+ * `dbRead` falls back to `db` when omitted, so callers with a single handle (tests,
+ * external Postgres) keep their exact prior behavior.
  */
 export async function handleVaultRpc(
   store: SessionStore,
   req: VaultRpcRequest,
   db: HxDb | null = null,
+  authz?: VaultAuthz,
+  dbRead: HxDb | null = null,
 ): Promise<VaultRpcResult> {
+  if (authz && req.method !== "selfTest") {
+    const owner = objectUserId(req);
+    if (owner !== null && owner !== authz.sub) {
+      throw new Error("principal_object_mismatch");
+    }
+  }
   switch (req.method) {
     case "signStagingUpload":
       return { method: req.method, value: await store.signStagingUpload(req.key, req.chunkId) };
-    case "readChunkText":
-      return { method: req.method, value: await store.readChunkText(req.key, req.chunkId) };
+    case "readChunkText": {
+      const value = await store.readChunkText(req.key, req.chunkId);
+      // Bound the tunnel result so its base64 can't exceed the peer's frame cap
+      // (which would drop the socket). Fail fast with a typed reason instead.
+      if (Buffer.byteLength(value) > maxTunnelResultBytes()) throw new Error("chunk_too_large");
+      return { method: req.method, value };
+    }
     case "appendChunkToCanonical":
       return {
         method: req.method,
@@ -137,10 +200,28 @@ export async function handleVaultRpc(
     case "statCanonical":
       return { method: req.method, value: await store.statCanonical(req.key) };
     case "readCanonical": {
+      // M-9c · reject an oversized whole-object read before fetching it into memory.
+      // The tunnel-result cap (< frame cap) also prevents the base64 payload from
+      // exceeding the peer's maxPayload and dropping the socket.
+      const size = await store.statCanonical(req.key);
+      if (size !== null && size > maxTunnelResultBytes()) throw new Error("canonical_too_large");
       const { url } = await store.signCanonicalDownload(req.key);
-      const res = await fetch(url);
+      // Low · a thrown fetch error can embed the signed URL — swallow the original
+      // and surface a URL-free reason so the signed URL never reaches logs/replies.
+      let res: Response;
+      try {
+        // redirect:"error" — a validated signed URL must not 3xx-redirect into a
+        // private/metadata address (SSRF): a redirect makes fetch throw, which we
+        // map to the URL-free network reason below (fail-closed).
+        res = await fetch(url, { redirect: "error" });
+      } catch {
+        throw new Error("canonical_fetch_failed:network");
+      }
       if (!res.ok) throw new Error(`canonical_fetch_failed:${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
+      // Belt-and-suspenders: enforce the tunnel cap on the actual bytes too (stat
+      // can be null/racey), so the base64 result never overflows the frame.
+      if (buf.byteLength > maxTunnelResultBytes()) throw new Error("canonical_too_large");
       return { method: req.method, value: { base64: buf.toString("base64") } };
     }
     case "writeArtifact":
@@ -151,10 +232,14 @@ export async function handleVaultRpc(
     case "listSessionMetadata":
       return { method: req.method, value: await store.listSessionMetadata(req.userId) };
     case "listSessions": {
-      if (!db) throw new Error("postgres_not_ready");
+      // Least-privilege: the "my sessions" metadata read is SELECT-only, so it
+      // runs on the RO handle (falling back to the RW handle when a single handle
+      // was passed — external Postgres / tests).
+      const readDb = dbRead ?? db;
+      if (!readDb) throw new Error("postgres_not_ready");
       return {
         method: req.method,
-        value: await listSessionsForUser(db, { userId: req.userId, limit: req.limit }),
+        value: await listSessionsForUser(readDb, { userId: req.userId, limit: req.limit }),
       };
     }
     case "ingestCommit": {

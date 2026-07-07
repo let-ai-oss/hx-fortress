@@ -93,6 +93,7 @@ describe("hx → Fortress gateway → bucket", () => {
         store: () => store,
         postgresReady: () => true,
         db: () => null,
+        dbRead: () => null,
       });
       const base = `http://127.0.0.1:${port}`;
       const auth = { authorization: `Bearer ${token}`, "content-type": "application/json" };
@@ -179,6 +180,7 @@ describe("hx → Fortress gateway → bucket", () => {
         store: () => store,
         postgresReady: () => true,
         db: () => null,
+        dbRead: () => null,
       });
 
       const res = await fetch(`http://127.0.0.1:${port}/sessions`, {
@@ -223,6 +225,7 @@ describe("hx → Fortress gateway → bucket", () => {
         store: () => null,
         postgresReady: () => true,
         db: () => null,
+        dbRead: () => null,
       });
       const res = await fetch(`http://127.0.0.1:${port}/sessions/append-url`, {
         method: "POST",

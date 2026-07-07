@@ -31,6 +31,17 @@ describe("release workflow", () => {
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
   });
 
+  test("signs artifacts and attests build provenance (supply-chain)", () => {
+    // Ed25519 detached signatures over the binaries + pgvector tarball…
+    expect(workflow).toContain("scripts/sign-artifact.ts");
+    expect(workflow).toContain("FORTRESS_SIGNING_KEY");
+    // …plus GitHub build-provenance attestation…
+    expect(workflow).toContain("attest-build-provenance");
+    expect(workflow).toContain("id-token: write");
+    // …while keeping the same-origin .sha256 integrity sidecars.
+    expect(workflow).toContain('> "${out_path}.sha256"');
+  });
+
   test("publishes GHCR tags and dispatches let-forge after a successful image push", () => {
     expect(workflow).toContain("packages: write");
     expect(workflow).toContain("docker/setup-buildx-action");

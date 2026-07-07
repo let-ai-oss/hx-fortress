@@ -1,4 +1,5 @@
 import type { InstalledModuleRecord, ModuleInventoryStore } from "./module-inventory";
+import { SIGNATURE_ENFORCE, verifyDetachedSignature } from "./trust/verify";
 import type {
   HostLogger,
   LoadableRegistry,
@@ -16,6 +17,11 @@ export interface ModuleLoaderDeps {
   deleteArtifact: (artifactPath: string) => Promise<void>;
   artifactPathFor: (moduleId: string, version: string) => string;
   logger: HostLogger;
+}
+
+/** Lowercase hex sha256 of the artifact bytes (integrity check). */
+function sha256Hex(data: Uint8Array): string {
+  return new Bun.CryptoHasher("sha256").update(data).digest("hex");
 }
 
 export class ModuleLoader implements ModuleLifecycleHandler {
@@ -39,11 +45,37 @@ export class ModuleLoader implements ModuleLifecycleHandler {
   }
 
   async install(params: ModuleInstallParams): Promise<void> {
-    const { moduleId, version, artifactUrl, checksum } = params;
+    const { moduleId, version, artifactUrl, checksum, signature } = params;
     const artifactPath = this.deps.artifactPathFor(moduleId, version);
 
     const data = await this.deps.fetchArtifact(artifactUrl);
-    verifyChecksum(data, checksum, moduleId);
+    // Authenticity is the detached Ed25519 signature verified against the baked
+    // trust anchors — NOT the hub-supplied `checksum` (integrity only; a
+    // compromised hub could serve a matching hash for a trojaned artifact). A
+    // present signature must verify; an absent one fails closed only when
+    // enforcing (Release A = verify-if-present).
+    if (signature) {
+      await verifyDetachedSignature(data, signature);
+    } else if (SIGNATURE_ENFORCE) {
+      throw new Error(
+        `Module ${moduleId} has no signature and signature enforcement is enabled`,
+      );
+    }
+
+    // INTEGRITY pre-check, in addition to the signature gate above. This is NOT
+    // authenticity (a compromised hub can advertise a matching hash for tampered
+    // bytes — only the signature closes that), but with SIGNATURE_ENFORCE off and
+    // no signature published it is the ONLY defense against a corrupted / truncated
+    // / substituted artifact, so keep it fail-closed even in the verify-if-present
+    // window. Runs BEFORE saveArtifact so a mismatched artifact is never persisted.
+    if (checksum) {
+      const actual = sha256Hex(data);
+      // Normalize both sides (hub checksums may be upper-case / whitespace-padded)
+      // so a legit install can't fail-closed on a formatting mismatch.
+      if (actual !== checksum.trim().toLowerCase()) {
+        throw new Error(`Module ${moduleId} integrity check failed: checksum mismatch`);
+      }
+    }
 
     await this.deps.saveArtifact(artifactPath, data);
 
@@ -113,16 +145,5 @@ export class ModuleLoader implements ModuleLifecycleHandler {
     }
 
     await this.deps.inventory.remove(moduleId);
-  }
-}
-
-function verifyChecksum(data: Uint8Array, expected: string, moduleId: string): void {
-  const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(data);
-  const actual = hasher.digest("hex");
-  if (actual !== expected) {
-    throw new Error(
-      `Checksum mismatch for module ${moduleId}: expected ${expected}, got ${actual}`,
-    );
   }
 }

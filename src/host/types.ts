@@ -69,6 +69,10 @@ export interface HostStatusSnapshot {
     reason: string | null;
   };
   modules: ModuleRuntimeStatus[];
+  /** Optional secret-free view of the session_vault storage config (store, bucket,
+   *  region, identity label). Absent when no vault credentials are configured;
+   *  NEVER contains private keys or S3 secrets (see redactCredentials). */
+  vault?: Record<string, unknown>;
 }
 
 export interface StatusStore {
@@ -174,7 +178,14 @@ export interface ModuleInstallParams {
   moduleId: string;
   version: string;
   artifactUrl: string;
+  /** Hub-supplied integrity hash. Recorded for inventory bookkeeping ONLY — it
+   *  is NOT an authenticity root (a compromised hub could serve a matching hash
+   *  for a trojaned artifact). Authenticity is the detached `signature`. */
   checksum: string;
+  /** Detached Ed25519 signature sidecar JSON (from moduleAdvertise.signature),
+   *  verified against the baked trust anchors. Absent → allowed only when
+   *  signature enforcement is off (verify-if-present). */
+  signature?: string;
 }
 
 export interface ModuleLifecycleHandler {
@@ -194,5 +205,8 @@ export interface PostgresProvider {
   stop(): Promise<void>;
   status(): PostgresStatusSnapshot;
   isReady(): boolean;
-  dsn(): string | null;
+  /** Role-aware DSN, or null before the cluster is ready. Default (and `"rw"`)
+   *  is the DML role; `"ro"` the SELECT-only role. External Postgres returns the
+   *  operator's single URL for both. */
+  dsn(role?: "ro" | "rw"): string | null;
 }

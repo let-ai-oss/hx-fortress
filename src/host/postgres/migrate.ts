@@ -1,6 +1,8 @@
-/** Minimal SQL surface the migrator needs against the hx-db connection. */
+/** Minimal SQL surface the migrator needs against the hx-db connection. `query`
+ *  takes optional bound `params` ($1, $2, …) for defense-in-depth; `exec` runs a
+ *  (possibly multi-statement) simple-query batch as one implicit transaction. */
 export interface MigrationExec {
-  query<T = Record<string, unknown>>(sql: string): Promise<T[]>;
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
   exec(sql: string): Promise<void>;
 }
 
@@ -14,8 +16,11 @@ export interface Migration {
 }
 
 async function extensionAvailable(db: MigrationExec, ext: string): Promise<boolean> {
+  // Bound param (defense-in-depth) — `ext` is a validated union today, but the
+  // standalone SELECT parameterizes cleanly.
   const rows = await db.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = '${ext}'`,
+    `SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = $1`,
+    [ext],
   );
   return (rows[0]?.n ?? 0) > 0;
 }
@@ -51,7 +56,11 @@ export async function runMigrations(db: MigrationExec, migrations: Migration[]):
     // Postgres (no explicit BEGIN/COMMIT — Bun.SQL rejects those on a pooled
     // connection). So the migration and its tracking row commit or roll back
     // together. Every statement we emit is transaction-safe (no CREATE INDEX
-    // CONCURRENTLY / CREATE DATABASE / VACUUM).
+    // CONCURRENTLY / CREATE DATABASE / VACUUM). The name stays INLINE (not a bound
+    // param) deliberately: a bound INSERT needs the extended protocol, which can't
+    // share the simple-query batch — splitting it into its own statement would break
+    // the atomic migrate+journal transaction (crash-safety). It is injection-proof
+    // via the `/^[0-9a-z_]+$/` gate above (a code-controlled manifest key, no quote).
     await db.exec(
       `${migration.sql}\nINSERT INTO hx.schema_migrations (name) VALUES ('${migration.name}');`,
     );

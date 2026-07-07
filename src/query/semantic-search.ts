@@ -15,9 +15,11 @@
 import { and, eq, gte, isNotNull, isNull, sql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
+import { sanitizeDbError } from "../host/postgres/sanitize";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
 import { hxEmbeddings } from "../host/postgres/schema/embeddings";
 import { EmbedAccountError, type Embedder } from "../modules/embed-worker/openai";
+import { scrubSecrets } from "../modules/embed-worker/scrub";
 import { scopePredicate, type FortressScope } from "./scope";
 
 export interface SemanticSearchInput {
@@ -48,6 +50,17 @@ export interface SemanticSearchResult {
 
 const DEFAULT_K = 20;
 const MAX_K = 100;
+// H-7 · hard length guard applied to the query text BEFORE it reaches scrubSecrets
+// (defense-in-depth atop the now-linear scrub regexes) and before it egresses to
+// OpenAI. A semantic query is a short natural-language phrase; anything past a few
+// KB is abusive (a multi-MB query would burn scrub time and OpenAI would reject it
+// on its ~8k-token cap anyway), so trim to this ceiling. Override via
+// FORTRESS_MAX_QUERY_TEXT_CHARS (mirrors the other DoS caps).
+const DEFAULT_MAX_QUERY_TEXT_CHARS = 8_000;
+function maxQueryTextChars(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.FORTRESS_MAX_QUERY_TEXT_CHARS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_QUERY_TEXT_CHARS;
+}
 // Over-fetch factor: the HNSW filters scope AFTER the distance scan, so pull more
 // candidates than k and truncate post-filter to avoid starving a small scope.
 const OVERFETCH = 5;
@@ -97,13 +110,17 @@ export async function hxSemanticSearch(
 
   let queryVec: number[] | null | undefined;
   try {
-    [queryVec] = await embedder.embed([queryText]);
+    // Cap the query length BEFORE scrub + egress (H-7 DoS guard), then scrub any
+    // secret/PII shapes out of it before it leaves the fortress for OpenAI.
+    const cap = maxQueryTextChars();
+    const capped = queryText.length > cap ? queryText.slice(0, cap) : queryText;
+    [queryVec] = await embedder.embed([scrubSecrets(capped)]);
   } catch (err) {
     // An account-level error (unfunded / invalid key) is a CREDENTIAL problem —
     // name it so the operator/user knows to fix the key; anything else is transient.
     return unavailable(
       err instanceof EmbedAccountError ? "openai_credential_invalid_or_unfunded" : "openai_temporarily_unavailable",
-      err instanceof Error ? err.message : String(err),
+      sanitizeDbError(err),
     );
   }
   if (!queryVec || queryVec.length === 0) return unavailable("openai_temporarily_unavailable");
@@ -178,7 +195,8 @@ export async function hxSemanticSearch(
       }));
     return { hits };
   } catch (err) {
-    // hx.embeddings missing (0006 unapplied) or any vector fault → fail-fast.
-    return unavailable("semantic_query_failed", err instanceof Error ? err.message : String(err));
+    // hx.embeddings missing (0006 unapplied) or any vector fault → fail-fast. The
+    // detail crosses to the agent, so redact any DSN a driver error could carry.
+    return unavailable("semantic_query_failed", sanitizeDbError(err));
   }
 }

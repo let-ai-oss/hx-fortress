@@ -44,6 +44,8 @@ import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
+import { artifactObject, canonicalObject, listPrefix, stagingObject } from "./keys.js";
+import { maxCanonicalBytes } from "./limits.js";
 
 export interface S3StoreConfig {
   region: string;
@@ -84,20 +86,8 @@ export class S3Store implements SessionStore {
     this.bucket = cfg.bucketName;
   }
 
-  private prefix(key: SessionKey): string {
-    return `${key.userId}/${key.family}/${key.sessionId}`;
-  }
-
-  private stagingName(key: SessionKey, chunkId: string): string {
-    return `${this.prefix(key)}/.staging/${chunkId}.jsonl`;
-  }
-
-  private canonicalName(key: SessionKey): string {
-    return `${this.prefix(key)}/log.jsonl`;
-  }
-
   async signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
-    const objectName = this.stagingName(key, chunkId);
+    const objectName = stagingObject(key, chunkId);
     const url = await getSignedUrl(
       this.s3,
       new PutObjectCommand({ Bucket: this.bucket, Key: objectName, ContentType: NDJSON }),
@@ -112,8 +102,12 @@ export class S3Store implements SessionStore {
 
   async readChunkText(key: SessionKey, chunkId: string): Promise<string> {
     const r = await this.s3.send(
-      new GetObjectCommand({ Bucket: this.bucket, Key: this.stagingName(key, chunkId) }),
+      new GetObjectCommand({ Bucket: this.bucket, Key: stagingObject(key, chunkId) }),
     );
+    // M-9c · reject an oversized chunk from the response's ContentLength BEFORE
+    // materializing it into a string (a hostile / buggy signed-URL upload could be
+    // arbitrarily large → OOM on read + re-parse). Fail-closed, no extra round trip.
+    if ((r.ContentLength ?? 0) > maxCanonicalBytes()) throw new Error("chunk_too_large");
     return r.Body ? r.Body.transformToString("utf-8") : "";
   }
 
@@ -122,8 +116,8 @@ export class S3Store implements SessionStore {
     chunkId: string,
     opts?: AppendOptions,
   ): Promise<ComposeResult> {
-    const staging = this.stagingName(key, chunkId);
-    const canonical = this.canonicalName(key);
+    const staging = stagingObject(key, chunkId);
+    const canonical = canonicalObject(key);
     const currentSize = await this.objectSize(canonical);
 
     if (currentSize === null || opts?.replace) {
@@ -142,9 +136,14 @@ export class S3Store implements SessionStore {
     }
 
     if (currentSize >= MULTIPART_MIN_PART) {
+      // Server-side multipart copy — no bytes materialize in the fortress here.
       await this.multipartAppend(canonical, staging);
     } else {
       const [cur, chunk] = await Promise.all([this.getBytes(canonical), this.getBytes(staging)]);
+      // M-9c · this read-modify-write is the only path that loads canonical+chunk
+      // into memory; cap the combined size (fail-closed) so a giant staged chunk
+      // can't OOM the fortress. (The multipart branch above never loads bytes.)
+      if (cur.length + chunk.length > maxCanonicalBytes()) throw new Error("canonical_too_large");
       await this.s3.send(
         new PutObjectCommand({
           Bucket: this.bucket,
@@ -161,31 +160,27 @@ export class S3Store implements SessionStore {
   }
 
   async statCanonical(key: SessionKey): Promise<number | null> {
-    return this.objectSize(this.canonicalName(key));
+    return this.objectSize(canonicalObject(key));
   }
 
   async signCanonicalDownload(key: SessionKey): Promise<SignedDownload> {
     const url = await getSignedUrl(
       this.s3,
-      new GetObjectCommand({ Bucket: this.bucket, Key: this.canonicalName(key) }),
+      new GetObjectCommand({ Bucket: this.bucket, Key: canonicalObject(key) }),
       { expiresIn: CANONICAL_GET_TTL_S },
     );
     return { url, expiresAt: new Date(Date.now() + CANONICAL_GET_TTL_S * 1000).toISOString() };
   }
 
   async readCanonicalText(key: SessionKey): Promise<string> {
-    return (await this.getBytes(this.canonicalName(key))).toString("utf8");
-  }
-
-  private artifactName(key: SessionKey, name: string): string {
-    return `${this.prefix(key)}/${name}`;
+    return (await this.getBytes(canonicalObject(key))).toString("utf8");
   }
 
   async writeArtifact(key: SessionKey, name: string, text: string): Promise<void> {
     await this.s3.send(
       new PutObjectCommand({
         Bucket: this.bucket,
-        Key: this.artifactName(key, name),
+        Key: artifactObject(key, name),
         Body: text,
         ContentType: "application/json",
       }),
@@ -195,7 +190,7 @@ export class S3Store implements SessionStore {
   async readArtifactText(key: SessionKey, name: string): Promise<string | null> {
     try {
       const r = await this.s3.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: this.artifactName(key, name) }),
+        new GetObjectCommand({ Bucket: this.bucket, Key: artifactObject(key, name) }),
       );
       return r.Body ? await r.Body.transformToString("utf-8") : null;
     } catch (err) {
@@ -213,7 +208,7 @@ export class S3Store implements SessionStore {
       const page = await this.s3.send(
         new ListObjectsV2Command({
           Bucket: this.bucket,
-          Prefix: `${userId}/`,
+          Prefix: listPrefix(userId),
           ContinuationToken: token,
         }),
       );

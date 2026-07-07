@@ -26,6 +26,8 @@ import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
+import { artifactObject, canonicalObject, listPrefix, sessionPrefix, stagingObject } from "./keys.js";
+import { maxCanonicalBytes } from "./limits.js";
 
 export interface GcsStoreConfig {
   projectId: string;
@@ -60,20 +62,8 @@ export class GcsStore implements SessionStore {
     return this._bucket;
   }
 
-  private prefix(key: SessionKey): string {
-    return `${key.userId}/${key.family}/${key.sessionId}`;
-  }
-
-  private stagingName(key: SessionKey, chunkId: string): string {
-    return `${this.prefix(key)}/.staging/${chunkId}.jsonl`;
-  }
-
-  private canonicalName(key: SessionKey): string {
-    return `${this.prefix(key)}/log.jsonl`;
-  }
-
   async signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
-    const objectName = this.stagingName(key, chunkId);
+    const objectName = stagingObject(key, chunkId);
     const expiresMs = Date.now() + 15 * 60 * 1000;
     const [url] = await this.bucket()
       .file(objectName)
@@ -87,7 +77,13 @@ export class GcsStore implements SessionStore {
   }
 
   async readChunkText(key: SessionKey, chunkId: string): Promise<string> {
-    const [buf] = await this.bucket().file(this.stagingName(key, chunkId)).download();
+    const file = this.bucket().file(stagingObject(key, chunkId));
+    // M-9c · reject an oversized chunk from its metadata size BEFORE downloading it
+    // (a hostile / buggy signed-URL upload could be arbitrarily large → OOM on the
+    // download + re-parse). Fail-closed.
+    const [meta] = await file.getMetadata();
+    if (Number(meta.size ?? 0) > maxCanonicalBytes()) throw new Error("chunk_too_large");
+    const [buf] = await file.download();
     return buf.toString("utf8");
   }
 
@@ -97,8 +93,8 @@ export class GcsStore implements SessionStore {
     opts?: AppendOptions,
   ): Promise<ComposeResult> {
     const b = this.bucket();
-    const canonical = b.file(this.canonicalName(key));
-    const staging = b.file(this.stagingName(key, chunkId));
+    const canonical = b.file(canonicalObject(key));
+    const staging = b.file(stagingObject(key, chunkId));
 
     const [canonicalExists] = await canonical.exists();
     // Replace (divergence repair) takes the same promote-staging path as a
@@ -120,7 +116,7 @@ export class GcsStore implements SessionStore {
     const componentCount = Number(meta.componentCount ?? 1);
 
     if (componentCount >= COMPACT_THRESHOLD) {
-      const tmpName = `${this.prefix(key)}/.compact-${Date.now()}.jsonl`;
+      const tmpName = `${sessionPrefix(key)}/.compact-${Date.now()}.jsonl`;
       const tmp = b.file(tmpName);
       await canonical.copy(tmp);
       await tmp.copy(canonical);
@@ -137,7 +133,7 @@ export class GcsStore implements SessionStore {
 
   async statCanonical(key: SessionKey): Promise<number | null> {
     try {
-      const [meta] = await this.bucket().file(this.canonicalName(key)).getMetadata();
+      const [meta] = await this.bucket().file(canonicalObject(key)).getMetadata();
       return Number(meta.size ?? 0);
     } catch (err) {
       if ((err as { code?: number }).code === 404) return null;
@@ -146,7 +142,7 @@ export class GcsStore implements SessionStore {
   }
 
   async signCanonicalDownload(key: SessionKey): Promise<SignedDownload> {
-    const objectName = this.canonicalName(key);
+    const objectName = canonicalObject(key);
     const expiresMs = Date.now() + 5 * 60 * 1000;
     const [url] = await this.bucket()
       .file(objectName)
@@ -159,23 +155,19 @@ export class GcsStore implements SessionStore {
   }
 
   async readCanonicalText(key: SessionKey): Promise<string> {
-    const [buf] = await this.bucket().file(this.canonicalName(key)).download();
+    const [buf] = await this.bucket().file(canonicalObject(key)).download();
     return buf.toString("utf8");
-  }
-
-  private artifactName(key: SessionKey, name: string): string {
-    return `${this.prefix(key)}/${name}`;
   }
 
   async writeArtifact(key: SessionKey, name: string, text: string): Promise<void> {
     await this.bucket()
-      .file(this.artifactName(key, name))
+      .file(artifactObject(key, name))
       .save(text, { contentType: "application/json", resumable: false });
   }
 
   async readArtifactText(key: SessionKey, name: string): Promise<string | null> {
     try {
-      const [buf] = await this.bucket().file(this.artifactName(key, name)).download();
+      const [buf] = await this.bucket().file(artifactObject(key, name)).download();
       return buf.toString("utf8");
     } catch {
       return null;
@@ -183,7 +175,7 @@ export class GcsStore implements SessionStore {
   }
 
   async listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
-    const [files] = await this.bucket().getFiles({ prefix: `${userId}/` });
+    const [files] = await this.bucket().getFiles({ prefix: listPrefix(userId) });
     const out: SessionMetadata[] = [];
     const seen = new Set<string>();
     const canonicalFallbacks: SessionMetadata[] = [];

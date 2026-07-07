@@ -74,7 +74,8 @@ export async function readVaultCredentials(): Promise<VaultCredentials | null> {
 }
 
 export async function writeVaultCredentials(creds: VaultCredentials): Promise<void> {
-  await mkdir(VAULT_HOME, { recursive: true });
+  // 0700 the vault home so the 0600 credentials.json sits in an owner-only dir.
+  await mkdir(VAULT_HOME, { recursive: true, mode: 0o700 });
   const tmp = `${CREDENTIALS_PATH}.tmp`;
   await writeFile(tmp, `${JSON.stringify(creds, null, 2)}\n`, { mode: 0o600 });
   await rename(tmp, CREDENTIALS_PATH);

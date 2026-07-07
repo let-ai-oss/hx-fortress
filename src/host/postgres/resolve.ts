@@ -1,4 +1,5 @@
 import { downloadBaseFromCloudUrl } from "../../update";
+import { assertHttpsDownloadUrl } from "../config";
 import type { FortressConfig } from "../types";
 
 export const DEFAULT_PG_VERSION = "18.4.0";
@@ -30,18 +31,29 @@ export function resolvePostgresConfig(
 ): ResolvedPostgresConfig {
   const persisted = config.postgres ?? {};
   const externalUrl = pick(env.FORTRESS_DATABASE_URL, persisted.externalUrl, null);
+  const binariesUrl = pick(
+    env.FORTRESS_PG_BINARIES_URL,
+    persisted.binariesUrl,
+    DEFAULT_PG_BINARIES_URL,
+  );
+  const pgvectorUrl = pick(
+    env.FORTRESS_PGVECTOR_URL,
+    persisted.pgvectorUrl,
+    defaultPgvectorUrl(config.cloud?.url),
+  );
+  // M-12: re-validate the RESOLVED (env-sourced) download bases — parsePostgresConfig
+  // only covers persisted values, not FORTRESS_PG_BINARIES_URL / FORTRESS_PGVECTOR_URL.
+  // pgvectorUrl is "" pre-enrollment (the inject self-skips), so skip the empty case.
+  assertHttpsDownloadUrl(binariesUrl, "FORTRESS_PG_BINARIES_URL");
+  if (pgvectorUrl) assertHttpsDownloadUrl(pgvectorUrl, "FORTRESS_PGVECTOR_URL");
   return {
     mode: externalUrl ? "external" : "embedded",
     version: pick(env.FORTRESS_PG_VERSION, persisted.version, DEFAULT_PG_VERSION),
-    binariesUrl: pick(env.FORTRESS_PG_BINARIES_URL, persisted.binariesUrl, DEFAULT_PG_BINARIES_URL),
+    binariesUrl,
     dataDir: pick(env.FORTRESS_PG_DATA, persisted.dataDir, defaultDataDir),
     port: pickPort(env.FORTRESS_PG_PORT, persisted.port, DEFAULT_PG_PORT),
     externalUrl,
-    pgvectorUrl: pick(
-      env.FORTRESS_PGVECTOR_URL,
-      persisted.pgvectorUrl,
-      defaultPgvectorUrl(config.cloud?.url),
-    ),
+    pgvectorUrl,
   };
 }
 

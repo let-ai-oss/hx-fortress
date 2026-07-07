@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { resolvePendingEnrollmentForStartup, runFortressHost } from "../src/host/main";
+import {
+  isPendingEnrollmentTrusted,
+  resolvePendingEnrollmentForStartup,
+  runFortressHost,
+} from "../src/host/main";
 import { FilePendingEnrollmentStore, type WsCloudConnectionDeps } from "../src/cloud";
 import type { ModuleRegistry } from "../src/host/module-registry";
 import type { CloudConnection } from "../src/host/types";
@@ -109,6 +113,54 @@ describe("runFortressHost", () => {
         cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
       });
       await expect(readFile(paths.pendingEnrollment, "utf8")).resolves.toContain("fresh-token");
+    });
+  });
+
+  describe("pending-enrollment hijack gate (M-8)", () => {
+    const enrolled = "wss://hub.let.ai/_api/hx-gateway/vault-tunnel";
+
+    test("honors a pending enrollment on a fresh install (no saved credential)", () => {
+      expect(
+        isPendingEnrollmentTrusted({
+          savedCredentialExists: false,
+          pendingCloudUrl: "wss://attacker.example/tunnel",
+          enrolledCloudUrl: null,
+          allowReenroll: false,
+        }),
+      ).toBe(true);
+    });
+
+    test("ignores a different-origin pending enrollment once a credential is saved", () => {
+      expect(
+        isPendingEnrollmentTrusted({
+          savedCredentialExists: true,
+          pendingCloudUrl: "wss://attacker.example/tunnel",
+          enrolledCloudUrl: enrolled,
+          allowReenroll: false,
+        }),
+      ).toBe(false);
+    });
+
+    test("honors a same-origin pending enrollment for an enrolled fortress", () => {
+      expect(
+        isPendingEnrollmentTrusted({
+          savedCredentialExists: true,
+          pendingCloudUrl: "wss://hub.let.ai/some/other/path",
+          enrolledCloudUrl: enrolled,
+          allowReenroll: false,
+        }),
+      ).toBe(true);
+    });
+
+    test("FORTRESS_ALLOW_REENROLL overrides the origin check", () => {
+      expect(
+        isPendingEnrollmentTrusted({
+          savedCredentialExists: true,
+          pendingCloudUrl: "wss://attacker.example/tunnel",
+          enrolledCloudUrl: enrolled,
+          allowReenroll: true,
+        }),
+      ).toBe(true);
     });
   });
 });

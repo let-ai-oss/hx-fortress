@@ -28,6 +28,9 @@ export function fortressPaths(root = defaultFortressRoot()) {
     postgresRoot: postgres,
     postgresCache: path.join(postgres, "cache"),
     postgresSocket: path.join(postgres, "socket"),
+    // Per-install generated passwords for the embedded-PG roles (fortress /
+    // hx_app_rw / hx_app_ro). Persisted 0600; MUST be preserved with pgdata.
+    pgRoles: path.join(postgres, "roles.json"),
     defaultPgData: path.join(root, "pgdata"),
     postgresVersionDir(version: string): string {
       return path.join(postgres, version);
