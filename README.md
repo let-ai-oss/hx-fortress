@@ -9,11 +9,12 @@ boundary, the host runtime with its stable on-disk configuration and status
 contracts, and the lifecycle CLI for running Fortress as a persistent per-user
 launchd or systemd service. Structured logs, module loading, and cloud
 transport are implemented. Release artifacts bundle the core `session_vault`
-module; `update` and the installer remain follow-up tasks.
+module, and both the self-update command and the install-from-source and
+prebuilt installers are shipped.
 
 ## Install
 
-The distribution installer will be served from the customer's let.ai
+The distribution installer is served from the customer's let.ai
 Workbench origin:
 
 ```sh
