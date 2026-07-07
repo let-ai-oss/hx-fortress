@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { runCli } from "../src/cli";
 import type { LogsOptions } from "../src/cli-logs";
-import type { WizardOpts } from "../src/modules/session-vault/wizard";
+import type { WizardEntryOpts } from "../src/modules/session-vault/wizard";
 import type { UpdateResult } from "../src/update";
 import type { ServiceManager, ServiceState } from "../src/service/types";
 
@@ -37,7 +37,7 @@ describe("runCli", () => {
   });
 
   test("dispatches enroll with the token and cloud URL", async () => {
-    let captured: WizardOpts | undefined;
+    let captured: WizardEntryOpts | undefined;
     const lines: string[] = [];
 
     const exitCode = await runCli(
@@ -86,18 +86,19 @@ describe("runCli", () => {
     }
   });
 
-  test("rejects enroll without a token", async () => {
-    const lines: string[] = [];
+  test("dispatches enroll with an undefined token when none is given", async () => {
+    let captured: WizardEntryOpts | undefined;
 
-    const exitCode = await runCli(["enroll", "--cloud", "wss://let.ai/tunnel"], {
-      runEnrollWizard: async () => {
-        throw new Error("wizard should not run");
+    const exitCode = await runCli(["enroll", "--cloud", "wss://x"], {
+      runEnrollWizard: async (opts) => {
+        captured = opts;
       },
-      writeLine: (line) => lines.push(line),
+      writeLine: () => {},
     });
 
-    expect(exitCode).toBe(1);
-    expect(lines).toEqual(["error: usage: hx-fortress enroll <token> --cloud <url>"]);
+    expect(exitCode).toBe(0);
+    expect(captured?.token).toBeUndefined();
+    expect(captured?.cloudUrl).toBe("wss://x");
   });
 
   test("rejects enroll without a cloud URL", async () => {
@@ -111,7 +112,7 @@ describe("runCli", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(lines).toEqual(["error: usage: hx-fortress enroll <token> --cloud <url>"]);
+    expect(lines).toEqual(["error: usage: hx-fortress enroll [token] --cloud <url>"]);
   });
 
   test("dispatches the internal host command without listing it in help", async () => {

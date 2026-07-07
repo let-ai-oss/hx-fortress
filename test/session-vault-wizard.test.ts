@@ -7,6 +7,7 @@ import { fortressPaths } from "../src/host/paths";
 import {
   maybeKeepExistingVaultConfig,
   resolveGatewayPublicUrlInput,
+  runEnrollWizard,
 } from "../src/modules/session-vault/wizard";
 
 describe("resolveGatewayPublicUrlInput", () => {
@@ -71,6 +72,75 @@ describe("maybeKeepExistingVaultConfig", () => {
 
       expect(kept).toBe(true);
       await expect(readFile(paths.pendingEnrollment, "utf8")).rejects.toThrow();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runEnrollWizard", () => {
+  test("with no token, an already-enrolled host is guarded without acquiring", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "hx-fortress-enrolled-"));
+    try {
+      const paths = fortressPaths(root);
+      await mkdir(path.dirname(paths.credentials), { recursive: true });
+      await writeFile(
+        paths.credentials,
+        JSON.stringify({
+          orgId: "org-1",
+          fortressId: "fortress-1",
+          credential: "credential-1",
+        }),
+      );
+
+      const lines: string[] = [];
+      let acquired = false;
+      await runEnrollWizard(
+        {
+          cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+          log: (m) => lines.push(m),
+          fortressRoot: root,
+        },
+        {
+          acquireKey: async () => {
+            acquired = true;
+            return "vlt_should_not_run";
+          },
+        },
+      );
+
+      expect(acquired).toBe(false);
+      expect(lines.some((l) => l.includes("already enrolled"))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("with no token and no existing credential, it acquires the key first", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "hx-fortress-acquire-"));
+    try {
+      const lines: string[] = [];
+      let acquiredCloudUrl: string | undefined;
+      // The acquire step throws a sentinel so the wizard stops before the
+      // interactive storage prompts — enough to prove acquisition runs first.
+      const sentinel = new Error("stop-after-acquire");
+      await expect(
+        runEnrollWizard(
+          {
+            cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+            log: (m) => lines.push(m),
+            fortressRoot: root,
+          },
+          {
+            acquireKey: async ({ cloudUrl }) => {
+              acquiredCloudUrl = cloudUrl;
+              throw sentinel;
+            },
+          },
+        ),
+      ).rejects.toBe(sentinel);
+
+      expect(acquiredCloudUrl).toBe("wss://new.let.ai/_api/hx-gateway/vault-tunnel");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
