@@ -476,4 +476,21 @@ describe("resolveEmbedConfig — OpenAI base URL (M-5)", () => {
     expect(resolveEmbedConfig({ ...KEY, FORTRESS_EMBED_DAILY_TOKEN_BUDGET: "0" }).dailyTokenBudget).toBe(0);
     expect(resolveEmbedConfig({ ...KEY, FORTRESS_EMBED_DAILY_TOKEN_BUDGET: "-5" }).dailyTokenBudget).toBe(5_000_000);
   });
+
+  // MC-2517 · the QUERY-path embed budget (per-attempt timeout + retry count) that
+  // bounds hx_semantic_search so a stalled OpenAI call fails fast instead of hanging.
+  test("query-embed budget: defaults + env overrides (0 retries admitted)", () => {
+    const def = resolveEmbedConfig({ ...KEY });
+    expect(def.queryTimeoutMs).toBe(10_000);
+    expect(def.queryMaxRetries).toBe(2);
+    const over = resolveEmbedConfig({
+      ...KEY,
+      FORTRESS_EMBED_QUERY_TIMEOUT_MS: "5000",
+      FORTRESS_EMBED_QUERY_MAX_RETRIES: "0",
+    });
+    expect(over.queryTimeoutMs).toBe(5_000);
+    expect(over.queryMaxRetries).toBe(0); // 0 = no retry, must be admitted (not the default)
+    // a non-numeric / negative timeout falls back to the default.
+    expect(resolveEmbedConfig({ ...KEY, FORTRESS_EMBED_QUERY_TIMEOUT_MS: "-1" }).queryTimeoutMs).toBe(10_000);
+  });
 });
