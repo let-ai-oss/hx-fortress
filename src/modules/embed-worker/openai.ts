@@ -142,7 +142,7 @@ export function createOpenAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
         if (timedOut) {
           // No `status` ⇒ embedBatch re-throws (it only splits on 400) ⇒ the
           // hxSemanticSearch catch maps it to unavailable("openai_temporarily_unavailable").
-          throw new Error(`openai embeddings request timed out after ${timeoutMs}ms`);
+          throw new Error(`openai embeddings request timed out after ${timeoutMs}ms`, { cause: netErr });
         }
         throw netErr;
       }
