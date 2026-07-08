@@ -122,8 +122,20 @@ const SCOPE_SCHEMA = {
 
 const DATE_FILTERS = {
   family: { type: "string", description: "Filter by device family." },
-  fromDate: { type: "string", description: "ISO date lower bound." },
-  toDate: { type: "string", description: "ISO date upper bound." },
+  fromDate: {
+    type: "string",
+    description:
+      "Lower bound. A bare date (YYYY-MM-DD) is a day boundary in `timezone`; a full ISO-8601 timestamp is an absolute instant (for sub-day windows).",
+  },
+  toDate: {
+    type: "string",
+    description:
+      "Upper bound — day-inclusive for a bare date, instant-inclusive for a timestamp.",
+  },
+  timezone: {
+    type: "string",
+    description: "IANA timezone the bare-date bounds are interpreted in (e.g. Europe/Warsaw). Default UTC.",
+  },
 } as const;
 
 export const MCP_TOOLS: McpTool[] = [
@@ -153,6 +165,7 @@ export const MCP_TOOLS: McpTool[] = [
           family: str(a.family),
           fromDate: str(a.fromDate),
           toDate: str(a.toDate),
+          timezone: str(a.timezone),
         }),
       );
     },
@@ -186,6 +199,7 @@ export const MCP_TOOLS: McpTool[] = [
           family: str(a.family),
           fromDate: str(a.fromDate),
           toDate: str(a.toDate),
+          timezone: str(a.timezone),
           cwdContains: str(a.cwdContains),
           search: str(a.search),
           limit: numOpt(a.limit),
@@ -279,6 +293,7 @@ export const MCP_TOOLS: McpTool[] = [
           family: str(a.family),
           fromDate: str(a.fromDate),
           toDate: str(a.toDate),
+          timezone: str(a.timezone),
         }),
       );
     },
@@ -286,7 +301,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: "hx_sessions_aggregate",
     description:
-      "Aggregate productivity metrics over the in-scope sessions (total sessions, active time, user/assistant message counts, tool calls by type, files touched, lines added/removed), bucketed by each session's primary day. Computed live from the per-session hx.session_facts index JOINed to the live session row.",
+      "Aggregate productivity metrics over the in-scope sessions (total sessions, active time, user/assistant message counts, tool calls by type, files touched, lines added/removed). The date range windows on each session's last activity (last_activity_at) — same as hx_sessions_list — so a long-running or multi-day session active in-window is counted. Computed live from the per-session hx.session_facts index JOINed to the live session row.",
     inputSchema: {
       type: "object",
       properties: {
@@ -308,6 +323,7 @@ export const MCP_TOOLS: McpTool[] = [
           family: str(a.family),
           fromDate: str(a.fromDate),
           toDate: str(a.toDate),
+          timezone: str(a.timezone),
           cwdContains: str(a.cwdContains),
           groupBy: gb === "user" || gb === "repo" || gb === "cwd" ? gb : undefined,
         }),

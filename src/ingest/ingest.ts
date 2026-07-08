@@ -432,6 +432,17 @@ function ingestEventPayload(input: IngestCommitInput, sessionRowId: string, pars
   };
 }
 
+/** The later of two ISO timestamps by absolute INSTANT (not lexical — event
+ *  strings can carry different offsets), preserving the winning string form.
+ *  Nulls drop out; both-null ⇒ null. Used to advance last_activity_at
+ *  monotonically on append so an out-of-order / backfill chunk can't regress it
+ *  — used here and in the gateway's session.json metadata artifact. */
+export function maxIso(a: string | null | undefined, b: string | null | undefined): string | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return Date.parse(b) > Date.parse(a) ? b : a;
+}
+
 /** Ingest a parent session commit into the bundled hx schema. */
 export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<void> {
   const userExternalId = input.key.userId;
@@ -473,7 +484,13 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       estCostUsd: (prev?.estCostUsd ?? 0) + parsed.costUsd,
       chunkCount: input.replace ? 1 : (existing?.chunkCount ?? 0) + 1,
     };
-    const lastActivityAt = parsed.lastActivityAt ?? existing?.lastActivityAt ?? now;
+    // On append advance monotonically (max over existing + this chunk's
+    // newest event) so an out-of-order / backfill chunk can't drag last_activity_at
+    // backwards; on a `replace` the chunk is authoritative (the lane is rebuilt
+    // from it), so take its value straight. `now` only when no event ts exists.
+    const lastActivityAt = input.replace
+      ? (parsed.lastActivityAt ?? existing?.lastActivityAt ?? now)
+      : (maxIso(existing?.lastActivityAt, parsed.lastActivityAt) ?? now);
     const meta = input.meta;
 
     let sessionRowId: string;
@@ -655,7 +672,10 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
       estCostUsd: (prev?.estCostUsd ?? 0) + parsed.costUsd,
       chunkCount: input.replace ? 1 : (existingAgent?.chunkCount ?? 0) + 1,
     };
-    const agentLastActivityAt = parsed.lastActivityAt ?? existingAgent?.lastActivityAt ?? now;
+    // Monotonic on append, authoritative on replace (mirrors the parent lane).
+    const agentLastActivityAt = input.replace
+      ? (parsed.lastActivityAt ?? existingAgent?.lastActivityAt ?? now)
+      : (maxIso(existingAgent?.lastActivityAt, parsed.lastActivityAt) ?? now);
 
     let agentRowId: string;
     if (existingAgent) {

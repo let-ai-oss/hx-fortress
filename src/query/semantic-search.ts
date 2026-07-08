@@ -12,7 +12,7 @@
 // `unavailable:{reason}` naming the missing/invalid dependency — the caller
 // surfaces it to the user rather than silently returning worse (keyword) results.
 
-import { and, eq, gte, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { sanitizeDbError } from "../host/postgres/sanitize";
@@ -20,6 +20,7 @@ import { hxSessions, hxTurns } from "../host/postgres/schema";
 import { hxEmbeddings } from "../host/postgres/schema/embeddings";
 import { EmbedAccountError, type Embedder } from "../modules/embed-worker/openai";
 import { scrubSecrets } from "../modules/embed-worker/scrub";
+import { dateWindowConditions } from "./date-window";
 import { scopePredicate, type FortressScope } from "./scope";
 
 export interface SemanticSearchInput {
@@ -27,8 +28,11 @@ export interface SemanticSearchInput {
   queryText: string;
   k?: number;
   family?: string;
+  /** Bare date (day boundary in `timezone`) or a full ISO-8601 instant. */
   fromDate?: string;
   toDate?: string;
+  /** IANA timezone the bare-date bounds are interpreted in. Default UTC. */
+  timezone?: string;
 }
 
 export interface SemanticHit {
@@ -137,11 +141,9 @@ export async function hxSemanticSearch(
     isNull(hxTurns.deletedAt),
   ];
   if (input.family) conditions.push(eq(hxSessions.family, input.family));
-  if (input.fromDate) conditions.push(gte(hxTurns.eventTs, input.fromDate));
-  // toDate is a bare date; `<= toDate` on a timestamptz coerces to midnight and
-  // drops the whole toDate day — use a day-inclusive upper bound (matches
-  // hx_sessions_aggregate's date-bucketed primary_day semantics).
-  if (input.toDate) conditions.push(sql`${hxTurns.eventTs} < (${input.toDate}::date + interval '1 day')`);
+  // Semantic search windows on each turn's own event_ts (a matching turn is what
+  // the caller wants dated), via the shared timezone-aware, day-inclusive helper.
+  conditions.push(...dateWindowConditions(hxTurns.eventTs, input.fromDate, input.toDate, input.timezone));
 
   try {
     // Selective-scope recall: the HNSW index applies the scope WHERE only AFTER

@@ -3,11 +3,12 @@
 // family, date range (last_activity_at), cwd substring, free-text search across
 // title/last_user_text/last_assistant_text. Scope applied on the live row (A6).
 
-import { and, desc, eq, gte, ilike, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, ilike, or, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxUsers } from "../host/postgres/schema";
 import { hxSessionFacts } from "../host/postgres/schema/facts";
+import { dateWindowConditions } from "./date-window";
 import { scopePredicate, type FortressScope } from "./scope";
 
 // Curated metadata projection shared by list + get (a superset that excludes the
@@ -42,8 +43,11 @@ export type SessionMeta = Pick<typeof hxSessions.$inferSelect, keyof typeof SESS
 export interface ListSessionsInput {
   scope: FortressScope;
   family?: string;
+  /** Bare date (day boundary in `timezone`) or a full ISO-8601 instant. */
   fromDate?: string;
   toDate?: string;
+  /** IANA timezone the bare-date bounds are interpreted in. Default UTC. */
+  timezone?: string;
   cwdContains?: string;
   search?: string;
   limit?: number;
@@ -83,11 +87,11 @@ export async function hxSessionsList(
 
   const conditions: SQL[] = [scopePredicate(input.scope)];
   if (input.family) conditions.push(eq(hxSessions.family, input.family));
-  if (input.fromDate) conditions.push(gte(hxSessions.lastActivityAt, input.fromDate));
-  // toDate is a bare date; `<= toDate` on a timestamptz coerces to midnight and
-  // drops the whole toDate day — use a day-inclusive upper bound (matches
-  // hx_sessions_aggregate's date-bucketed primary_day semantics).
-  if (input.toDate) conditions.push(sql`${hxSessions.lastActivityAt} < (${input.toDate}::date + interval '1 day')`);
+  // Shared last-activity, day-inclusive, timezone-aware window semantics across
+  // every session-query surface (list, aggregate, widgets).
+  conditions.push(
+    ...dateWindowConditions(hxSessions.lastActivityAt, input.fromDate, input.toDate, input.timezone),
+  );
   if (input.cwdContains) conditions.push(ilike(hxSessions.cwd, `%${input.cwdContains}%`));
   if (input.search) {
     const s = `%${input.search}%`;
