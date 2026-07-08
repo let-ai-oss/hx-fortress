@@ -220,6 +220,13 @@ export interface EmbedConfig {
   maxWaitMs: number;
   /** M-9e durable daily OpenAI token budget. 0 ⇒ unlimited (no accounting). */
   dailyTokenBudget: number;
+  /** MC-2517 · QUERY-path embed bounds (hx_semantic_search). Each query embed
+   *  attempt is capped at `queryTimeoutMs` and retried up to `queryMaxRetries`
+   *  times, so a stalled OpenAI call fails fast with a typed `unavailable` (relayed
+   *  to the user) instead of hanging the search until the workbench kills it. The
+   *  BACKGROUND worker keeps its own unbounded, high-retry behavior. */
+  queryTimeoutMs: number;
+  queryMaxRetries: number;
 }
 
 function intEnv(value: string | undefined, fallback: number): number {
@@ -294,6 +301,13 @@ export function resolveEmbedConfig(
     debounceMs: intEnv(env.FORTRESS_EMBED_DEBOUNCE_MS, 5_000),
     maxWaitMs: intEnv(env.FORTRESS_EMBED_MAX_WAIT_MS, 30 * 60_000),
     dailyTokenBudget: intEnvAllowingZero(env.FORTRESS_EMBED_DAILY_TOKEN_BUDGET, 5_000_000),
+    // MC-2517 · the query-embed budget nests UNDER the workbench 60s MCP ceiling:
+    // ~3 attempts × 10s + capped backoff ≈ 33s worst case, then a typed `unavailable`.
+    // Raising these env vars past the ~55s fortress dispatch backstop only degrades
+    // the message (generic fortress_unreachable vs typed openai_temporarily_unavailable),
+    // never a silent kill — the backstop still returns a typed error before the 60s.
+    queryTimeoutMs: intEnv(env.FORTRESS_EMBED_QUERY_TIMEOUT_MS, 10_000),
+    queryMaxRetries: intEnvAllowingZero(env.FORTRESS_EMBED_QUERY_MAX_RETRIES, 2),
   };
 }
 

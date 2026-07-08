@@ -39,6 +39,12 @@ export interface OpenAIEmbedderOptions {
    *  pathological (dense/CJK/code) turn from tripping the token limit. */
   maxChars?: number;
   maxRetries?: number;
+  /** MC-2517 · per-attempt request timeout (ms). When set, each OpenAI HTTP attempt
+   *  is bounded by `AbortSignal.timeout` and a timed-out / transport-faulted attempt
+   *  is retried (up to `maxRetries`) before failing — so the QUERY-path embedder
+   *  fails fast with a typed error instead of hanging a semantic search on a stalled
+   *  socket. Omit (the background worker) to keep the prior unbounded behavior. */
+  timeoutMs?: number;
   /** Injectable for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -96,6 +102,7 @@ export function createOpenAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const doFetch = options.fetchImpl ?? fetch;
+  const timeoutMs = options.timeoutMs;
 
   // One raw embed call for `inputs`, retrying 429 / 5xx with backoff. On a
   // non-retryable failure it THROWS — EmbedAccountError for quota/auth (the
@@ -105,14 +112,40 @@ export function createOpenAIEmbedder(options: OpenAIEmbedderOptions): Embedder {
     if (inputs.length === 0) return [];
     let attempt = 0;
     for (;;) {
-      const res = await doFetch(`${baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${options.apiKey}`,
-        },
-        body: JSON.stringify({ model, input: inputs, dimensions }),
-      });
+      let res: Response;
+      try {
+        res = await doFetch(`${baseUrl}/embeddings`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${options.apiKey}`,
+          },
+          body: JSON.stringify({ model, input: inputs, dimensions }),
+          // MC-2517 · bound each attempt so a stalled/hung connection can't wedge a
+          // semantic search forever. Only the query-path embedder sets timeoutMs; the
+          // background worker leaves it undefined (unbounded, as before).
+          signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+        });
+      } catch (netErr) {
+        // A timed-out (AbortSignal.timeout ⇒ name "TimeoutError") or otherwise
+        // faulted transport. The bounded (query-path) embedder retries it up to
+        // maxRetries with the same capped backoff, then throws a clear timeout error;
+        // the unbounded worker embedder (no timeoutMs) propagates at once, preserving
+        // its prior abort-the-pass-and-retry-next-pass behavior.
+        if (timeoutMs && attempt < maxRetries) {
+          await sleep(Math.min(1000 * 2 ** attempt, 8000));
+          attempt += 1;
+          continue;
+        }
+        const timedOut =
+          netErr instanceof Error && (netErr.name === "TimeoutError" || netErr.name === "AbortError");
+        if (timedOut) {
+          // No `status` ⇒ embedBatch re-throws (it only splits on 400) ⇒ the
+          // hxSemanticSearch catch maps it to unavailable("openai_temporarily_unavailable").
+          throw new Error(`openai embeddings request timed out after ${timeoutMs}ms`, { cause: netErr });
+        }
+        throw netErr;
+      }
 
       if (res.ok) {
         const json = (await res.json()) as EmbeddingResponse;

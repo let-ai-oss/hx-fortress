@@ -332,6 +332,24 @@ export async function runFortressHost(
         baseUrl: embedConfig.baseUrl,
       })
     : null;
+  // MC-2517 · the QUERY-path embedder (hx_semantic_search, served over the tunnel
+  // and the HTTP gateway) is BOUNDED — each OpenAI attempt is time-capped and
+  // retried a few times (config.queryTimeoutMs / queryMaxRetries). A stalled
+  // embeddings call then fails fast with a typed `unavailable` the agent relays,
+  // instead of hanging the MCP call until the workbench's 60s ceiling kills it
+  // silently. The background embed worker keeps the unbounded `embedder` above (it
+  // tolerates slow OpenAI and just retries next pass). Same key/model/dimensions/
+  // baseUrl, so vector distances stay comparable across the two.
+  const queryEmbedder: Embedder | null = embedConfig.enabled
+    ? createOpenAIEmbedder({
+        apiKey: embedConfig.apiKey,
+        model: embedConfig.model,
+        dimensions: embedConfig.dimensions,
+        baseUrl: embedConfig.baseUrl,
+        timeoutMs: embedConfig.queryTimeoutMs,
+        maxRetries: embedConfig.queryMaxRetries,
+      })
+    : null;
   // H-7 · loud one-time warning when conversational text is embedded against the
   // PUBLIC OpenAI endpoint — it carries no zero-retention/DPA guarantee. Steer the
   // operator at a zero-retention endpoint via FORTRESS_OPENAI_BASE_URL.
@@ -350,7 +368,8 @@ export async function runFortressHost(
     // Read-only tools → the SELECT-only RO handle (least-privilege).
     db: resolveHxDbRead,
     store: () => vaultModule.getStore(),
-    embedder,
+    // MC-2517 · the bounded query embedder (fails fast on a stalled OpenAI call).
+    embedder: queryEmbedder,
     // H-4 · a tunnel MCP read runs under a verified read grant (scope-bound).
     verifyGrant: verifyGrantFn,
   }).handle;
@@ -370,7 +389,8 @@ export async function runFortressHost(
       // RW handle for the ingest write path; RO handle for the /mcp read tools.
       db: resolveHxDb,
       dbRead: resolveHxDbRead,
-      embedder,
+      // MC-2517 · the bounded query embedder (fails fast on a stalled OpenAI call).
+      embedder: queryEmbedder,
       notify: emitIngest,
     });
   }

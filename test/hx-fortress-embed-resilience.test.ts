@@ -105,6 +105,71 @@ describe("hx-fortress embed — openai input isolation (A3 poison pill)", () => 
   });
 });
 
+// ── MC-2517 · query-path per-attempt timeout (no DB, no OpenAI) ───────────────
+// The root cause of MC-2517: a query-time embed hung on a stalled OpenAI socket
+// until the workbench killed it at 30s. The QUERY-path embedder now sets a
+// per-attempt timeout so a hung request fails fast (typed) after a bounded retry,
+// while the background worker (no timeoutMs) keeps its prior unbounded behavior.
+
+/** A fake OpenAI endpoint that HANGS until its per-attempt AbortSignal fires —
+ *  unless `succeedFromAttempt` is set and this call is at/after it (then 200). */
+function hangingFetch(opts: { succeedFromAttempt?: number } = {}): {
+  fetchImpl: typeof fetch;
+  calls: () => number;
+} {
+  let calls = 0;
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    calls += 1;
+    if (opts.succeedFromAttempt && calls >= opts.succeedFromAttempt) {
+      return okBody((JSON.parse(String(init?.body ?? "{}")) as { input: string[] }).input);
+    }
+    const signal = init?.signal;
+    // Never resolve on its own — only the caller's AbortSignal.timeout ends it,
+    // exactly like a stalled OpenAI connection (TCP open, no bytes).
+    return await new Promise<Response>((_resolve, reject) => {
+      const abort = (): void =>
+        reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+      if (signal?.aborted) return abort();
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls: () => calls };
+}
+
+describe("hx-fortress embed — MC-2517 query-path timeout (A3)", () => {
+  test("a bounded embedder times out a hung request, retries, then throws a timeout error", async () => {
+    const { fetchImpl, calls } = hangingFetch(); // never succeeds → always aborts
+    const embedder = createOpenAIEmbedder({ apiKey: "test", dimensions: DIMS, fetchImpl, timeoutMs: 20, maxRetries: 1 });
+    await expect(embedder.embed(["where is my search session"])).rejects.toThrow(/timed out/i);
+    expect(calls()).toBe(2); // 1 initial attempt + 1 retry, then throw (bounded)
+  }, 10_000);
+
+  test("a bounded embedder recovers when a transient hang clears on retry", async () => {
+    const { fetchImpl, calls } = hangingFetch({ succeedFromAttempt: 2 }); // attempt 1 hangs, 2 ok
+    const embedder = createOpenAIEmbedder({ apiKey: "test", dimensions: DIMS, fetchImpl, timeoutMs: 20, maxRetries: 2 });
+    const out = await embedder.embed(["where is my search session"]);
+    expect(out[0]).not.toBeNull();
+    expect(out[0]!.length).toBe(DIMS);
+    expect(calls()).toBe(2); // hung once, succeeded on the retry
+  }, 10_000);
+
+  test("the UNBOUNDED worker embedder attaches no timeout signal; the bounded query path does", async () => {
+    // A mutable holder (not a `let`) so TS keeps the boolean type at the assertion
+    // rather than narrowing it to the initial value across the fetch callback.
+    const saw: { signal?: boolean } = {};
+    const recordingFetch = (async (_u: string | URL | Request, init?: RequestInit) => {
+      saw.signal = init?.signal != null;
+      return okBody((JSON.parse(String(init?.body ?? "{}")) as { input: string[] }).input);
+    }) as unknown as typeof fetch;
+
+    await createOpenAIEmbedder({ apiKey: "test", dimensions: DIMS, fetchImpl: recordingFetch }).embed(["x"]);
+    expect(saw.signal).toBe(false); // worker path: no AbortSignal (behavior preserved)
+
+    await createOpenAIEmbedder({ apiKey: "test", dimensions: DIMS, fetchImpl: recordingFetch, timeoutMs: 5_000 }).embed(["x"]);
+    expect(saw.signal).toBe(true); // query path: bounded by an AbortSignal
+  });
+});
+
 // ── worker drain + dead-letter (DB, no OpenAI) ───────────────────────────────
 
 const ATTR: IngestAttribution = { orgExternalId: null, projectExternalId: null, repoSlug: null, deviceId: null };
