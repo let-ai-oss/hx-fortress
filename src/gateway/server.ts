@@ -25,7 +25,7 @@ import {
   type CapabilityClaims,
   type GrantClaims,
 } from "./capability-token";
-import { ingestAgentCommit, ingestCommit, type IngestAttribution } from "../ingest/ingest";
+import { ingestAgentCommit, ingestCommit, maxIso, type IngestAttribution } from "../ingest/ingest";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestNotification } from "../host/types";
 import type { Embedder } from "../modules/embed-worker/openai";
@@ -409,8 +409,12 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                     eventCount: num(meta?.eventCount, existing?.eventCount ?? 0),
                     userTextCount: num(meta?.userTextCount, existing?.userTextCount ?? 0),
                     assistantCount: num(meta?.assistantCount, existing?.assistantCount ?? 0),
-                    lastActivityAt:
-                      optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now,
+                    // MC-2522: same monotonic-on-append / authoritative-on-replace
+                    // rule as the Postgres row (ingestCommit) — an out-of-order /
+                    // backfill chunk must not regress the artifact either.
+                    lastActivityAt: replace
+                      ? (optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now)
+                      : (maxIso(existing?.lastActivityAt, optionalString(meta?.lastActivityAt)) ?? now),
                     firstSeenAt: existing?.firstSeenAt ?? now,
                     updatedAt: now,
                     cwd: optionalString(meta?.cwd) ?? existing?.cwd ?? null,

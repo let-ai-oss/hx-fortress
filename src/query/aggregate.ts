@@ -7,20 +7,27 @@
 // soft-deleted session is correct on every call. Fail-closed: an empty scope ⇒
 // `scopePredicate` is `false` ⇒ zeros.
 
-import { and, eq, gte, ilike, isNull, lte, sql, type SQL } from "drizzle-orm";
+import { and, eq, ilike, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxRepos, hxSessions, hxUsers } from "../host/postgres/schema";
 import { hxSessionFacts } from "../host/postgres/schema/facts";
+import { dateWindowConditions } from "./date-window";
 import { scopePredicate, type FortressScope } from "./scope";
 
 export interface AggregateInput {
   scope: FortressScope;
   family?: string;
-  /** ISO date lower bound on the session's primary day (the §10 bucket). */
+  /** Lower bound on the session's last activity (`last_activity_at`), matching
+   *  hx_sessions_list + the widgets — a session is in-window iff it was last
+   *  active on/after this. A bare date (YYYY-MM-DD) is a day boundary in
+   *  `timezone`; a full ISO-8601 timestamp is an absolute instant (sub-day). */
   fromDate?: string;
-  /** ISO date upper bound on the session's primary day. */
+  /** Upper bound on last activity (day-inclusive for a bare date; instant-
+   *  inclusive for a timestamp). */
   toDate?: string;
+  /** IANA timezone the bare-date bounds are interpreted in. Default UTC. */
+  timezone?: string;
   cwdContains?: string;
   /** Also return per-bucket subtotals in `groups`: "user" = per session owner
    *  (team/org load), "repo" = per repository, "cwd" = per working directory.
@@ -43,7 +50,10 @@ export interface AggregateResult {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   toolCallsByType: Record<string, number>;
-  /** Primary-day span of the matched sessions (null when the scope is empty). */
+  /** Primary-day (first-activity) span of the matched sessions — DESCRIPTIVE, not
+   *  the filter (MC-2522: the window filters on last_activity_at). So a "last 7
+   *  days" aggregate can honestly report a firstDay before the window: a session
+   *  that started earlier but was last active in-window. Null when scope is empty. */
   firstDay: string | null;
   lastDay: string | null;
   /** Per-bucket subtotals, present only when groupBy is set. key = the bucket:
@@ -78,9 +88,14 @@ function num(v: unknown): number {
 export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Promise<AggregateResult> {
   const conditions: SQL[] = [scopePredicate(input.scope), isNull(hxSessions.deletedAt)];
   if (input.family) conditions.push(eq(hxSessions.family, input.family));
-  // The §10 day bucket is the facts row's primary_day, not the session activity window.
-  if (input.fromDate) conditions.push(gte(hxSessionFacts.primaryDay, input.fromDate));
-  if (input.toDate) conditions.push(lte(hxSessionFacts.primaryDay, input.toDate));
+  // MC-2522: window on last activity (`last_activity_at`), NOT the facts row's
+  // primary_day (first-activity day) — a long-running or multi-day session that
+  // was active in-window must be counted, matching hx_sessions_list + the widgets.
+  // hx.sessions is innerJoin'd below, so lastActivityAt is in scope. Timezone- and
+  // datetime-aware bounds via the shared helper (day-inclusive upper bound).
+  conditions.push(
+    ...dateWindowConditions(hxSessions.lastActivityAt, input.fromDate, input.toDate, input.timezone),
+  );
   if (input.cwdContains) conditions.push(ilike(hxSessions.cwd, `%${input.cwdContains}%`));
   const where = and(...conditions);
 

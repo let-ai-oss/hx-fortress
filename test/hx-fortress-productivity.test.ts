@@ -23,10 +23,24 @@ const ATTR: IngestAttribution = {
 
 const SUFFIX = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const SESSION_ID = `sess-prod-${SUFFIX}`;
+// A second, MULTI-DAY session (first-active 2026-06-28, last-active 2026-07-02)
+// used only by test (e) to prove last-activity windowing (MC-2522).
+const MULTI_SESSION_ID = `sess-prod-multi-${SUFFIX}`;
+// A third session for the last_activity_at monotonicity test (g).
+const MONO_SESSION_ID = `sess-prod-mono-${SUFFIX}`;
+// A fourth session for the timezone / hour-granularity window test (h): a single
+// event at 2026-07-08T01:00Z, which is calendar day 07-08 in UTC but 07-07 in
+// America/New_York (EDT = UTC-4).
+const TZ_SESSION_ID = `sess-prod-tz-${SUFFIX}`;
 const USER_ID = `user-prod-${SUFFIX}`;
 const KEY = { userId: USER_ID, family: "claude-cli", sessionId: SESSION_ID };
+const MULTI_KEY = { userId: USER_ID, family: "claude-cli", sessionId: MULTI_SESSION_ID };
+const MONO_KEY = { userId: USER_ID, family: "claude-cli", sessionId: MONO_SESSION_ID };
+const TZ_KEY = { userId: USER_ID, family: "claude-cli", sessionId: TZ_SESSION_ID };
 
 const inScope = { userExternalId: USER_ID, family: KEY.family, sessionId: SESSION_ID };
+const multiScope = { userExternalId: USER_ID, family: MULTI_KEY.family, sessionId: MULTI_SESSION_ID };
+const tzScope = { userExternalId: USER_ID, family: TZ_KEY.family, sessionId: TZ_SESSION_ID };
 
 // 1 user turn · 2 assistant text turns · an Edit on /src/foo.ts (old 2 lines →
 // new 4 lines) · a Write of /src/bar.ts (3 lines), with event_ts a few minutes
@@ -120,6 +134,30 @@ function replaceChunk(): string {
   ].join("\n");
 }
 
+// A multi-day session for MC-2522 last-activity windowing: FIRST activity on
+// 2026-06-28 (⇒ primary_day = 2026-06-28) and LAST activity on 2026-07-02 23:30
+// (⇒ last_activity_at = 2026-07-02T23:30Z). A "last few days of July" window must
+// include it (last-active in-window) even though its first-activity day is weeks
+// earlier — the exact case the old primary_day predicate wrongly dropped.
+function multiDayChunk(): string {
+  return [
+    JSON.stringify({
+      type: "user",
+      timestamp: "2026-06-28T09:00:00Z",
+      message: { content: [{ type: "text", text: "kick off a long-running task" }] },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-02T23:30:00Z",
+      message: {
+        model: "claude-opus-4-8",
+        content: [{ type: "text", text: "still on it days later" }],
+        usage: { input_tokens: 5, output_tokens: 3 },
+      },
+    }),
+  ].join("\n");
+}
+
 interface FactsRow {
   user_msgs: number;
   assistant_msgs: number;
@@ -153,10 +191,20 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, §13-A4/�
 
   afterAll(async () => {
     if (!DSN) return;
-    await sqlx.exec(`DELETE FROM hx.ingest_events WHERE session_id_ext = '${SESSION_ID}'`);
+    const ids = `'${SESSION_ID}', '${MULTI_SESSION_ID}', '${MONO_SESSION_ID}', '${TZ_SESSION_ID}'`;
+    await sqlx.exec(`DELETE FROM hx.ingest_events WHERE session_id_ext IN (${ids})`);
     // hx.session_facts / turns / tool_calls cascade off the session delete.
-    await sqlx.exec(`DELETE FROM hx.sessions WHERE session_id = '${SESSION_ID}'`);
+    await sqlx.exec(`DELETE FROM hx.sessions WHERE session_id IN (${ids})`);
   });
+
+  /** The stored last_activity_at (ISO) for a session, read from the live row. */
+  async function sessionLastActivity(sessionId: string): Promise<string | null> {
+    const rows = await sqlx.query<{ last_activity_at: string | null }>(
+      `SELECT to_char(last_activity_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS last_activity_at
+         FROM hx.sessions WHERE session_id = '${sessionId}'`,
+    );
+    return rows[0]?.last_activity_at ?? null;
+  }
 
   async function facts(): Promise<FactsRow> {
     const rows = await sqlx.query<FactsRow>(
@@ -229,7 +277,9 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, §13-A4/�
     expect(out.toolCallsByType).toEqual({});
   });
 
-  test("(e) the date filter buckets on primary_day", async () => {
+  test("(e) the date filter windows on last activity, not primary_day (MC-2522)", async () => {
+    // The single-day session (first- AND last-active 2026-06-30) is in-window for
+    // a 06-30 query and out for a later one — the baseline both predicates agree on.
     const inDay = await hxSessionsAggregate(db, {
       scope: { identities: [inScope] },
       fromDate: "2026-06-30",
@@ -241,6 +291,55 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, §13-A4/�
       fromDate: "2026-07-01",
     });
     expect(otherDay.totalSessions).toBe(0);
+
+    // Seed the MULTI-DAY session: primary_day = 2026-06-28, last_activity = 07-02.
+    await ingestCommit(db, {
+      attribution: ATTR,
+      key: MULTI_KEY,
+      chunkId: "m1",
+      replace: false,
+      chunkText: multiDayChunk(),
+      totalBytes: 256,
+      componentCount: 1,
+      meta: { title: "Multi-day", cwd: "/work/let-forge" },
+    });
+    const scope = { identities: [multiScope] };
+
+    // The bug case: window entirely AFTER first-activity day but covering the last
+    // activity. last_activity_at (07-02) ∈ [07-01, 07-02] ⇒ INCLUDED. The old
+    // primary_day predicate (06-28 ∉ window) wrongly returned 0 here.
+    const lastActiveInWindow = await hxSessionsAggregate(db, {
+      scope,
+      fromDate: "2026-07-01",
+      toDate: "2026-07-02",
+    });
+    expect(lastActiveInWindow.totalSessions).toBe(1);
+    // Facts are actually summed for the included session, not just counted.
+    expect(lastActiveInWindow.userMsgs).toBe(1);
+    expect(lastActiveInWindow.assistantMsgs).toBe(1);
+
+    // Day-inclusive upper bound: querying just 07-02 still catches the 23:30 activity.
+    const inclusiveUpper = await hxSessionsAggregate(db, {
+      scope,
+      fromDate: "2026-07-02",
+      toDate: "2026-07-02",
+    });
+    expect(inclusiveUpper.totalSessions).toBe(1);
+
+    // The mirror case: window on the FIRST-activity day only. last_activity (07-02)
+    // is OUTSIDE ⇒ EXCLUDED. The old primary_day predicate (06-28 ∈ window) wrongly
+    // included it.
+    const startDayOnly = await hxSessionsAggregate(db, {
+      scope,
+      fromDate: "2026-06-28",
+      toDate: "2026-06-28",
+    });
+    expect(startDayOnly.totalSessions).toBe(0);
+
+    // firstDay/lastDay stay the DESCRIPTIVE primary-day span (not the window): an
+    // in-window aggregate can honestly report a firstDay that precedes the window.
+    expect(lastActiveInWindow.firstDay).toBe("2026-06-28");
+    expect(lastActiveInWindow.lastDay).toBe("2026-06-28");
   });
 
   test("(f) a replace recomputes the facts row — no double-count", async () => {
@@ -272,5 +371,85 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, §13-A4/�
     expect(out.linesAdded).toBe(1);
     expect(out.toolCallsByType).toEqual({ Edit: 1 });
     expect(out.activeMs).toBe(90_000);
+  });
+
+  test("(g) last_activity_at advances monotonically on append, authoritative on replace (MC-2522)", async () => {
+    const userChunk = (ts: string): string =>
+      JSON.stringify({ type: "user", timestamp: ts, message: { content: [{ type: "text", text: "hi" }] } });
+    const ingest = (chunkId: string, ts: string, replace: boolean) =>
+      ingestCommit(db, {
+        attribution: ATTR,
+        key: MONO_KEY,
+        chunkId,
+        replace,
+        chunkText: userChunk(ts),
+        totalBytes: 64,
+        componentCount: 1,
+        meta: { title: "Mono", cwd: "/work/let-forge" },
+      });
+
+    // Establish the newest event at 2026-07-05T12:00.
+    await ingest("g1", "2026-07-05T12:00:00Z", false);
+    expect(await sessionLastActivity(MONO_SESSION_ID)).toBe("2026-07-05T12:00:00Z");
+
+    // Append an OUT-OF-ORDER / backfill chunk whose newest event is EARLIER —
+    // last_activity_at must NOT regress (the pre-fix overwrite would drop it to 07-01).
+    await ingest("g2", "2026-07-01T08:00:00Z", false);
+    expect(await sessionLastActivity(MONO_SESSION_ID)).toBe("2026-07-05T12:00:00Z");
+
+    // A later append still advances it forward.
+    await ingest("g3", "2026-07-06T09:30:00Z", false);
+    expect(await sessionLastActivity(MONO_SESSION_ID)).toBe("2026-07-06T09:30:00Z");
+
+    // A `replace` is authoritative — the session is rebuilt from the chunk, so
+    // last_activity_at takes the replacing chunk's value even if it's earlier.
+    await ingest("g4", "2026-07-03T15:00:00Z", true);
+    expect(await sessionLastActivity(MONO_SESSION_ID)).toBe("2026-07-03T15:00:00Z");
+  });
+
+  test("(h) date window is timezone-aware and datetime-capable (MC-2522)", async () => {
+    // last_activity_at = 2026-07-08T01:00Z — calendar day 07-08 in UTC, but 07-07
+    // in America/New_York (EDT, UTC-4: 2026-07-07 21:00 local).
+    await ingestCommit(db, {
+      attribution: ATTR,
+      key: TZ_KEY,
+      chunkId: "h1",
+      replace: false,
+      chunkText: JSON.stringify({
+        type: "user",
+        timestamp: "2026-07-08T01:00:00Z",
+        message: { content: [{ type: "text", text: "late night" }] },
+      }),
+      totalBytes: 64,
+      componentCount: 1,
+      meta: { title: "TZ", cwd: "/work/let-forge" },
+    });
+    const scope = { identities: [tzScope] };
+    const count = async (input: { fromDate?: string; toDate?: string; timezone?: string }) =>
+      (await hxSessionsAggregate(db, { scope, ...input })).totalSessions;
+
+    // Same "07-08" query bucket, different tz → different membership.
+    expect(await count({ fromDate: "2026-07-08", toDate: "2026-07-08", timezone: "UTC" })).toBe(1);
+    // In New_York the activity belongs to 07-07, so a NY "07-08" window excludes it…
+    expect(
+      await count({ fromDate: "2026-07-08", toDate: "2026-07-08", timezone: "America/New_York" }),
+    ).toBe(0);
+    // …and a NY "07-07" window includes it (the instant is 07-07 21:00 local).
+    expect(
+      await count({ fromDate: "2026-07-07", toDate: "2026-07-07", timezone: "America/New_York" }),
+    ).toBe(1);
+
+    // Datetime (instant) bounds — the "last 2 hours" shape: >= an ISO instant.
+    expect(await count({ fromDate: "2026-07-08T00:30:00Z" })).toBe(1); // 01:00 ≥ 00:30
+    expect(await count({ fromDate: "2026-07-08T01:30:00Z" })).toBe(0); // 01:00 < 01:30
+    // Instant upper bound is inclusive-of-instant.
+    expect(await count({ toDate: "2026-07-08T01:00:00Z" })).toBe(1);
+    expect(await count({ toDate: "2026-07-08T00:59:00Z" })).toBe(0);
+
+    // A malformed timezone falls back to UTC (never errors).
+    expect(await count({ fromDate: "2026-07-08", toDate: "2026-07-08", timezone: "Not/AZone;DROP" })).toBe(1);
+    // A SHAPE-VALID but non-existent zone also falls back to UTC — must NOT reach
+    // Postgres `AT TIME ZONE 'Foo/Bar'` (which would raise + fail the query).
+    expect(await count({ fromDate: "2026-07-08", toDate: "2026-07-08", timezone: "Foo/Bar" })).toBe(1);
   });
 });
