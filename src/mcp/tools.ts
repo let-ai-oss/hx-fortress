@@ -22,6 +22,7 @@ import { hxSessionReadEvents } from "../query/read-events";
 import { hxSessionSearch } from "../query/search";
 import { hxSemanticSearch } from "../query/semantic-search";
 import { hxSessionsList } from "../query/sessions-list";
+import { hxTextOccurrences } from "../query/text-occurrences";
 import { parseScope } from "../query/scope";
 
 export interface McpToolContext {
@@ -57,6 +58,9 @@ function str(v: unknown): string | undefined {
 }
 function numOpt(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+function strArray(v: unknown): string[] | undefined {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
 }
 
 function ok(value: unknown): McpToolResult {
@@ -326,6 +330,56 @@ export const MCP_TOOLS: McpTool[] = [
           timezone: str(a.timezone),
           cwdContains: str(a.cwdContains),
           groupBy: gb === "user" || gb === "repo" || gb === "cwd" ? gb : undefined,
+        }),
+      );
+    },
+  },
+  {
+    name: "hx_text_occurrences",
+    description:
+      "COUNT how often a literal word or phrase appears across the in-scope sessions' transcript turns — the whole-corpus, UNCAPPED text analogue of hx_sessions_aggregate (one exact SQL count; no row cap, no ranking). Returns occurrences (total literal matches, repeats counted), matchingTurns, and matchingSessions. Covers conversational text AND tool output/code. matchMode: literal_word (default, whole word — \"observer\" ≠ \"observers\"), literal_substring (matches inside larger words), or lexeme (stemmed related word forms — matchingTurns/matchingSessions only, NOT a literal count). Optionally restrict to turn kinds or a date range.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        scope: SCOPE_SCHEMA,
+        query: {
+          type: "string",
+          description: "The literal word or phrase to count (a phrase matches across any whitespace, incl. a newline).",
+        },
+        matchMode: {
+          type: "string",
+          enum: ["literal_word", "literal_substring", "lexeme"],
+          description:
+            "literal_word (default): whole-word literal match. literal_substring: literal match inside larger words. lexeme: stemmed tsvector match (related word forms) — returns matchingTurns/matchingSessions only, no occurrence count.",
+        },
+        kinds: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Restrict to these turn kinds (e.g. [\"user_text\",\"assistant_text\"] for what was SAID). Default: all text-bearing kinds, including tool output/code.",
+        },
+        ...DATE_FILTERS,
+      },
+      required: ["scope", "query"],
+    },
+    async handle(args, ctx) {
+      const guard = needDb(ctx);
+      if (guard) return guard;
+      const a = rec(args);
+      const mode = a.matchMode;
+      return ok(
+        await hxTextOccurrences(ctx.db!, {
+          scope: parseScope(a.scope),
+          query: str(a.query) ?? "",
+          matchMode:
+            mode === "literal_substring" || mode === "lexeme" || mode === "literal_word"
+              ? mode
+              : undefined,
+          kinds: strArray(a.kinds),
+          family: str(a.family),
+          fromDate: str(a.fromDate),
+          toDate: str(a.toDate),
+          timezone: str(a.timezone),
         }),
       );
     },
