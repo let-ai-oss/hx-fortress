@@ -72,6 +72,7 @@ function createMockStore(overrides: Partial<SessionStore> = {}): SessionStore {
     }),
     readCanonicalText: async () => "canonical-text-content",
     statCanonical: async () => 1024,
+    writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => "artifact-text-content",
     listSessionMetadata: async () => [],

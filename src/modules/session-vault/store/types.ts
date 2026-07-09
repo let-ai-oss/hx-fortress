@@ -77,6 +77,11 @@ export interface SessionStore {
    *  agent tools / analytics). Remote vaults prefer a signed URL and fall back
    *  to streaming bytes over the tunnel when the bucket has no public egress. */
   readCanonicalText(key: SessionKey): Promise<string>;
+  /** Write the WHOLE canonical session log from text in one shot — no staging
+   *  chunk, no compose. Used when the cloud already holds the complete transcript
+   *  and forwards it inline (the ingest path also indexes it), so it can be
+   *  persisted as the canonical in the same call rather than re-staged. Overwrites. */
+  writeCanonicalText(key: SessionKey, text: string): Promise<void>;
   /** Write a small whole-file sidecar next to the session (e.g. "tasks.json",
    *  "plan.json"). Overwrites; not the chunk/compose path. */
   writeArtifact(key: SessionKey, name: string, text: string): Promise<void>;

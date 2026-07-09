@@ -39,6 +39,7 @@ function fakeStore(overrides: Partial<SessionStore> = {}): SessionStore {
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
     }),
     readCanonicalText: async () => "",
+    writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => null,
     listSessionMetadata: async () => SAMPLE_METADATA,

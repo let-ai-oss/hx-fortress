@@ -176,6 +176,17 @@ export class S3Store implements SessionStore {
     return (await this.getBytes(canonicalObject(key))).toString("utf8");
   }
 
+  async writeCanonicalText(key: SessionKey, text: string): Promise<void> {
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: canonicalObject(key),
+        Body: text,
+        ContentType: NDJSON,
+      }),
+    );
+  }
+
   async writeArtifact(key: SessionKey, name: string, text: string): Promise<void> {
     await this.s3.send(
       new PutObjectCommand({
