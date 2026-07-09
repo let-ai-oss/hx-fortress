@@ -16,3 +16,9 @@ CLAUDE.local.md
 
 # local dev harnesses + secrets (never commit)
 scratch/
+scratch-*
+
+# security scan artifacts (never commit)
+*.sarif
+*-report.json
+secret-scan-report.md
