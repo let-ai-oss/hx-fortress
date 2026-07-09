@@ -85,6 +85,18 @@ function searchResult(res: ToolText): SearchOut {
   return JSON.parse(text) as SearchOut;
 }
 
+interface OccOut {
+  occurrences: number | null;
+  matchingTurns: number;
+  matchingSessions: number;
+  matchMode: string;
+}
+
+function occResult(res: ToolText): OccOut {
+  const text = res.content.find((c) => c.type === "text")?.text ?? "null";
+  return JSON.parse(text) as OccOut;
+}
+
 describe.if(!!DSN)("hx-fortress query + MCP slice (A4/A5/A6)", () => {
   const dsn = DSN as string;
   const sqlx = makeMigrationExec(dsn);
@@ -160,6 +172,7 @@ describe.if(!!DSN)("hx-fortress query + MCP slice (A4/A5/A6)", () => {
     // Contract-complete: the later-slice tools are registered too.
     expect(names).toContain("hx_semantic_search");
     expect(names).toContain("hx_sessions_aggregate");
+    expect(names).toContain("hx_text_occurrences");
   });
 
   test("(b) hx_session_search finds the session by tool-text keyword, scope-gated", async () => {
@@ -217,5 +230,47 @@ describe.if(!!DSN)("hx-fortress query + MCP slice (A4/A5/A6)", () => {
       body,
     });
     expect(badToken.status).toBe(401);
+  });
+
+  test("(f) hx_text_occurrences counts a literal across all kinds (incl. tool text)", async () => {
+    const res = await client.callTool({
+      name: "hx_text_occurrences",
+      arguments: { query: "ZZQX_MARKER", scope: { identities: [inScopeIdentity] } },
+    });
+    const out = occResult(res as ToolText);
+    // ZZQX_MARKER appears exactly once, in a tool_result — proves the count
+    // reaches tool output and tallies the literal (not a capped hit list).
+    expect(out.occurrences).toBe(1);
+    expect(out.matchingTurns).toBe(1);
+    expect(out.matchingSessions).toBe(1);
+    expect(out.matchMode).toBe("literal_word");
+  });
+
+  test("(g) kinds filter excludes the tool_result where the marker lives", async () => {
+    const res = await client.callTool({
+      name: "hx_text_occurrences",
+      arguments: {
+        query: "ZZQX_MARKER",
+        matchMode: "literal_substring",
+        kinds: ["user_text", "assistant_text"],
+        scope: { identities: [inScopeIdentity] },
+      },
+    });
+    const out = occResult(res as ToolText);
+    expect(out.occurrences).toBe(0);
+    expect(out.matchingTurns).toBe(0);
+  });
+
+  test("(h) a DIFFERENT identity in scope counts 0 (scope isolation)", async () => {
+    const res = await client.callTool({
+      name: "hx_text_occurrences",
+      arguments: {
+        query: "ZZQX_MARKER",
+        scope: { identities: [{ ...inScopeIdentity, userExternalId: "someone-else" }] },
+      },
+    });
+    const out = occResult(res as ToolText);
+    expect(out.occurrences).toBe(0);
+    expect(out.matchingSessions).toBe(0);
   });
 });
