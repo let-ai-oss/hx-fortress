@@ -73,6 +73,10 @@ describe("hx → Fortress gateway → bucket", () => {
         statCanonical: async () => null,
         signCanonicalDownload: async () => ({ url: `${bucketBase}/canonical`, expiresAt: "z" }),
         readCanonicalText: async () => composed.join(""),
+        writeCanonicalText: async (_key, text) => {
+          composed.length = 0;
+          composed.push(text);
+        },
         writeArtifact: async () => { },
         readArtifactText: async () => null,
         listSessionMetadata: async () => [],
@@ -141,6 +145,7 @@ describe("hx → Fortress gateway → bucket", () => {
         statCanonical: async () => null,
         signCanonicalDownload: async () => ({ url: "http://127.0.0.1/download", expiresAt: "z" }),
         readCanonicalText: async () => "",
+        writeCanonicalText: async () => { },
         writeArtifact: async () => { },
         readArtifactText: async () => null,
         listSessionMetadata: async () => [

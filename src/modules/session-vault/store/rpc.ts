@@ -34,6 +34,11 @@ export interface IngestCommitRpc {
   componentCount: number;
   meta: Record<string, unknown> | null;
   attribution: IngestAttribution;
+  /** When set, `chunkText` is the WHOLE transcript (a from-scratch replace), so
+   *  persist it verbatim as the canonical log in addition to indexing it. Callers
+   *  that upload the canonical separately (staged chunks + compose) leave this
+   *  unset. Older binaries ignore the extra field (no canonical written). */
+  writeCanonical?: boolean;
 }
 
 /** One prepared "my sessions" row, read from the fortress hx Postgres (MC-2415).
@@ -254,6 +259,10 @@ export async function handleVaultRpc(
         meta: req.meta,
         attribution: req.attribution,
       });
+      // Sessions that ship their whole transcript inline (no staged chunks) have
+      // no separately-composed canonical blob — persist it here so the canonical
+      // read path can serve them. Indexing already happened above.
+      if (req.writeCanonical) await store.writeCanonicalText(req.key, req.chunkText);
       return { method: req.method, value: { ok: true } };
     }
     case "ingestAgentCommit": {

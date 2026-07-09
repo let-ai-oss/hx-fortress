@@ -159,6 +159,12 @@ export class GcsStore implements SessionStore {
     return buf.toString("utf8");
   }
 
+  async writeCanonicalText(key: SessionKey, text: string): Promise<void> {
+    await this.bucket()
+      .file(canonicalObject(key))
+      .save(text, { contentType: "application/x-ndjson", resumable: false });
+  }
+
   async writeArtifact(key: SessionKey, name: string, text: string): Promise<void> {
     await this.bucket()
       .file(artifactObject(key, name))

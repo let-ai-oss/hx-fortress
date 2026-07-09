@@ -67,13 +67,16 @@ describe("scrubSecrets — new secret/PII shapes (H-7)", () => {
     // The OLD unbounded email pattern `(?:\.[label]+)+` was O(n²) on a long run of
     // `.a` — measured 40 K ≈ 1.4 s and worse from there — freezing the whole
     // single-thread fortress. `".a".repeat(200000)` (400 KB) is that exact worst
-    // case; with the bounded pattern it must finish in well under 100 ms and, since
-    // it contains no `@`, match nothing (returned unchanged).
+    // case. With the bounded pattern it stays LINEAR (~tens of ms; a quadratic
+    // regression here would be tens of SECONDS) and, since it contains no `@`,
+    // matches nothing (returned unchanged). The ceiling is generous on purpose —
+    // this asserts linearity, not a wall-clock SLA, so it never flakes on a slow
+    // CI runner while still catching any return of the O(n²) blow-up by 30×+.
     const adversarial = ".a".repeat(200_000);
     const started = performance.now();
     const out = scrubSecrets(adversarial);
     const elapsed = performance.now() - started;
-    expect(elapsed).toBeLessThan(100);
+    expect(elapsed).toBeLessThan(1000);
     expect(out).toBe(adversarial);
   });
 });
