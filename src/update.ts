@@ -71,8 +71,8 @@ export interface UpdateResult {
  * The download base is:
  *   `https://{host}{prefix}/_api/hx-gateway/download`
  *
- * Transformation: convert wss:// to https://; convert ws:// to http:// ONLY for
- * a loopback host (local dev) and otherwise UPGRADE it to https:// (M-2 no
+ * Transformation: convert a `wss` URL to `https`; convert a `ws` URL to `http`
+ * ONLY for a loopback host (local dev) and otherwise UPGRADE it to https:// (M-2 no
  * silent downgrade of a remote origin), then replace the `/vault-tunnel` suffix
  * with `/download`. The result is asserted https-or-loopback (M-12) so a
  * tampered cloud URL can't point the self-updater at a cleartext remote origin.
@@ -289,7 +289,7 @@ async function fetchBytesWithProgress(
   const chunks: Buffer[] = [];
   let received = 0;
   onChunk(0, total);
-  for (;;) {
+  for (; ;) {
     const { done, value } = await reader.read();
     if (done) break;
     if (value && value.length > 0) {
@@ -305,6 +305,6 @@ function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-function noop(): void {}
+function noop(): void { }
 
-function noopProgress(): void {}
+function noopProgress(): void { }

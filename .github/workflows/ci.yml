@@ -25,7 +25,9 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Lint
+      # Blocking lint = style + security rules (eslint-plugin-security).
+      # See eslint.config.js and the OSS Readiness Plan, Part 4.3.
+      - name: Lint (incl. security rules)
         run: bun run lint
 
       - name: Test
