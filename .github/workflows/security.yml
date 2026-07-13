@@ -27,6 +27,7 @@ jobs:
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
           # gitleaks-action requires a license for repos under an org account.
           # Store it as a repo/org secret named GITLEAKS_LICENSE (see gitleaks.io).
@@ -70,11 +71,17 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: bun audit
-        run: bun audit --audit-level=high
+      # bun audit is informational only: the pinned Bun exposes no severity
+      # threshold or per-advisory ignore (only --json), so it cannot serve as a
+      # gate. OSV-Scanner below is the authoritative gate (plan §1.3).
+      - name: bun audit (informational)
+        run: bun audit || true
 
-      - name: OSV-Scanner
+      - name: OSV-Scanner (authoritative gate)
+        # Reads osv-scanner.toml for documented, time-boxed exceptions; fails on
+        # any un-excepted High/Critical against bun.lock.
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
+            --config=osv-scanner.toml
             --lockfile=bun.lock
