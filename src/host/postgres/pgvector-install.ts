@@ -26,7 +26,7 @@ import {
 } from "../trust/verify";
 
 export interface EnsurePgvectorDeps {
-  /** ~/.let/fortress/postgres/<version> — the extracted zonky bundle root. */
+  /** ~/.let/hx-fortress/postgres/<version> — the extracted zonky bundle root. */
   versionDir: string;
   classifier: ZonkyClassifier;
   pgMajor: number;

@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { fortressPaths } from "../src/host/paths";
+import { fortressPaths, migrateFortressHome } from "../src/host/paths";
 
 describe("Fortress paths", () => {
   test("derives the canonical on-disk layout", () => {
@@ -49,4 +52,59 @@ describe("Fortress paths", () => {
       expect(() => paths.moduleArtifacts(moduleId)).toThrow("Invalid module id");
     },
   );
+});
+
+describe("Fortress home migration", () => {
+  let home: string;
+
+  function mkHome(): string {
+    return mkdtempSync(path.join(os.tmpdir(), "fortress-home-"));
+  }
+
+  function seedLegacy(root: string): void {
+    mkdirSync(path.join(root, ".let", "fortress"), { recursive: true });
+    writeFileSync(path.join(root, ".let", "fortress", "config.json"), '{"schemaVersion":1}');
+  }
+
+  afterEach(() => {
+    if (home) rmSync(home, { recursive: true, force: true });
+  });
+
+  test("moves the legacy dir to hx-fortress when the new dir is absent", () => {
+    home = mkHome();
+    seedLegacy(home);
+
+    const current = migrateFortressHome(home);
+
+    expect(current).toBe(path.join(home, ".let", "hx-fortress"));
+    expect(existsSync(path.join(home, ".let", "fortress"))).toBe(false);
+    expect(readFileSync(path.join(home, ".let", "hx-fortress", "config.json"), "utf8")).toBe(
+      '{"schemaVersion":1}',
+    );
+  });
+
+  test("leaves both dirs untouched when the new dir already exists", () => {
+    home = mkHome();
+    seedLegacy(home);
+    mkdirSync(path.join(home, ".let", "hx-fortress"), { recursive: true });
+    writeFileSync(path.join(home, ".let", "hx-fortress", "config.json"), '{"schemaVersion":2}');
+
+    migrateFortressHome(home);
+
+    // New wins; legacy is never merged in or deleted.
+    expect(existsSync(path.join(home, ".let", "fortress"))).toBe(true);
+    expect(readFileSync(path.join(home, ".let", "hx-fortress", "config.json"), "utf8")).toBe(
+      '{"schemaVersion":2}',
+    );
+  });
+
+  test("no-ops on a fresh install with neither dir present", () => {
+    home = mkHome();
+
+    const current = migrateFortressHome(home);
+
+    expect(current).toBe(path.join(home, ".let", "hx-fortress"));
+    expect(existsSync(path.join(home, ".let", "hx-fortress"))).toBe(false);
+    expect(existsSync(path.join(home, ".let", "fortress"))).toBe(false);
+  });
 });

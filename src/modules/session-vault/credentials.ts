@@ -4,7 +4,7 @@
 // chmod 600.
 //
 // Enrollment identity (orgId, fortressId, credential) is Fortress-owned and
-// lives under ~/.let/fortress/ — it never appears in this file. Bucket
+// lives under ~/.let/hx-fortress/ — it never appears in this file. Bucket
 // credentials are module-local and never leave the host.
 
 import { readFile, writeFile, rename, mkdir, chmod } from "node:fs/promises";

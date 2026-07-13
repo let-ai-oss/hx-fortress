@@ -45,7 +45,7 @@ export interface WizardOpts {
   cloudUrl: string;
   token: string;
   log: Log;
-  /** Override the Fortress root directory (default: ~/.let/fortress). */
+  /** Override the Fortress root directory (default: ~/.let/hx-fortress). */
   fortressRoot?: string;
 }
 
