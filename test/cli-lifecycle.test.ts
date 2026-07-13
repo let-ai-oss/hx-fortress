@@ -22,7 +22,7 @@ describe("startFortress", () => {
     expect(manager.installs).toBe(0);
     expect(lines).toEqual([
       "Fortress is running (launchd, pid 1234).",
-      "logs: /home/test/.let/fortress/logs/fortress.jsonl",
+      "logs: /home/test/.let/hx-fortress/logs/fortress.jsonl",
     ]);
   });
 
@@ -38,7 +38,7 @@ describe("startFortress", () => {
     expect(manager.installs).toBe(1);
     expect(lines).toEqual([
       "Fortress started (launchd, pid 1234).",
-      "logs: /home/test/.let/fortress/logs/fortress.jsonl",
+      "logs: /home/test/.let/hx-fortress/logs/fortress.jsonl",
       "status: hx-fortress status",
     ]);
   });
@@ -148,8 +148,8 @@ function deps(manager: FakeManager, lines: string[]) {
     manager,
     executablePath: "/usr/local/bin/hx-fortress",
     paths: {
-      log: "/home/test/.let/fortress/logs/fortress.jsonl",
-      serviceLog: "/home/test/.let/fortress/logs/service.log",
+      log: "/home/test/.let/hx-fortress/logs/fortress.jsonl",
+      serviceLog: "/home/test/.let/hx-fortress/logs/service.log",
     },
     writeLine: (line: string) => lines.push(line),
   };

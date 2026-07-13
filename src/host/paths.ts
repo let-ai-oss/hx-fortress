@@ -1,3 +1,4 @@
+import { existsSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -9,13 +10,39 @@ export function assertModuleId(moduleId: string): void {
   }
 }
 
+/**
+ * One-time silent migration of the home config dir from the pre-rename location
+ * (~/.let/fortress) to ~/.let/hx-fortress. Fires only when the new dir is absent
+ * and the legacy dir is present, so existing installs carry over their config,
+ * credentials and pgdata with no re-enrollment. `home` is injectable for tests.
+ */
+export function migrateFortressHome(home = os.homedir()): string {
+  const current = path.join(home, ".let", "hx-fortress");
+  const legacy = path.join(home, ".let", "fortress");
+  if (!existsSync(current) && existsSync(legacy)) {
+    try {
+      renameSync(legacy, current);
+    } catch {
+      // Cross-device move or permission issue — leave the legacy dir untouched;
+      // callers create the new dir and start fresh (a rare one-time re-enroll).
+    }
+  }
+  return current;
+}
+
+let homeMigrated = false;
+
 export function defaultFortressRoot(): string {
   // FORTRESS_ROOT lets a container mount all persisted state (config.json,
   // credentials.json, signing-key) on a single volume; otherwise default to the
-  // operator's home directory.
+  // operator's home directory (migrating the pre-rename location on first use).
   const fromEnv = process.env.FORTRESS_ROOT?.trim();
   if (fromEnv) return fromEnv;
-  return path.join(os.homedir(), ".let", "fortress");
+  if (!homeMigrated) {
+    homeMigrated = true;
+    return migrateFortressHome();
+  }
+  return path.join(os.homedir(), ".let", "hx-fortress");
 }
 
 export function fortressPaths(root = defaultFortressRoot()) {

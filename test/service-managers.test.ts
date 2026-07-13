@@ -17,7 +17,7 @@ describe("launchd service manager", () => {
   test("renders an escaped persistent LaunchAgent", () => {
     const plist = renderLaunchdPlist({
       executablePath: "/Applications/HX & Tools/hx-fortress",
-      serviceLogPath: "/Users/a&b/.let/fortress/logs/service.log",
+      serviceLogPath: "/Users/a&b/.let/hx-fortress/logs/service.log",
     });
 
     expect(plist).toContain(
@@ -27,7 +27,7 @@ describe("launchd service manager", () => {
     expect(plist).toContain("<key>RunAtLoad</key><true/>");
     expect(plist).toContain("<key>SuccessfulExit</key><false/>");
     expect(plist).toContain(
-      "<string>/Users/a&amp;b/.let/fortress/logs/service.log</string>",
+      "<string>/Users/a&amp;b/.let/hx-fortress/logs/service.log</string>",
     );
   });
 
@@ -61,7 +61,7 @@ describe("launchd service manager", () => {
     });
     await manager.install({
       executablePath: "/usr/local/bin/hx-fortress",
-      serviceLogPath: "/Users/test/.let/fortress/logs/service.log",
+      serviceLogPath: "/Users/test/.let/hx-fortress/logs/service.log",
     });
     await expect(manager.stop()).resolves.toEqual({ wasRunning: true });
 
@@ -105,7 +105,7 @@ describe("systemd service manager", () => {
   test("renders an escaped persistent user unit", () => {
     const unit = renderSystemdUnit({
       executablePath: '/opt/HX "Fortress"/hx%fortress',
-      serviceLogPath: "/home/test/.let/fortress/logs/service.log",
+      serviceLogPath: "/home/test/.let/hx-fortress/logs/service.log",
     });
 
     expect(unit).toContain(
@@ -113,7 +113,7 @@ describe("systemd service manager", () => {
     );
     expect(unit).toContain("Restart=on-failure");
     expect(unit).toContain(
-      "StandardOutput=append:/home/test/.let/fortress/logs/service.log",
+      "StandardOutput=append:/home/test/.let/hx-fortress/logs/service.log",
     );
   });
 
@@ -144,7 +144,7 @@ describe("systemd service manager", () => {
     });
     await manager.install({
       executablePath: "/usr/local/bin/hx-fortress",
-      serviceLogPath: "/home/test/.let/fortress/logs/service.log",
+      serviceLogPath: "/home/test/.let/hx-fortress/logs/service.log",
     });
     await expect(manager.stop()).resolves.toEqual({ wasRunning: true });
 

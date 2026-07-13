@@ -1,6 +1,6 @@
 // The decline path is never a dead end: write a pre-filled credentials.json
 // template (storage block left to complete) plus a SETUP.md with the exact
-// commands. The enrollment token is written to ~/.let/fortress/identity/ so
+// commands. The enrollment token is written to ~/.let/hx-fortress/identity/ so
 // Fortress can complete enrollment on first connect.
 
 import { writeFile, mkdir } from "node:fs/promises";
