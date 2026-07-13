@@ -28,6 +28,9 @@ jobs:
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+          # gitleaks-action requires a license for repos under an org account.
+          # Store it as a repo/org secret named GITLEAKS_LICENSE (see gitleaks.io).
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
       - name: TruffleHog (verified only)
         uses: trufflesecurity/trufflehog@27b0417c16317ca9a472a9a8092acce143b49c55 # v3.95.9
@@ -47,9 +50,10 @@ jobs:
         # avoid the Node-in-container pitfall. Pinned by image digest — the
         # container-equivalent of a SHA pin. --config auto pulls JS/TS security +
         # OWASP rulesets; --error fails CI on findings.
+        # NB: --config auto requires metrics to be enabled (it selects rules via
+        # the Semgrep registry), so we do not set SEMGREP_SEND_METRICS=off here.
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
-            -e SEMGREP_SEND_METRICS=off \
             semgrep/semgrep@sha256:59fbed6127ea7c5dde3ba6a85142733bb20ea9aaa36120c953904f1539aaf66e \
             semgrep scan --config auto --sarif --output semgrep.sarif --error
 
