@@ -281,6 +281,43 @@ async function ingestAgentCommitMetadata(
   }
 }
 
+// Post-commit work (Postgres metadata ingest + the session.json artifact
+// read-modify-write) runs AFTER the commit response: the device only
+// needs the compose result to advance its offset and send the next chunk, and
+// both steps were already best-effort. Serialized per session key so a lane's
+// chunks apply in commit order — which also fixes the artifact RMW race two
+// concurrent commits of one session used to have.
+const postCommitChains = new Map<string, Promise<void>>();
+
+function deferPostCommit(
+  laneKey: string,
+  logger: GatewayLogger,
+  fn: () => Promise<void>,
+): void {
+  const prev = postCommitChains.get(laneKey) ?? Promise.resolve();
+  const next = prev.then(fn).catch((err: unknown) => {
+    // The chain must survive a failure. Log it here rather than assume fn did —
+    // the parent closure's artifact read-modify-write half has no internal
+    // try/log, so without this its errors would vanish.
+    logger.error("post-commit work failed", {
+      laneKey,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+  postCommitChains.set(laneKey, next);
+  void next.finally(() => {
+    if (postCommitChains.get(laneKey) === next) postCommitChains.delete(laneKey);
+  });
+}
+
+/** Wait for every queued post-commit task — tests use this to assert on
+ *  deferred metadata deterministically. */
+export async function flushPostCommitWork(): Promise<void> {
+  while (postCommitChains.size > 0) {
+    await Promise.all([...postCommitChains.values()]);
+  }
+}
+
 // M-9a · cap request bodies so a single upload can't exhaust memory. The ingest
 // surface streams chunk bytes to signed URLs, not through this JSON API, so 4 MiB
 // is ample for the control-plane JSON (commit metadata, MCP JSON-RPC).
@@ -387,43 +424,45 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                 const chunkText = await store.readChunkText(key, chunkId).catch(() => "");
                 const commit = await handleCommit(store, { ...key, chunkId, replace });
                 const meta = metaRecord(body.meta);
-                await ingestCommitMetadata(deps, claims, key, chunkId, replace, chunkText, commit, meta);
-                const existing = parseSessionMetadata(
-                  JSON.parse((await store.readArtifactText(key, SESSION_METADATA_ARTIFACT).catch(() => null)) ?? "null"),
-                );
-                const now = new Date().toISOString();
-                await store.writeArtifact(
-                  key,
-                  SESSION_METADATA_ARTIFACT,
-                  JSON.stringify({
-                    family: key.family,
-                    sessionId: key.sessionId,
-                    title: optionalString(meta?.title) ?? existing?.title ?? null,
-                    titleSource:
-                      meta?.titleSource === "user" ||
-                      meta?.titleSource === "ai" ||
-                      meta?.titleSource === "fallback"
-                        ? meta.titleSource
-                        : (existing?.titleSource ?? null),
-                    bytesUploaded: commit.totalBytes,
-                    eventCount: num(meta?.eventCount, existing?.eventCount ?? 0),
-                    userTextCount: num(meta?.userTextCount, existing?.userTextCount ?? 0),
-                    assistantCount: num(meta?.assistantCount, existing?.assistantCount ?? 0),
-                    // Same monotonic-on-append / authoritative-on-replace
-                    // rule as the Postgres row (ingestCommit) — an out-of-order /
-                    // backfill chunk must not regress the artifact either.
-                    lastActivityAt: replace
-                      ? (optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now)
-                      : (maxIso(existing?.lastActivityAt, optionalString(meta?.lastActivityAt)) ?? now),
-                    firstSeenAt: existing?.firstSeenAt ?? now,
-                    updatedAt: now,
-                    cwd: optionalString(meta?.cwd) ?? existing?.cwd ?? null,
-                    gitBranch: optionalString(meta?.gitBranch) ?? existing?.gitBranch ?? null,
-                    sourcePath: optionalString(meta?.sourcePath) ?? existing?.sourcePath ?? null,
-                    repoSlug: optionalString(meta?.repoSlug) ?? existing?.repoSlug ?? null,
-                    deviceName: existing?.deviceName ?? null,
-                  }),
-                );
+                deferPostCommit(`${userId}:${key.family}:${key.sessionId}`, deps.logger, async () => {
+                  await ingestCommitMetadata(deps, claims, key, chunkId, replace, chunkText, commit, meta);
+                  const existing = parseSessionMetadata(
+                    JSON.parse((await store.readArtifactText(key, SESSION_METADATA_ARTIFACT).catch(() => null)) ?? "null"),
+                  );
+                  const now = new Date().toISOString();
+                  await store.writeArtifact(
+                    key,
+                    SESSION_METADATA_ARTIFACT,
+                    JSON.stringify({
+                      family: key.family,
+                      sessionId: key.sessionId,
+                      title: optionalString(meta?.title) ?? existing?.title ?? null,
+                      titleSource:
+                        meta?.titleSource === "user" ||
+                        meta?.titleSource === "ai" ||
+                        meta?.titleSource === "fallback"
+                          ? meta.titleSource
+                          : (existing?.titleSource ?? null),
+                      bytesUploaded: commit.totalBytes,
+                      eventCount: num(meta?.eventCount, existing?.eventCount ?? 0),
+                      userTextCount: num(meta?.userTextCount, existing?.userTextCount ?? 0),
+                      assistantCount: num(meta?.assistantCount, existing?.assistantCount ?? 0),
+                      // Same monotonic-on-append / authoritative-on-replace
+                      // rule as the Postgres row (ingestCommit) — an out-of-order /
+                      // backfill chunk must not regress the artifact either.
+                      lastActivityAt: replace
+                        ? (optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now)
+                        : (maxIso(existing?.lastActivityAt, optionalString(meta?.lastActivityAt)) ?? now),
+                      firstSeenAt: existing?.firstSeenAt ?? now,
+                      updatedAt: now,
+                      cwd: optionalString(meta?.cwd) ?? existing?.cwd ?? null,
+                      gitBranch: optionalString(meta?.gitBranch) ?? existing?.gitBranch ?? null,
+                      sourcePath: optionalString(meta?.sourcePath) ?? existing?.sourcePath ?? null,
+                      repoSlug: optionalString(meta?.repoSlug) ?? existing?.repoSlug ?? null,
+                      deviceName: existing?.deviceName ?? null,
+                    }),
+                  );
+                  });
                 return json(commit);
               }
             case "/sessions/agent-append-url":
@@ -450,16 +489,19 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                 const storeKey = { ...key, sessionId: `${key.sessionId}:a:${agentId}` };
                 const chunkText = await store.readChunkText(storeKey, chunkId).catch(() => "");
                 const commit = await handleAgentCommit(store, { ...key, agentId, chunkId, replace });
-                await ingestAgentCommitMetadata(
-                  deps,
-                  claims,
-                  key,
-                  agentId,
-                  chunkId,
-                  replace,
-                  chunkText,
-                  commit,
-                  metaRecord(body.meta),
+                const agentMeta = metaRecord(body.meta);
+                deferPostCommit(`${userId}:${key.family}:${key.sessionId}:a:${agentId}`, deps.logger, () =>
+                  ingestAgentCommitMetadata(
+                    deps,
+                    claims,
+                    key,
+                    agentId,
+                    chunkId,
+                    replace,
+                    chunkText,
+                    commit,
+                    agentMeta,
+                  ),
                 );
                 return json(commit);
               }

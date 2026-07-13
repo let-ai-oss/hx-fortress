@@ -83,6 +83,7 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
           deps.db?.() ?? null,
           authz,
           deps.dbRead?.() ?? null,
+          logger ?? undefined,
         );
         // A relayed commit just changed this user's sessions — tell the cloud to
         // refresh their live list (MC-2415). Best-effort, after the write landed.

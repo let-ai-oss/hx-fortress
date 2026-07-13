@@ -378,7 +378,14 @@ async function insertTurns(
 }
 
 /** Upsert tool calls by (session_id, tool_use_id) — tool_use sets name/input,
- *  tool_result (a separate event) fills in result/is_error for the same id. */
+ *  tool_result (a separate event) fills in result/is_error for the same id.
+ *
+ *  Batched: one chunk regularly carries hundreds of calls, and the
+ *  per-row awaited upsert dominated the ingest transaction. Entries sharing a
+ *  toolUseId (the use + its result arriving in the same chunk) merge in
+ *  memory first — duplicate conflict keys inside one INSERT are a Postgres
+ *  error — then a multi-row INSERT ... ON CONFLICT applies the same
+ *  only-overwrite-when-present rules via COALESCE on EXCLUDED. */
 async function upsertToolCalls(
   tx: HxTx,
   sessionId: string,
@@ -386,28 +393,54 @@ async function upsertToolCalls(
   calls: ParsedToolCall[],
   now: string,
 ): Promise<void> {
+  const merged = new Map<string, ParsedToolCall>();
   for (const c of calls) {
     if (!c.toolUseId) continue;
-    const set: Partial<typeof hxToolCalls.$inferInsert> = { updatedAt: now };
-    if (c.toolName !== null) set.toolName = c.toolName;
-    if (c.input !== null) set.input = c.input;
-    if (c.result !== null) {
-      set.result = c.result;
-      set.isError = c.isError;
+    const prev = merged.get(c.toolUseId);
+    if (!prev) {
+      merged.set(c.toolUseId, { ...c });
+      continue;
     }
+    if (c.toolName !== null) prev.toolName = c.toolName;
+    if (c.input !== null) prev.input = c.input;
+    if (c.result !== null) {
+      prev.result = c.result;
+      prev.isError = c.isError;
+    }
+    prev.eventTs = prev.eventTs ?? c.eventTs;
+  }
+  if (merged.size === 0) return;
+
+  const rows = [...merged.values()].map((c) => ({
+    sessionId,
+    agentId,
+    toolUseId: c.toolUseId,
+    toolName: c.toolName ?? "",
+    input: c.input,
+    result: c.result,
+    isError: c.isError,
+    eventTs: c.eventTs,
+  }));
+  // Same wire-protocol param budget reasoning as insertTurns.
+  const INSERT_BATCH = 400;
+  for (let i = 0; i < rows.length; i += INSERT_BATCH) {
     await tx
       .insert(hxToolCalls)
-      .values({
-        sessionId,
-        agentId,
-        toolUseId: c.toolUseId,
-        toolName: c.toolName ?? "",
-        input: c.input,
-        result: c.result,
-        isError: c.isError,
-        eventTs: c.eventTs,
-      })
-      .onConflictDoUpdate({ target: [hxToolCalls.sessionId, hxToolCalls.toolUseId], set });
+      .values(rows.slice(i, i + INSERT_BATCH))
+      .onConflictDoUpdate({
+        target: [hxToolCalls.sessionId, hxToolCalls.toolUseId],
+        set: {
+          // '' is the values() placeholder for "name unknown" — never let it
+          // clobber a real name.
+          toolName: sql`coalesce(nullif(excluded.tool_name, ''), ${hxToolCalls.toolName})`,
+          input: sql`coalesce(excluded.input, ${hxToolCalls.input})`,
+          result: sql`coalesce(excluded.result, ${hxToolCalls.result})`,
+          // isError travels with result: only a row that carries a result may
+          // change it.
+          isError: sql`case when excluded.result is not null then excluded.is_error else ${hxToolCalls.isError} end`,
+          updatedAt: now,
+        },
+      });
   }
 }
 
@@ -452,8 +485,8 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   const parsed = parseChunk(input.chunkText);
   scrubParsed(parsed);
 
-  await db.transaction(async (tx) => {
-    if (await alreadyIngested(tx, dedupeKey)) return;
+  const committed = await db.transaction(async (tx) => {
+    if (await alreadyIngested(tx, dedupeKey)) return null;
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
@@ -572,17 +605,6 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     await insertTurns(tx, sessionRowId, null, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
 
-    // Per-session productivity facts (§13-A4) — recomputed from the live parent-
-    // lane state, so a `replace` (which re-indexed the lane above) recomputes
-    // cleanly. Seed the §10 fill rule from the session's first activity / upload.
-    await recomputeSessionFacts(
-      tx,
-      sessionRowId,
-      dims.userId,
-      existing?.firstEventAt ?? parsed.firstActivityAt ?? now,
-      now,
-    );
-
     await tx.insert(hxIngestEvents).values({
       userId: dims.userId,
       eventType: "hx.session.updated",
@@ -595,7 +617,37 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       status: "processed",
       processedAt: now,
     });
+
+    return {
+      sessionRowId,
+      userId: dims.userId,
+      factsSeed: existing?.firstEventAt ?? parsed.firstActivityAt ?? now,
+    };
   });
+
+  // Per-session productivity facts (§13-A4) — recomputed OUTSIDE the commit
+  // transaction: the recompute re-reads the whole lane (every turn +
+  // every tool call's jsonb input), and holding the ingest txn open across it
+  // stretched row locks over the slowest query of the path. Post-commit it
+  // reads the just-committed state — same values, own short transaction. A
+  // `replace` re-indexed the lane above, so it recomputes cleanly.
+  //
+  // Best-effort: the ingest itself is already durable (the transaction above
+  // committed the turns/tool-calls AND the dedupe event as `processed`), so a
+  // recompute failure must NOT throw back out — that would make the caller
+  // treat the whole ingest as failed and retry, and the retry short-circuits on
+  // the dedupe key without ever re-running facts. Facts recompute on every
+  // subsequent chunk of the session, so a transient failure self-heals; only a
+  // persistent one leaves facts stale (recorded via the ingest-event row).
+  if (committed) {
+    try {
+      await db.transaction((tx) =>
+        recomputeSessionFacts(tx, committed.sessionRowId, committed.userId, committed.factsSeed, now),
+      );
+    } catch {
+      // swallow — see above; the next chunk's commit recomputes.
+    }
+  }
 
   // Off the commit path: nudge the embed worker that new indexable turns may
   // have landed (debounced + max-wait capped). Best-effort — never throws.
