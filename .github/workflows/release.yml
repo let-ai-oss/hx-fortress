@@ -288,7 +288,7 @@ jobs:
       # a cache hit). Bump the `v1` scheme prefix to force a rebuild.
       - name: Restore cached pgvector artifact
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: pkgout
           key: pgvector-v1-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-${{ matrix.classifier }}
