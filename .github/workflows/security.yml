@@ -50,13 +50,17 @@ jobs:
         # (rather than a job `container:`) so checkout runs on the runner and we
         # avoid the Node-in-container pitfall. Pinned by image digest — the
         # container-equivalent of a SHA pin. --config auto pulls JS/TS security +
-        # OWASP rulesets; --error fails CI on findings.
+        # OWASP rulesets.
+        # Gate on ERROR severity only (the plan's "zero High/Critical" criterion,
+        # §1.2); --error then fails CI when any ERROR-level finding remains.
+        # Lower-severity community-hygiene rules stay informational — drop
+        # --severity to see them in a full local/scheduled triage.
         # NB: --config auto requires metrics to be enabled (it selects rules via
         # the Semgrep registry), so we do not set SEMGREP_SEND_METRICS=off here.
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
             semgrep/semgrep@sha256:59fbed6127ea7c5dde3ba6a85142733bb20ea9aaa36120c953904f1539aaf66e \
-            semgrep scan --config auto --sarif --output semgrep.sarif --error
+            semgrep scan --config auto --severity ERROR --error
 
   deps:
     name: Dependency audit

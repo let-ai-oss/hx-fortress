@@ -1,19 +1,29 @@
 # Continuous dependency hygiene (HX-Fortress OSS Readiness Plan, Part 4.5 / §2.3).
 # The npm ecosystem tracks package.json for the JS/Bun dependency tree; separate
 # updaters keep GitHub Actions and the Docker base image current.
+#
+# cooldown holds back updates for a few days after a release so a freshly
+# published (and possibly compromised) version isn't proposed the moment it
+# lands — a small supply-chain safeguard.
 version: 2
 updates:
   - package-ecosystem: "npm" # reads package.json (Bun/npm dependency tree)
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
