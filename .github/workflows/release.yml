@@ -183,6 +183,27 @@ jobs:
           tags: ${{ steps.docker-meta.outputs.tags }}
           labels: ${{ steps.docker-meta.outputs.labels }}
 
+      # OSS Readiness Plan, Part 4.4: scan the just-pushed image and the repo
+      # config (Dockerfile) for HIGH/CRITICAL issues before the image is
+      # consumed downstream. These two additions are SHA-pinned per the Part 4
+      # hardening policy; the legacy tag-pinned actions above are covered by the
+      # file-level TODO(prod) pinning sweep.
+      - name: Trivy image scan
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/let-ai-oss/hx-fortress:sha-${{ steps.short-sha.outputs.value }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Trivy config scan
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
       - name: Dispatch let-forge Fortress redeploy
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: peter-evans/repository-dispatch@v3
