@@ -117,7 +117,7 @@ jobs:
       # built them), independent of the Ed25519 artifact signature above.
       # TODO(prod): pin @<sha>.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/hx-fortress-*.gz"
 
