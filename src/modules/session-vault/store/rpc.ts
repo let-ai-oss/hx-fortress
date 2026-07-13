@@ -172,12 +172,20 @@ function objectUserId(req: VaultRpcRequest): string | null {
  * `dbRead` falls back to `db` when omitted, so callers with a single handle (tests,
  * external Postgres) keep their exact prior behavior.
  */
+/** Minimal logger seam for the durability-first ingest branch, which acks the
+ *  RPC even when indexing can't run (canonical already persisted) — the failure
+ *  must still be observable rather than silently swallowed. */
+export interface VaultRpcLogger {
+  warn(message: string, meta?: Record<string, unknown>): void;
+}
+
 export async function handleVaultRpc(
   store: SessionStore,
   req: VaultRpcRequest,
   db: HxDb | null = null,
   authz?: VaultAuthz,
   dbRead: HxDb | null = null,
+  logger?: VaultRpcLogger,
 ): Promise<VaultRpcResult> {
   if (authz && req.method !== "selfTest") {
     const owner = objectUserId(req);
@@ -248,6 +256,49 @@ export async function handleVaultRpc(
       };
     }
     case "ingestCommit": {
+      // Durability FIRST: for whole-transcript producers (mirrors,
+      // writeCanonical) this blob IS the transcript — the cloud deletes its own
+      // copy on our ack for residency moves, so the ack must mean "durably
+      // persisted". It used to be written AFTER the full indexing pass, so an
+      // unavailable Postgres or a mid-index crash lost the transcript the ack
+      // was about to vouch for.
+      if (req.writeCanonical) {
+        await store.writeCanonicalText(req.key, req.chunkText);
+        if (!db) {
+          // Canonical persisted; the index can't be written right now. Mirror
+          // producers re-send the whole transcript (replace) on their next
+          // update, which rebuilds the index — ack rather than fail, but make
+          // the skipped index observable.
+          logger?.warn("ingestCommit indexed skipped: postgres unavailable", {
+            sessionId: req.key.sessionId,
+          });
+          return { method: req.method, value: { ok: true } };
+        }
+        try {
+          await ingestCommit(db, {
+            key: req.key,
+            chunkId: req.chunkId,
+            replace: req.replace === true,
+            chunkText: req.chunkText,
+            totalBytes: req.totalBytes,
+            componentCount: req.componentCount,
+            meta: req.meta,
+            attribution: req.attribution,
+          });
+        } catch (err) {
+          // Same self-healing property as above: the transcript is safe, the
+          // next whole-transcript send re-indexes. Log so a persistent index
+          // failure (a real schema/data bug, not a transient) is visible.
+          logger?.warn("ingestCommit indexing failed after canonical persisted", {
+            sessionId: req.key.sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return { method: req.method, value: { ok: true } };
+      }
+      // Chunked producers: the composed canonical already lives in the store;
+      // indexing failures must surface so the (idempotent, dedupe-keyed)
+      // forward retries.
       if (!db) throw new Error("postgres_not_ready");
       await ingestCommit(db, {
         key: req.key,
@@ -259,10 +310,6 @@ export async function handleVaultRpc(
         meta: req.meta,
         attribution: req.attribution,
       });
-      // Sessions that ship their whole transcript inline (no staged chunks) have
-      // no separately-composed canonical blob — persist it here so the canonical
-      // read path can serve them. Indexing already happened above.
-      if (req.writeCanonical) await store.writeCanonicalText(req.key, req.chunkText);
       return { method: req.method, value: { ok: true } };
     }
     case "ingestAgentCommit": {
