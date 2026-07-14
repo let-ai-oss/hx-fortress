@@ -1,7 +1,6 @@
-# TODO(prod): SHA-pin every third-party action (`uses: owner/repo@<40-char-sha>`)
-# in this workflow — actions/*, oven-sh/setup-bun, docker/*, peter-evans/* — so a
+# All third-party actions are SHA-pinned (trailing comment records the tag) so a
 # moved tag can't inject a malicious action into a release build (supply-chain).
-# Tags are left in place here because the SHAs can't be resolved offline.
+# Keep new additions pinned; Dependabot bumps the SHAs.
 name: Release
 
 on:
@@ -32,9 +31,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.14"
 
@@ -115,9 +114,8 @@ jobs:
 
       # Cryptographic build-provenance for the compiled binaries (who/what/where
       # built them), independent of the Ed25519 artifact signature above.
-      # TODO(prod): pin @<sha>.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: "dist/hx-fortress-*.gz"
 
@@ -151,11 +149,11 @@ jobs:
 
       - name: Set up Docker Buildx
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -164,7 +162,7 @@ jobs:
       - name: Derive Docker metadata
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         id: docker-meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/let-ai-oss/hx-fortress
           tags: |
@@ -174,7 +172,7 @@ jobs:
 
       - name: Build and push Docker image
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
@@ -194,6 +192,10 @@ jobs:
         with:
           image-ref: ghcr.io/let-ai-oss/hx-fortress:sha-${{ steps.short-sha.outputs.value }}
           severity: HIGH,CRITICAL
+          # Gate only on vulnerabilities that have an available fix — a HIGH/CRITICAL
+          # in a base-image OS package with no upstream patch is not actionable here
+          # (the Dockerfile already apt-upgrades to pick up everything Debian ships).
+          ignore-unfixed: true
           exit-code: "1"
 
       - name: Trivy config scan
@@ -206,7 +208,7 @@ jobs:
 
       - name: Dispatch let-forge Fortress redeploy
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
           token: ${{ secrets.LET_FORGE_REPO_DISPATCH_TOKEN }}
           repository: let-ai/let-forge
@@ -275,9 +277,9 @@ jobs:
       # Checkout + Bun are needed to run scripts/sign-artifact.ts over the built
       # tarball (this job otherwise neither checks out the repo nor installs Bun).
       # TODO(prod): pin @<sha>.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # TODO(prod): pin @<sha>.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.3.14"
       # pgvector only changes when PGVECTOR_REF / PG_MAJOR change, but the
@@ -288,7 +290,7 @@ jobs:
       # a cache hit). Bump the `v1` scheme prefix to force a rebuild.
       - name: Restore cached pgvector artifact
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: pkgout
           key: pgvector-v1-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-${{ matrix.classifier }}
