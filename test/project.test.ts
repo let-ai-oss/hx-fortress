@@ -12,15 +12,11 @@ describe("project skeleton", () => {
       "hx-fortress": "./src/cli.ts",
     });
     expect(packageJson.packageManager).toBe("bun@1.3.14");
-    expect(packageJson.devDependencies).toEqual({
-      "@eslint/js": "10.0.1",
-      "@types/bun": "1.3.14",
-      "drizzle-kit": "^0.31.10",
-      eslint: "10.5.0",
-      "eslint-plugin-security": "4.0.1",
-      typescript: "6.0.3",
-      "typescript-eslint": "8.61.0",
-    });
+    // NB: exact dependency versions are pinned in package.json (the source of
+    // truth) and enforced by `bun install --frozen-lockfile`; re-asserting them
+    // here only duplicated that pin and broke every Dependabot bump, so it is
+    // intentionally omitted. The security-aware linter is still guaranteed by
+    // eslint.config.js + the blocking lint step, not by a version assertion.
   });
 
   test("defines local dev and build scripts", () => {

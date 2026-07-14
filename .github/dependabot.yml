@@ -10,6 +10,13 @@
 # cooldown holds back updates for a few days after a release so a freshly
 # published (and possibly compromised) version isn't proposed the moment it
 # lands — a small supply-chain safeguard.
+#
+# groups batch coupled dependencies into a single PR. Without this, Dependabot
+# opens one PR per package, which breaks two ways here:
+#   - the @aws-sdk/* + @smithy/* packages share @smithy/types; bumping one alone
+#     skews the type versions and fails typecheck.
+#   - github/codeql-action/init and .../analyze must be the same version; a lone
+#     init bump fails the CodeQL run.
 version: 2
 updates:
   - package-ecosystem: "bun" # updates package.json + bun.lock together
@@ -18,6 +25,13 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    groups:
+      aws-sdk: # keep the AWS SDK + shared @smithy/types aligned
+        patterns:
+          - "@aws-sdk/*"
+          - "@smithy/*"
+      dev-dependencies: # tooling bumps in one tidy PR
+        dependency-type: "development"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -25,6 +39,10 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    groups:
+      github-actions: # bump every action together (keeps codeql init/analyze in sync)
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/"
