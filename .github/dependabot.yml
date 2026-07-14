@@ -1,13 +1,18 @@
 # Continuous dependency hygiene (HX-Fortress OSS Readiness Plan, Part 4.5 / §2.3).
-# The npm ecosystem tracks package.json for the JS/Bun dependency tree; separate
-# updaters keep GitHub Actions and the Docker base image current.
+# The bun ecosystem tracks package.json AND updates bun.lock; separate updaters
+# keep GitHub Actions and the Docker base image current.
+#
+# NB: must be "bun", not "npm" — the npm ecosystem does not understand bun.lock,
+# so it bumps package.json but leaves the lockfile stale and every dep PR then
+# fails `bun install --frozen-lockfile`. Dependabot GA'd native bun support
+# (updates bun.lock) in Feb 2025.
 #
 # cooldown holds back updates for a few days after a release so a freshly
 # published (and possibly compromised) version isn't proposed the moment it
 # lands — a small supply-chain safeguard.
 version: 2
 updates:
-  - package-ecosystem: "npm" # reads package.json (Bun/npm dependency tree)
+  - package-ecosystem: "bun" # updates package.json + bun.lock together
     directory: "/"
     schedule:
       interval: "weekly"
