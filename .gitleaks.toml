@@ -1,0 +1,22 @@
+# gitleaks configuration for hx-fortress
+#
+# Extends the built-in ruleset (all default detectors stay active) and adds a
+# narrow, path-scoped allowlist for the intentionally secret-shaped TEST FIXTURES
+# in test/embed-scrub.test.ts that exercise the embedding-scrub logic. They are
+# crafted strings proving the scrubber redacts secrets, not live credentials, so
+# gitleaks must not fail on them. Every other file is fully scanned.
+
+title = "hx-fortress gitleaks config"
+
+[extend]
+# Pull in the maintained default rules so we only ADD an allowlist, never
+# weaken detection.
+useDefault = true
+
+[[allowlists]]
+description = "Redacted secret-scrub test fixtures (test/embed-scrub.test.ts) — not live secrets"
+# Any secret found inside this test file, in any commit, is a fixture. Scoping
+# by path (not a blanket regex) keeps every other file fully scanned.
+paths = [
+  '''test/embed-scrub\.test\.ts''',
+]
