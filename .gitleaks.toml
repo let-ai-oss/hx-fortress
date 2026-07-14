@@ -1,23 +1,10 @@
 # gitleaks configuration for hx-fortress
 #
-# Extends the built-in gitleaks ruleset (all default detectors stay active) and
-# adds a narrow allowlist for the intentionally secret-shaped TEST FIXTURES that
-# exercise the embedding-scrub logic. These are not live credentials — they are
-# high-entropy strings crafted to prove the scrubber redacts secrets. A
-# full-history scan (`--log-opts=--all --redact`) flagged 6 of them; every match
-# came back REDACTED and none is a real key, so no rotation is required.
-#
-# The fixtures lived only in `test/embed-scrub.test.ts` (added in commit
-# 421686b, later refactored out of HEAD). The path regex below covers every
-# commit that ever touched that file. The fingerprints are listed as an
-# auditable record of exactly what was reviewed and waived.
-#
-# Full-history findings waived here (all REDACTED, all fixtures):
-#   421686b…:test/embed-scrub.test.ts:generic-api-key:16
-#   421686b…:test/embed-scrub.test.ts:stripe-access-token:14
-#   421686b…:test/embed-scrub.test.ts:stripe-access-token:15
-#   421686b…:test/embed-scrub.test.ts:stripe-access-token:77
-#   421686b…:test/embed-scrub.test.ts:stripe-access-token:83
+# Extends the built-in ruleset (all default detectors stay active) and adds a
+# narrow, path-scoped allowlist for the intentionally secret-shaped TEST FIXTURES
+# in test/embed-scrub.test.ts that exercise the embedding-scrub logic. They are
+# crafted strings proving the scrubber redacts secrets, not live credentials, so
+# gitleaks must not fail on them. Every other file is fully scanned.
 
 title = "hx-fortress gitleaks config"
 
