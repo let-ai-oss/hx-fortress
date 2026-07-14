@@ -10,6 +10,16 @@ RUN bun run build            # produces ./dist/hx-fortress (compiled)
 # TODO(prod): pin the base image by digest — oven/bun:1.3.14-slim@sha256:<digest>.
 FROM oven/bun:1.3.14-slim
 WORKDIR /app
+
+# Pull the latest Debian security patches into the runtime layer so the image
+# doesn't ship fixable OS-package CVEs the base tag baked in (Trivy gate, plan
+# §2.1). CVEs Debian hasn't fixed yet are handled by `ignore-unfixed` in the
+# scan step — we can't patch what upstream hasn't released.
+RUN apt-get update \
+  && apt-get -y upgrade \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/dist/hx-fortress /usr/local/bin/hx-fortress
 
 # Run as a non-root system user (M-11). Two reasons: the embedded Postgres
