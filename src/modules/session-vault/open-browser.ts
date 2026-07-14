@@ -4,7 +4,9 @@
 // `url` comes straight off the gateway response, so it's untrusted: never hand
 // it to a shell (a value like "https://x/$(...)" would execute), and only ever
 // open http(s). Validate the scheme, then spawn with an argv array so the URL
-// is a single non-shell argument.
+// is a single non-shell argument. On Windows we open via rundll32
+// FileProtocolHandler rather than `cmd /c start`, so the URL never reaches
+// cmd.exe's argument parser (which re-interprets `&`, `^`, quotes, etc.).
 
 import { spawn } from "node:child_process";
 import os from "node:os";
@@ -22,7 +24,7 @@ export async function openBrowser(url: string): Promise<void> {
     platform === "darwin"
       ? ["open", [url]]
       : platform === "win32"
-        ? ["cmd", ["/c", "start", "", url]]
+        ? ["rundll32", ["url.dll,FileProtocolHandler", url]]
         : ["xdg-open", [url]];
 
   try {
