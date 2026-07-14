@@ -24,14 +24,26 @@ jobs:
         with:
           fetch-depth: 0 # full history so gitleaks/trufflehog scan every commit
 
-      - name: Gitleaks
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-          # gitleaks-action requires a license for repos under an org account.
-          # Store it as a repo/org secret named GITLEAKS_LICENSE (see gitleaks.io).
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      - name: Gitleaks (full history)
+        # Run the gitleaks CLI directly (image pinned by digest) instead of
+        # gitleaks-action. Two reasons:
+        #   1. Scan ALL history on every event (--log-opts=--all). gitleaks-action
+        #      scans only the latest commit(s) on push/PR, so the plan's §1.1
+        #      "secret scanning over full history" gate was not actually met.
+        #   2. The OSS CLI needs no license — the org-license requirement lives
+        #      only in the action wrapper (so GITLEAKS_LICENSE is no longer used).
+        # .gitleaks.toml (extends defaults) allowlists the secret-shaped scrub
+        # TEST fixtures in test/embed-scrub.test.ts; every other file is scanned.
+        # safe.directory is injected via env because the mounted repo is owned by
+        # the runner user, not the container's root (avoids git "dubious ownership").
+        # --redact keeps any match out of the logs.
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            detect --source /repo --log-opts=--all --redact -v --exit-code 1 --config /repo/.gitleaks.toml
 
       - name: TruffleHog (verified only)
         uses: trufflesecurity/trufflehog@27b0417c16317ca9a472a9a8092acce143b49c55 # v3.95.9
