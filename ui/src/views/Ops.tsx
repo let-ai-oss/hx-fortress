@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { useApp } from "../state";
+import React, { useEffect, useMemo, useState } from "react";
+import { useApp, storeUri } from "../state";
 import { Term, ResultLine, useResultLine, useSubFlash } from "../components";
 import { keysHtml, KEYS_SEED, checkupRows, checkupRowHtml } from "../render";
 import { FORT } from "../data";
@@ -16,7 +16,19 @@ export default function Ops() {
   const [updSub, setUpdSub] = useState<{ html: string; ok: boolean }>({ html: "stable channel · updated Jul 9", ok: false });
   const [updAvail, setUpdAvail] = useState(false);
   const [updating, setUpdating] = useState(false);
-  const [keys, setKeys] = useState<any[]>(KEYS_SEED.map(k => ({ ...k })));
+  const [keysState, setKeys] = useState<any[]>(KEYS_SEED.map(k => ({ ...k })));
+  // The blob credential belongs to the store, so this panel shows whatever the
+  // Blob Storage page holds — including which provider's shape it takes.
+  const keys = useMemo(() => keysState.map(k => (k.id !== "s3" ? k : {
+    ...k,
+    label: app.store.kind === "gcs" ? "GCS service-account key" : "Blob storage key",
+    masked: app.store.maskedKey,
+    rotated: app.store.credRotated,
+    sub: `reads and writes ${storeUri(app.store)} · inline in credentials.json`,
+    fields: app.store.kind === "gcs"
+      ? [{ ph: "paste the service-account key JSON", multiline: true }]
+      : k.fields,
+  })), [keysState, app.store]);
   const [rotating, setRotating] = useState<string | null>(null);
   const [checkupHtml, setCheckupHtml] = useState("");
   const [checkupBusy, setCheckupBusy] = useState(false);
@@ -84,25 +96,38 @@ export default function Ops() {
     if (rot) { setRotating(r => (r === rot.dataset.rotate ? null : rot.dataset.rotate!)); return; }
     const save = (e.target as HTMLElement).closest("[data-rotsave]") as HTMLElement | null;
     if (save) {
-      const inp = document.getElementById("rotInput") as HTMLInputElement | null;
-      if (!inp || !inp.value.trim()) { inp && inp.focus(); return; }
+      // A credential may be several fields — every one of them is required.
+      const inputs = [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("#keysList input, #keysList textarea")];
+      const empty = inputs.find(i => !i.value.trim());
+      if (!inputs.length || empty) { empty?.focus(); return; }
       const id = save.dataset.rotsave!;
       const k = keys.find(x => x.id === id);
+      if (id === "s3") {
+        // The blob key lives with the store, so both surfaces stay in step.
+        const v = inputs[0].value.trim();
+        app.rotateStoreCredentials(
+          app.store.kind === "s3" ? v.slice(0, 4) + "••••••••" + v.slice(-4) : "svc-acct ••••••••" + v.slice(-4),
+          k.label.toLowerCase());
+      } else {
+        app.addTrail(`Rotated the ${k.label.toLowerCase()}`, `hx-fortress credentials set ${id} · restart pending`);
+      }
       setKeys(ks => ks.map(x => (x.id === id ? { ...x, rotated: true } : x)));
       setRotating(null);
       setCredTerm(`<span class="tok">$ hx-fortress credentials set ${id}</span>\nFortress credential updated.\nRestart Fortress or reconnect it to use the new credential.`);
-      app.addTrail(`Rotated the ${k.label.toLowerCase()}`, `hx-fortress credentials set ${id} · restart pending`);
       return;
     }
     if ((e.target as HTMLElement).closest("[data-rotcancel]")) { setRotating(null); }
   };
   useEffect(() => {
-    if (rotating) { const inp = document.getElementById("rotInput") as HTMLInputElement | null; if (inp) inp.focus(); }
+    if (rotating) (document.getElementById("rotInput0") as HTMLInputElement | null)?.focus();
   }, [rotating]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement | null)?.id === "rotInput") {
-        if (e.key === "Enter") { const b = document.querySelector("[data-rotsave]") as HTMLElement | null; if (b) b.click(); }
+      const id = (e.target as HTMLElement | null)?.id ?? "";
+      if (id.startsWith("rotInput")) {
+        if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "TEXTAREA") {
+          (document.querySelector("[data-rotsave]") as HTMLElement | null)?.click();
+        }
         if (e.key === "Escape") setRotating(null);
       }
     };

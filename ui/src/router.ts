@@ -45,6 +45,9 @@ export interface Route {
   logSrc: string;              // all | host | session_vault | embed-worker | postgres | gateway
   logLevel: string;            // all | warn | error
   logRange: string;            // 1h | 24h | 7d | boot
+  /** blob storage: which editor is open, and which migration run is shown */
+  stEdit?: "credentials" | "target";
+  runId?: string;
   /** dialogs — overlays on the page beneath, so they nest under its path */
   verify: boolean;
   verifyFamily?: string;
@@ -159,6 +162,12 @@ export function parsePath(pathname: string): Route {
     return r;
   }
 
+  if (view === "blob") {
+    if (rest[0] === "credentials" || rest[0] === "target") r.stEdit = rest[0];
+    else if (rest[0] === "runs" && rest[1]) r.runId = rest[1];
+    return r;
+  }
+
   let i = 0;
   while (i < rest.length) {
     const seg = rest[i];
@@ -204,6 +213,9 @@ export function formatPath(r: Route): string {
     if (r.logRange !== "24h") parts.push(r.logRange);
   } else if (r.view === "postgres") {
     if (r.pgPreview) parts.push("failed-boot");
+  } else if (r.view === "blob") {
+    if (r.stEdit) parts.push(r.stEdit);
+    else if (r.runId) parts.push("runs", r.runId);
   } else {
     if (r.view === "residency" && r.incident) parts.push("incident");
     if (r.anchor && (ANCHORS[r.view] ?? []).includes(r.anchor)) parts.push(r.anchor);

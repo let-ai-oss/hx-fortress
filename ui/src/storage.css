@@ -1,0 +1,56 @@
+/* Blob-storage editors and migration runs. Kept out of styles.css so that file
+   stays byte-identical to the approved prototype; everything here is built from
+   the same tokens and reuses the same primitives. */
+
+.stform { margin-top: 6px; }
+.stform .frw input,
+.stform .frw textarea {
+  font-family: var(--mono); font-size: 13.5px; color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  padding: 0 16px; height: 36px; outline: none; background: var(--surface);
+  width: 100%; max-width: 340px;
+}
+.stform .frw textarea {
+  border-radius: var(--radius-sm); height: auto; padding: 10px 14px;
+  line-height: 1.5; resize: vertical; min-height: 76px;
+}
+.stform .frw input:focus,
+.stform .frw textarea:focus { border-color: var(--accent); }
+.stform .fieldnote { font-size: 13px; color: var(--text-subtle); margin-top: 4px; }
+
+/* Two-field credential edit, right-aligned inside the row it belongs to. */
+.credit { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+.credit input {
+  font-family: var(--mono); font-size: 13.5px; color: var(--text);
+  border: 1px solid var(--accent); border-radius: 999px;
+  padding: 0 16px; height: 36px; outline: none; background: var(--surface); width: 250px;
+}
+.credit textarea {
+  font-family: var(--mono); font-size: 12.5px; color: var(--text);
+  border: 1px solid var(--accent); border-radius: var(--radius-sm);
+  padding: 10px 14px; outline: none; background: var(--surface);
+  width: 320px; min-height: 72px; resize: vertical; line-height: 1.5;
+}
+.credit .credact { display: flex; gap: 8px; }
+
+/* One decision, two honest consequences. */
+.choice {
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  padding: 16px 18px; margin-top: 12px; background: var(--surface);
+  display: flex; gap: 18px; align-items: flex-start;
+}
+.choice + .choice { margin-top: 10px; }
+.choice.danger { border-color: var(--danger-border); background: var(--danger-subtle); }
+.choice .ctxt { flex: 1; }
+.choice .ctxt b { font-weight: 600; font-size: 15.5px; }
+.choice .ctxt p { margin: 3px 0 0; color: var(--text-muted); font-size: 14.5px; max-width: 620px; }
+.choice.danger .ctxt p { color: var(--text); }
+
+/* Run header: id + route + status, on one calm line. */
+.runhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.runhead .runid { font-family: var(--mono); font-size: 13.5px; font-weight: 600; }
+.runhead .runroute { font-family: var(--mono); font-size: 13px; color: var(--text-subtle); }
+.runstat { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 14px 0 6px; }
+.runstat .runphase { font-size: 14.5px; font-weight: 600; }
+.runstat .runnums { font-family: var(--mono); font-size: 13px; color: var(--text-subtle); }
+.runlog { max-height: 260px; margin-top: 14px; }

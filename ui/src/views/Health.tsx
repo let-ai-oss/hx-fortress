@@ -1,6 +1,6 @@
-import React, { useState } from "react";
-import { useApp } from "../state";
-import { ResultLine, useResultLine } from "../components";
+import React, { useEffect, useState } from "react";
+import { useApp, StoreTarget, storeUri } from "../state";
+import { MenuPill, ResultLine, useResultLine } from "../components";
 import { pipeHtml, pgRemedyHtml, blobHistoryHtml, BLOB_HISTORY_SEED } from "../render";
 import { fmtInt, fmtMB, TOTAL_SESSIONS, TOTAL_KB, TOTAL_OBJECTS, OBJ_ARTIFACTS, OBJ_STAGING, FORT } from "../data";
 import { sleep } from "../lib/util";
@@ -69,11 +69,63 @@ export function Postgres() {
   );
 }
 
+const S3_REGIONS = ["eu-north-1", "eu-west-1", "us-east-1", "us-west-2"];
+const GCS_LOCATIONS = ["europe-north1", "europe-west4", "us-central1"];
+
 export function Blob() {
   const app = useApp();
+  const st = app.store;
+  const editing = app.route.stEdit;
+  const runs = app.runs;
+  const shownRun = app.route.runId ? runs.find(r => r.id === app.route.runId) : runs[0];
   const [history, setHistory] = useState<any[]>(BLOB_HISTORY_SEED);
   const [checking, setChecking] = useState(false);
   const [result, showResult] = useResultLine();
+
+  // Rotating in place: S3 needs both halves of the key, GCS a whole
+  // service-account document.
+  const [credA, setCredA] = useState("");
+  const [credB, setCredB] = useState("");
+  // Changing where transcripts rest.
+  const [form, setForm] = useState({ kind: st.kind, bucket: st.bucket, region: st.region, projectId: st.projectId ?? "", keyA: "", keyB: "" });
+  const [pending, setPending] = useState<StoreTarget | null>(null);
+
+  useEffect(() => {
+    if (editing === "target") {
+      setForm({ kind: st.kind, bucket: st.bucket, region: st.region, projectId: st.projectId ?? "", keyA: "", keyB: "" });
+      setPending(null);
+    }
+    if (editing === "credentials") { setCredA(""); setCredB(""); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  const openEditor = (which: "credentials" | "target") => app.navigate({ view: "blob", stEdit: which, runId: undefined });
+  const closeEditor = () => app.navigate({ view: "blob", stEdit: undefined });
+
+  const saveCredentials = () => {
+    if (st.kind === "s3" ? !(credA.trim() && credB.trim()) : !credA.trim()) return;
+    const masked = st.kind === "s3"
+      ? credA.trim().slice(0, 4) + "••••••••" + credA.trim().slice(-4)
+      : "svc-acct ••••••••" + credA.trim().slice(-4);
+    app.rotateStoreCredentials(masked, st.kind === "s3" ? "blob storage key pair" : "GCS service-account key");
+    closeEditor();
+  };
+
+  const targetChanged = form.kind !== st.kind || form.bucket.trim() !== st.bucket || form.region !== st.region;
+  const credsGiven = form.kind === "s3" ? !!(form.keyA.trim() && form.keyB.trim()) : !!form.keyA.trim();
+  const canContinue = !!form.bucket.trim() && (!targetChanged || credsGiven) && (form.kind !== "gcs" || !!form.projectId.trim());
+
+  const continueTarget = () => {
+    if (!canContinue) return;
+    const to: StoreTarget = {
+      kind: form.kind as "s3" | "gcs", bucket: form.bucket.trim(), region: form.region,
+      projectId: form.kind === "gcs" ? form.projectId.trim() : undefined,
+    };
+    if (!targetChanged) { saveCredentials(); return; }
+    // An empty store has nothing to leave behind — no question to ask.
+    if (st.objects === 0) { app.startMigration(to, "fresh"); return; }
+    setPending(to);
+  };
 
   const check = async () => {
     setChecking(true);
@@ -91,23 +143,181 @@ export function Blob() {
       <h1>Blob Storage — the Transcript Vault</h1>
       <p className="lede">Transcripts rest in the organization's own bucket, under the organization's own keys — neither the bucket nor the keys ever touch the HX Fortress relay. This page proves the bucket is real, writable, and growing the way the metadata says it should.</p>
 
+      {st.orphan ? (
+        <div className="banner dangerb">
+          <span className="badge">!</span>
+          <span className="btxt"><b>{fmtInt(st.orphan.objects)} objects were left behind in <span className="mono">{st.orphan.where}</span>.</b> This fortress no longer reads that bucket, so residency verification fails for every session stored there. Copy them across, or accept the gap on the record.</span>
+          <button className="btn" onClick={() => app.goto("residency")}>Residency</button>
+        </div>
+      ) : null}
+
       <div className="panel">
         <h2>Store</h2>
         <div className="facts">
-          <div className="frw"><span className="k">Kind</span><span><span className="v">S3</span><div className="vs">from <span className="mono">credentials.json</span> · GCS equally supported</div></span></div>
-          <div className="frw"><span className="k">Bucket</span><span><span className="v mono">orange-corp-hx-fortress</span><div className="vs">eu-north-1 · public access blocked · versioning on</div></span></div>
-          <div className="frw"><span className="k">Credentials</span><span><span className="v mono">AKIA••••••••••••3F7Q</span><div className="vs">inline access key · chmod 600 · never leaves this host</div></span><button className="btn ghost sm" onClick={() => app.goto("ops", "keys")}>Rotate…</button></div>
-          <div className="frw"><span className="k">Encryption</span><span><span className="v">SSE-KMS</span><div className="vs">customer-managed key <span className="mono">alias/orange-hx</span></div></span></div>
+          <div className="frw"><span className="k">Kind</span><span><span className="v">{st.kind === "gcs" ? "Google Cloud Storage" : "S3"}</span><div className="vs">from <span className="mono">credentials.json</span> · {st.kind === "gcs" ? "S3" : "GCS"} equally supported</div></span><button className="btn ghost sm" onClick={() => openEditor("target")}>Change…</button></div>
+          <div className="frw"><span className="k">Bucket</span><span><span className="v mono">{st.bucket}</span><div className="vs">{st.region} · public access blocked · versioning on</div></span></div>
+          {st.kind === "gcs" ? (
+            <div className="frw"><span className="k">Project</span><span><span className="v mono">{st.projectId}</span><div className="vs">the GCP project that owns the bucket</div></span></div>
+          ) : null}
+          <div className="frw"><span className="k">Credentials</span><span><span className="v mono">{st.maskedKey}</span><div className={st.credRotated ? "vs warnv" : "vs"}>{st.credRotated ? "rotated just now — restart the service to apply" : <>{st.kind === "gcs" ? "inline service-account key" : "inline access key pair"} · chmod 600 · never leaves this host</>}</div></span>
+            {editing === "credentials" ? (
+              <span className="credit">
+                {st.kind === "s3" ? (
+                  <>
+                    <input id="credA" placeholder="AWS access key ID" autoComplete="off" value={credA} onChange={e => setCredA(e.target.value)} />
+                    <input id="credB" type="password" placeholder="AWS secret access key" autoComplete="off" value={credB} onChange={e => setCredB(e.target.value)} />
+                  </>
+                ) : (
+                  <textarea id="credA" placeholder="paste the service-account key JSON" value={credA} onChange={e => setCredA(e.target.value)} />
+                )}
+                <span className="credact">
+                  <button className="btn sm" id="credSave" onClick={saveCredentials}>Save</button>
+                  <button className="btn ghost sm" onClick={closeEditor}>Cancel</button>
+                </span>
+              </span>
+            ) : (
+              <button className="btn ghost sm" onClick={() => openEditor("credentials")}>Rotate…</button>
+            )}
+          </div>
+          <div className="frw"><span className="k">Encryption</span><span><span className="v">{st.kind === "gcs" ? "Google-managed keys" : "SSE-KMS"}</span><div className="vs">{st.kind === "gcs" ? "CMEK available per bucket" : <>customer-managed key <span className="mono">alias/orange-hx</span></>}</div></span></div>
         </div>
+
+        {editing === "target" && !pending ? (
+          <div className="stform">
+            <div className="sechead" style={{ marginTop: 26 }}>Change storage target</div>
+            <div className="h2sub">Transcripts move only if you ask them to — the next step says exactly what happens to the {fmtInt(st.objects)} objects already here.</div>
+            <div className="facts wide">
+              <div className="frw"><span className="k">Provider</span><span>
+                <MenuPill pillId="stKindPill" menuId="stKindMenu" valueId="stKindVal"
+                  value={form.kind === "gcs" ? "Google Cloud Storage" : "S3"} selKey={form.kind} dataAttr="data-kind"
+                  items={[{ key: "s3", label: "S3" }, { key: "gcs", label: "Google Cloud Storage" }]}
+                  onPick={k => setForm(f => ({ ...f, kind: k as "s3" | "gcs", region: k === "gcs" ? GCS_LOCATIONS[0] : S3_REGIONS[0] }))} />
+                <div className="fieldnote">switching provider always means a new, empty bucket</div>
+              </span></div>
+              <div className="frw"><span className="k">Bucket</span><span>
+                <input id="stBucket" value={form.bucket} placeholder="bucket name" onChange={e => setForm(f => ({ ...f, bucket: e.target.value }))} />
+                <div className="fieldnote">globally unique · public access blocked</div>
+              </span></div>
+              <div className="frw"><span className="k">{form.kind === "gcs" ? "Location" : "Region"}</span><span>
+                <MenuPill pillId="stRegionPill" menuId="stRegionMenu" valueId="stRegionVal"
+                  value={form.region} selKey={form.region} dataAttr="data-region"
+                  items={(form.kind === "gcs" ? GCS_LOCATIONS : S3_REGIONS).map(x => ({ key: x, label: x }))}
+                  onPick={x => setForm(f => ({ ...f, region: x }))} />
+              </span></div>
+              {form.kind === "gcs" ? (
+                <div className="frw"><span className="k">Project</span><span>
+                  <input id="stProject" value={form.projectId} placeholder="GCP project id" onChange={e => setForm(f => ({ ...f, projectId: e.target.value }))} />
+                </span></div>
+              ) : null}
+              <div className="frw"><span className="k">Credentials</span><span>
+                {form.kind === "s3" ? (
+                  <>
+                    <input id="stKeyA" value={form.keyA} placeholder="AWS access key ID" autoComplete="off" onChange={e => setForm(f => ({ ...f, keyA: e.target.value }))} />
+                    <div style={{ height: 8 }} />
+                    <input id="stKeyB" type="password" value={form.keyB} placeholder="AWS secret access key" autoComplete="off" onChange={e => setForm(f => ({ ...f, keyB: e.target.value }))} />
+                  </>
+                ) : (
+                  <textarea id="stKeyA" value={form.keyA} placeholder="paste the service-account key JSON" onChange={e => setForm(f => ({ ...f, keyA: e.target.value }))} />
+                )}
+                <div className="fieldnote">written to <span className="mono">~/.let/session-vault/credentials.json</span>, chmod 600 — it never leaves this host</div>
+              </span></div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={closeEditor}>Cancel</button>
+              <button className="btn" id="stContinue" disabled={!canContinue} onClick={continueTarget}>Continue</button>
+            </div>
+          </div>
+        ) : null}
+
+        {pending ? (
+          <div className="stform" id="stDecision">
+            <div className="sechead" style={{ marginTop: 26 }}>What happens to the {fmtInt(st.objects)} objects already stored?</div>
+            <div className="h2sub">This fortress holds {fmtMB(st.kb)} in <span className="mono">{storeUri(st)}</span>. The new target is empty.</div>
+            <div className="choice">
+              <div className="ctxt"><b>Copy them across, then switch</b><p>One run copies every object to <span className="mono">{storeUri(pending)}</span>, verifies the byte counts, and only then rewrites <span className="mono">credentials.json</span>. Nothing is deleted from the old bucket.</p></div>
+              <button className="btn" id="stCopy" onClick={() => { app.startMigration(pending, "copy"); setPending(null); }}>Copy &amp; switch</button>
+            </div>
+            <div className="choice danger">
+              <div className="ctxt"><b>Switch now and start fresh</b><p>New sessions land in <span className="mono">{storeUri(pending)}</span> immediately. The {fmtInt(st.objects)} objects here stay where they are and stop resolving from this fortress — residency verification will fail for all {fmtInt(TOTAL_SESSIONS)} sessions.</p></div>
+              <button className="btn danger" id="stFresh" onClick={() => { app.startMigration(pending, "fresh"); setPending(null); }}>Start fresh</button>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setPending(null)}>Back</button>
+            </div>
+          </div>
+        ) : null}
       </div>
+
+      {shownRun ? (
+        <div className="panel" id="stRunPanel">
+          <h2>Storage Migration</h2>
+          <div className="runhead">
+            <span className="runid">{shownRun.id}</span>
+            <span className="runroute">{storeUri(shownRun.from)} → {storeUri(shownRun.to)}</span>
+            <span className={"pill " + (shownRun.status === "complete" ? "ok" : shownRun.status === "failed" ? "danger" : "fortress")}>
+              {shownRun.status === "complete" ? "Complete" : shownRun.status === "failed" ? "Failed" : "Running"}
+            </span>
+            {shownRun.resumeOf ? <span className="runroute">resuming {shownRun.resumeOf}</span> : null}
+          </div>
+          <div className="runstat">
+            <span className="runphase">{shownRun.phase}</span>
+            <span className="runnums">
+              {shownRun.mode === "copy"
+                ? `${fmtInt(shownRun.copied)} of ${fmtInt(shownRun.total)} objects · ${shownRun.pct}%`
+                : `${fmtInt(shownRun.total)} objects left in place`}
+            </span>
+          </div>
+          <div className="pbar"><i style={{ width: shownRun.pct + "%", background: shownRun.status === "failed" ? "var(--danger)" : undefined }} /></div>
+          <div className="logpane scrolly runlog">
+            {shownRun.log.map((l, i) => (
+              <div key={i} className={"ln " + (l.includes("] error") ? "errl" : l.includes("] warn") ? "warnl" : "")}>{l}</div>
+            ))}
+          </div>
+          {shownRun.status === "failed" ? (
+            <>
+              <div className="why-note" style={{ marginTop: 14 }}><b>Nothing was switched.</b> {shownRun.error}</div>
+              <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "flex-end" }}>
+                <button className="btn ghost" onClick={() => openEditor("target")}>Edit the target</button>
+                <button className="btn" id="stRetry" onClick={() => app.retryMigration(shownRun.id)}>Retry the run</button>
+              </div>
+              <div className="why-note" style={{ marginTop: 12 }}>A retry resumes: objects already copied are skipped, so only the remaining {fmtInt(shownRun.total - shownRun.copied)} move.</div>
+            </>
+          ) : null}
+          {shownRun.status === "complete" ? (
+            <>
+              <div className="why-note" style={{ marginTop: 14 }}><b>The store is built once, at module init.</b> The new target is written to <span className="mono">credentials.json</span>, but this fortress keeps using the old one until the service restarts.</div>
+              <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "flex-end" }}>
+                <button className="btn" onClick={() => app.goto("ops")}>Restart the service →</button>
+              </div>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
+      {runs.length ? (
+        <div className="panel">
+          <h2>Migration Runs</h2>
+          <div className="h2sub">Every attempt is kept, with the log it produced.</div>
+          <div className="rowlist ops">
+            {runs.map(r => (
+              <div className="row" key={r.id} style={{ cursor: "pointer" }} onClick={() => app.navigate({ view: "blob", runId: r.id, stEdit: undefined })}>
+                <span className={"dot " + (r.status === "complete" ? "" : r.status === "failed" ? "bad" : "warn")}></span>
+                <div className="who"><b className="mono" style={{ fontWeight: 600 }}>{r.id}</b><div className="sub">{storeUri(r.from)} → {storeUri(r.to)} · {r.mode === "copy" ? "copy & switch" : "start fresh"}{r.resumeOf ? ` · resumed ${r.resumeOf}` : ""}</div></div>
+                <div><span className={"pill pc " + (r.status === "complete" ? "ok" : r.status === "failed" ? "danger" : "fortress")}>{r.status === "complete" ? "Complete" : r.status === "failed" ? "Failed" : "Running"}</span></div>
+                <div className="m">{r.startedAt}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="panel">
         <h2>Contents</h2>
         <div className="facts">
-          <div className="frw"><span className="k">Objects</span><span><span className="v" id="blobObjects">{fmtInt(TOTAL_OBJECTS)}</span><div className="vs" id="blobObjectsSub">{fmtInt(TOTAL_SESSIONS)} canonical transcripts · {fmtInt(OBJ_ARTIFACTS)} artifacts · {OBJ_STAGING} staging (transient)</div></span></div>
-          <div className="frw"><span className="k">Bytes</span><span><span className="v" id="blobBytes">{fmtMB(TOTAL_KB + 4200)}</span><div className="vs">+21.4 MB today</div></span></div>
-          <div className="frw"><span className="k">Last write</span><span><span className="v">12s ago</span><div className="vs"><span className="mono">…/log.jsonl</span> append · 184 KB</div></span></div>
-          <div className="frw"><span className="k">Last read</span><span><span className="v">3m ago</span><div className="vs">canonical read served over the tunnel</div></span></div>
+          <div className="frw"><span className="k">Objects</span><span><span className="v" id="blobObjects">{fmtInt(st.objects)}</span><div className="vs" id="blobObjectsSub">{st.objects === 0 ? "an empty bucket — nothing has been written here yet" : <>{fmtInt(TOTAL_SESSIONS)} canonical transcripts · {fmtInt(OBJ_ARTIFACTS)} artifacts · {OBJ_STAGING} staging (transient)</>}</div></span></div>
+          <div className="frw"><span className="k">Bytes</span><span><span className="v" id="blobBytes">{st.objects === 0 ? "0 KB" : fmtMB(st.kb)}</span><div className="vs">{st.objects === 0 ? "waiting for the first commit" : "+21.4 MB today"}</div></span></div>
+          <div className="frw"><span className="k">Last write</span><span><span className="v">{st.objects === 0 ? "—" : "12s ago"}</span><div className="vs">{st.objects === 0 ? "no writes to this bucket yet" : <><span className="mono">…/log.jsonl</span> append · 184 KB</>}</div></span></div>
+          <div className="frw"><span className="k">Last read</span><span><span className="v">{st.objects === 0 ? "—" : "3m ago"}</span><div className="vs">canonical read served over the tunnel</div></span></div>
         </div>
       </div>
 

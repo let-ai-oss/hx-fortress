@@ -55,7 +55,7 @@ function Chrome() {
     <>
       <div className="topbar">
         <div className="mark"><i></i><i></i><i></i><i></i></div>
-        <div className="wordmark">HX Fortress <span>UI</span></div>
+        <div className="wordmark">HX Fortress</div>
 
         <div className="chip" id="svcChip" style={{ marginLeft: 8 }}>
           <span className="dot" id="svcDot" style={{ background: app.svcRunning ? "var(--ok)" : "var(--border-strong)" }}></span> <span id="svcLabel">{app.svcRunning ? "Running" : "Stopped"}</span>
@@ -148,7 +148,7 @@ function Chrome() {
         <div className="inner">
           <div className="mark" style={{ marginTop: 5 }}><i></i><i></i><i></i><i></i></div>
           <div className="txt">
-            <b>HX Fortress UI runs on the fortress host, as part of the <code className="hx">hx-fortress</code> service.</b><br />
+            <b>HX Fortress runs on the fortress host, as part of the <code className="hx">hx-fortress</code> service.</b><br />
             This console is served from the fortress itself and shows session metadata only.<br />
             Transcript content never appears here.
           </div>

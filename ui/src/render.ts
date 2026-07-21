@@ -388,20 +388,35 @@ export const blobHistoryHtml = rows => rows.map(r => `
 // ── Keys & Credentials ──────────────────────────────────
 export const KEYS_SEED = [
   { id: "vault", label: "Vault key", masked: "vlt_••••••••••9c4d", sub: "authenticates this fortress to the HX Fortress relay · rotated May 30 · 52 days old", ph: "paste the new vlt_… token" },
-  { id: "s3", label: "Blob storage key", masked: "AKIA••••••••3F7Q", sub: "reads and writes s3://orange-corp-hx-fortress · inline in credentials.json", ph: "paste the new access key" },
+  { id: "s3", label: "Blob storage key", masked: "AKIA••••••••3F7Q", sub: "reads and writes s3://orange-corp-hx-fortress · inline in credentials.json",
+    fields: [{ ph: "AWS access key ID", type: "text" }, { ph: "AWS secret access key", type: "password" }] },
   { id: "openai", label: "OpenAI API key", masked: "sk-••••••••••hV2m", sub: "creates embeddings · stored only on this host", ph: "paste the new sk-… key" },
 ];
 export function keysHtml(KEYS, rotating) {
-  return KEYS.map(k => `
+  return KEYS.map(k => {
+    // A credential is not always one string: an S3 key is a pair, and a GCS
+    // key is a whole service-account document.
+    const fields = k.fields ?? [{ ph: k.ph, type: "password" }];
+    const editor = fields.length > 1 || fields[0].multiline
+      ? `<span class="credit">
+          ${fields.map((f, i) => f.multiline
+            ? `<textarea id="rotInput${i}" placeholder="${f.ph}"></textarea>`
+            : `<input class="rotatein" id="rotInput${i}" type="${f.type ?? "password"}" placeholder="${f.ph}" autocomplete="off">`).join("")}
+          <span class="credact">
+            <button class="btn sm" data-rotsave="${k.id}">Save</button>
+            <button class="btn ghost sm" data-rotcancel>Cancel</button>
+          </span>
+        </span>`
+      : `<span style="display:flex;gap:8px;align-items:center;justify-content:flex-end">
+          <input class="rotatein" id="rotInput0" type="password" placeholder="${fields[0].ph}" autocomplete="off">
+          <button class="btn sm" data-rotsave="${k.id}">Save</button>
+          <button class="btn ghost sm" data-rotcancel>Cancel</button>
+        </span>`;
+    return `
       <div class="frw"><span class="k">${k.label}</span><span><span class="v mono">${k.masked}</span><div class="vs${k.rotated ? " warnv" : ""}" id="keysub-${k.id}">${k.rotated ? "rotated just now — restart the service to apply" : k.sub}</div></span>${
-        rotating === k.id
-          ? `<span style="display:flex;gap:8px;align-items:center;justify-content:flex-end">
-              <input class="rotatein" id="rotInput" type="password" placeholder="${k.ph}" autocomplete="off">
-              <button class="btn sm" data-rotsave="${k.id}">Save</button>
-              <button class="btn ghost sm" data-rotcancel>Cancel</button>
-            </span>`
-          : `<button class="btn ghost sm" data-rotate="${k.id}">Rotate…</button>`
-      }</div>`).join("");
+        rotating === k.id ? editor : `<button class="btn ghost sm" data-rotate="${k.id}">Rotate…</button>`
+      }</div>`;
+  }).join("");
 }
 
 // ── Checkup ─────────────────────────────────────────────

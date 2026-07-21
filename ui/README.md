@@ -35,6 +35,9 @@ a cold load of any link below lands exactly where it says.
 | `/compliance/{egress\|retention\|audit}` | …at that panel |
 | `/postgres` · `/postgres/failed-boot` | Postgres, and the failed-boot preview |
 | `/storage` · `/embeddings` | Blob storage · embeddings |
+| `/storage/credentials` | …rotating the store key in place |
+| `/storage/target` | …changing provider, bucket or region |
+| `/storage/runs/{runId}` | One migration run and its log, e.g. `/storage/runs/mig_7f3a` |
 | `/ops` · `/ops/keys` | Ops tools, and the keys panel |
 | `/logs` | Log viewer |
 | `/logs/{source}/{warnings\|errors}/{1h\|7d\|boot}` | …filtered, e.g. `/logs/session_vault/errors/7d` |
@@ -57,6 +60,26 @@ Unknown paths rewrite themselves to `/`.
 **Serving this:** it is a single-page app, so the host must return `index.html`
 for any unmatched path (Vite's dev server and `vite preview` already do). Serve
 `dist/` with a history fallback or every deep link 404s on refresh.
+
+## Changing where transcripts rest
+
+A credential rotation is edited in place on `/storage` — S3 takes both halves of
+the key, GCS a whole service-account document — and needs only a service
+restart, because the store is built once at module init.
+
+Changing the **provider, bucket or region** is different: the new target is
+empty, so the console asks the one question that matters before anything moves.
+
+- **Copy & switch** — a run copies every object to the new bucket, verifies the
+  byte counts, and only then rewrites `credentials.json`. Nothing is deleted
+  from the old bucket.
+- **Start fresh** — the switch is immediate and the objects already stored stay
+  behind. They stop resolving from this fortress, so residency verification
+  fails for them; the page says so, before and after.
+
+Runs are addressable and kept forever with their logs. A failed run switches
+nothing, and **Retry** resumes — the inventory counts what already landed and
+moves only the remainder, because a copy is idempotent.
 
 ## Layout
 
