@@ -427,7 +427,7 @@ export function Embeddings() {
     <section className={app.view === "embeddings" ? "view active" : "view"} id="view-embeddings">
       <div className="kicker">Setup &amp; health</div>
       <h1>Embeddings</h1>
-      <p className="lede">Vector embeddings make sessions searchable by meaning. The fortress computes them through the configured OpenAI-compatible endpoint and stores them in its own Postgres — this page shows the endpoint, the index, and the queue.</p>
+      <p className="lede">Vector embeddings make sessions searchable by meaning. The fortress computes them through the configured OpenAI-compatible endpoint and stores them in the local Postgres instance running as part of this HX Fortress. This page shows the OpenAI API endpoint, the Postgres index, and the queue.</p>
 
       <div className="panel">
         <h2>Endpoint</h2>
