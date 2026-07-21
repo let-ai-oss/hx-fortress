@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useApp, storeUri } from "../state";
+import { useApp } from "../state";
 import { Term, ResultLine, useResultLine, useSubFlash } from "../components";
 import { keysHtml, KEYS_SEED, checkupRows, checkupRowHtml } from "../render";
 import { FORT } from "../data";
@@ -19,16 +19,9 @@ export default function Ops() {
   const [keysState, setKeys] = useState<any[]>(KEYS_SEED.map(k => ({ ...k })));
   // The blob credential belongs to the store, so this panel shows whatever the
   // Blob Storage page holds — including which provider's shape it takes.
-  const keys = useMemo(() => keysState.map(k => (k.id !== "s3" ? k : {
-    ...k,
-    label: app.store.kind === "gcs" ? "GCS service-account key" : "Blob storage key",
-    masked: app.store.maskedKey,
-    rotated: app.store.credRotated,
-    sub: `reads and writes ${storeUri(app.store)} · inline in credentials.json`,
-    fields: app.store.kind === "gcs"
-      ? [{ ph: "paste the service-account key JSON", multiline: true }]
-      : k.fields,
-  })), [keysState, app.store]);
+  // Only the relay key lives here now. The blob-storage key is rotated on Blob
+  // Storage and the OpenAI key on Embeddings — each on the page that uses it.
+  const keys = useMemo(() => keysState.filter(k => k.id === "vault"), [keysState]);
   const [rotating, setRotating] = useState<string | null>(null);
   const [checkupHtml, setCheckupHtml] = useState("");
   const [checkupBusy, setCheckupBusy] = useState(false);
@@ -102,15 +95,7 @@ export default function Ops() {
       if (!inputs.length || empty) { empty?.focus(); return; }
       const id = save.dataset.rotsave!;
       const k = keys.find(x => x.id === id);
-      if (id === "s3") {
-        // The blob key lives with the store, so both surfaces stay in step.
-        const v = inputs[0].value.trim();
-        app.rotateStoreCredentials(
-          app.store.kind === "s3" ? v.slice(0, 4) + "••••••••" + v.slice(-4) : "svc-acct ••••••••" + v.slice(-4),
-          k.label.toLowerCase());
-      } else {
-        app.addTrail(`Rotated the ${k.label.toLowerCase()}`, `hx-fortress credentials set ${id} · restart pending`);
-      }
+      app.addTrail(`Rotated the ${k.label.toLowerCase()}`, `hx-fortress credentials set ${id} · restart pending`);
       setKeys(ks => ks.map(x => (x.id === id ? { ...x, rotated: true } : x)));
       setRotating(null);
       setCredTerm(`<span class="tok">$ hx-fortress credentials set ${id}</span>\nFortress credential updated.\nRestart Fortress or reconnect it to use the new credential.`);
@@ -194,8 +179,8 @@ export default function Ops() {
       </div>
 
       <div className="panel" id="keysPanel" ref={el => app.registerPanel("keys", el)}>
-        <h2>Keys &amp; Credentials</h2>
-        <div className="h2sub">Every key this fortress holds, rotatable from one place. All of them live in <span className="mono">~/.let/session-vault/credentials.json</span> and the identity directory — chmod 600, never leaving this host.</div>
+        <h2>Fortress Relay</h2>
+        <div className="h2sub">The key that authenticates this fortress to the HX Fortress relay. It lives in the identity directory — chmod 600, never leaving this host. (The blob-storage key is on Blob Storage; the OpenAI key on Embeddings.)</div>
         <div className="facts wide" id="keysList" onClick={onKeys} dangerouslySetInnerHTML={{ __html: keysHtml(keys, rotating) }} />
         <Term id="credTerm" html={credTerm} />
       </div>
@@ -215,7 +200,7 @@ export default function Ops() {
         <p style={{ fontSize: 14.5, color: "var(--text-muted)", margin: "2px 0 10px" }}>Everything in this console is also <code className="hx">hx-fortress</code> in a terminal — the complete command surface:</p>
         <div className="clirow"><span className="c">hx-fortress</span><span className="d">With no arguments: the terminal status UI — modules, versions, start/stop/update per row. Safe to exit; components keep running.</span></div>
         <div className="clirow"><span className="c">{"hx-fortress enroll [token] --cloud <url>"}</span><span className="d">The guided installer — storage backend, bucket, least-privilege keys, OpenAI key, then a storage self-test before first start. Enrollment above shows its result.</span></div>
-        <div className="clirow"><span className="c">{"hx-fortress credentials set <key>"}</span><span className="d">The Rotate… actions in Keys &amp; Credentials — <span className="mono">vault</span>, <span className="mono">s3</span> or <span className="mono">openai</span>; updates the credential from stdin, masked; restart to apply.</span></div>
+        <div className="clirow"><span className="c">{"hx-fortress credentials set <key>"}</span><span className="d">The Rotate… actions across the console — <span className="mono">vault</span> here, <span className="mono">s3</span> on Blob Storage, <span className="mono">openai</span> on Embeddings; updates the credential from stdin, masked; restart to apply.</span></div>
         <div className="clirow"><span className="c">hx-fortress start · stop</span><span className="d">The Service buttons above — installs into systemd/launchd and starts, or stops cleanly.</span></div>
         <div className="clirow"><span className="c">hx-fortress status</span><span className="d">“Run status” above — service, connection, and per-module states as a table.</span></div>
         <div className="clirow"><span className="c">hx-fortress logs [module] [--lines N]</span><span className="d">The Logs page as a live terminal tail — same records, filterable by module.</span></div>

@@ -1,8 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { MENU_CLOSE_EVENT } from "./lib/util";
 
 // ── Custom dropdown menu (gpill + menu) — closes on pick, outside click, Esc.
+// The open menu is PORTALED to <body> and fixed-positioned, so it floats above
+// everything (dialogs included) and never grows a scroll container. It opens
+// downward, or flips up when the room is below; long lists scroll internally.
 export interface MenuItem { key: string; label: string; }
+interface MenuPos { left: number; top?: number; bottom?: number; minWidth: number; maxHeight: number; }
 export function MenuPill(props: {
   pillId: string; menuId: string; valueId: string;
   label?: string; value: string; mini?: boolean; right?: boolean;
@@ -10,30 +15,61 @@ export function MenuPill(props: {
   onPick: (key: string) => void; style?: React.CSSProperties;
 }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<MenuPos | null>(null);
   const pillRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const place = () => {
+    const el = pillRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom;
+    const above = r.top;
+    const flipUp = below < 260 && above > below;
+    setPos({
+      left: r.left,
+      minWidth: Math.max(r.width, 230),
+      maxHeight: Math.max(140, (flipUp ? above : below) - 16),
+      ...(flipUp ? { bottom: window.innerHeight - r.top + 8 } : { top: r.bottom + 8 }),
+    });
+  };
+
   useEffect(() => {
+    if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (pillRef.current && !pillRef.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (pillRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
     };
-    const onClose = () => setOpen(false);
-    document.addEventListener("click", onDoc);
-    window.addEventListener(MENU_CLOSE_EVENT, onClose);
-    return () => { document.removeEventListener("click", onDoc); window.removeEventListener(MENU_CLOSE_EVENT, onClose); };
-  }, []);
+    const close = () => setOpen(false);
+    document.addEventListener("click", onDoc, true);
+    window.addEventListener(MENU_CLOSE_EVENT, close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("click", onDoc, true);
+      window.removeEventListener(MENU_CLOSE_EVENT, close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
+
   return (
     <div className={props.mini ? "gpill mini" : "gpill"} id={props.pillId} ref={pillRef} style={props.style}
-      onClick={e => { if (!(e.target as HTMLElement).closest(".menu")) setOpen(o => !o); }}>
+      onClick={() => (open ? setOpen(false) : (place(), setOpen(true)))}>
       {props.label ? <><span className="lbl">{props.label}</span>{" "}</> : null}
       <span id={props.valueId}>{props.value}</span> <span className="caret"></span>
-      <div className={open ? "menu openm" : "menu"} id={props.menuId}>
-        {props.items.map(it => (
-          <button key={it.key} {...{ [props.dataAttr]: it.key }}
-            className={it.key === props.selKey ? "sel" : undefined}
-            onClick={() => { setOpen(false); props.onPick(it.key); }}>
-            {it.label}
-          </button>
-        ))}
-      </div>
+      {open && pos ? createPortal(
+        <div className="menu openm" id={props.menuId} ref={menuRef}
+          style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom, minWidth: pos.minWidth, maxHeight: pos.maxHeight, overflowY: "auto" }}>
+          {props.items.map(it => (
+            <button key={it.key} {...{ [props.dataAttr]: it.key }}
+              className={it.key === props.selKey ? "sel" : undefined}
+              onClick={() => { setOpen(false); props.onPick(it.key); }}>
+              {it.label}
+            </button>
+          ))}
+        </div>, document.body) : null}
     </div>
   );
 }

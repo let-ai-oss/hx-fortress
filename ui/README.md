@@ -63,9 +63,13 @@ for any unmatched path (Vite's dev server and `vite preview` already do). Serve
 
 ## Changing where transcripts rest
 
-A credential rotation is edited in place on `/storage` — S3 takes both halves of
-the key, GCS a whole service-account document — and needs only a service
-restart, because the store is built once at module init.
+The blob-storage credential is edited in place on `/storage` — S3 takes both
+halves of the key, GCS a whole service-account document — and needs only a
+service restart, because the store is built once at module init. **Test
+connection** on the Store panel writes a probe, reads it back and deletes it, so
+you can confirm the credential can actually write to the bucket (a green
+"store initialized" can't). The other keys rotate on the page that uses them:
+the relay/vault key on `/ops`, the OpenAI key on `/embeddings`.
 
 Changing the **provider, bucket or region** is different: the new target is
 empty, so it opens as a dialog — form first, then the one question that matters

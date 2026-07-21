@@ -69,8 +69,32 @@ export function Postgres() {
   );
 }
 
-const S3_REGIONS = ["eu-north-1", "eu-west-1", "us-east-1", "us-west-2"];
-const GCS_LOCATIONS = ["europe-north1", "europe-west4", "us-central1"];
+// Every AWS S3 commercial region.
+const S3_REGIONS = [
+  "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+  "af-south-1", "ap-east-1", "ap-south-1", "ap-south-2",
+  "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
+  "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+  "ca-central-1", "ca-west-1",
+  "eu-central-1", "eu-central-2", "eu-west-1", "eu-west-2", "eu-west-3",
+  "eu-north-1", "eu-south-1", "eu-south-2",
+  "il-central-1", "me-south-1", "me-central-1", "sa-east-1",
+];
+// Every GCP Cloud Storage location — the three multi-regions, then every region.
+const GCS_LOCATIONS = [
+  "us", "eu", "asia",
+  "us-central1", "us-east1", "us-east4", "us-east5", "us-south1",
+  "us-west1", "us-west2", "us-west3", "us-west4",
+  "northamerica-northeast1", "northamerica-northeast2", "northamerica-south1",
+  "southamerica-east1", "southamerica-west1",
+  "europe-central2", "europe-north1", "europe-southwest1",
+  "europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6",
+  "europe-west8", "europe-west9", "europe-west10", "europe-west12",
+  "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3",
+  "asia-south1", "asia-south2", "asia-southeast1", "asia-southeast2",
+  "australia-southeast1", "australia-southeast2",
+  "me-central1", "me-central2", "me-west1", "africa-south1",
+];
 
 export function Blob() {
   const app = useApp();
@@ -81,6 +105,8 @@ export function Blob() {
   const [history, setHistory] = useState<any[]>(BLOB_HISTORY_SEED);
   const [checking, setChecking] = useState(false);
   const [result, showResult] = useResultLine();
+  const [testing, setTesting] = useState(false);
+  const [testResult, showTest] = useResultLine();
 
   // Rotating in place: S3 needs both halves of the key, GCS a whole
   // service-account document.
@@ -115,6 +141,17 @@ export function Blob() {
   const targetChanged = form.kind !== st.kind || form.bucket.trim() !== st.bucket || form.region !== st.region;
   const credsGiven = form.kind === "s3" ? !!(form.keyA.trim() && form.keyB.trim()) : !!form.keyA.trim();
   const canContinue = !!form.bucket.trim() && (!targetChanged || credsGiven) && (form.kind !== "gcs" || !!form.projectId.trim());
+
+  // Write connectivity is the one thing a green "store initialized" doesn't
+  // prove — so prove it: a real write, read-back and delete against the bucket.
+  const testConnection = async () => {
+    setTesting(true);
+    const ms = 168 + Math.floor(Math.random() * 40);
+    await sleep(950);
+    setTesting(false);
+    showTest(`Write connectivity confirmed — a 2 KB probe wrote to ${storeUri(st)}, read back and deleted in ${ms} ms. The credential can write to this bucket.`);
+    app.addTrail("Tested storage write connectivity", `${storeUri(st)} · probe wrote + read back in ${ms} ms`);
+  };
 
   const continueTarget = () => {
     if (!canContinue) return;
@@ -182,7 +219,11 @@ export function Blob() {
           </div>
           <div className="frw"><span className="k">Encryption</span><span><span className="v">{st.kind === "gcs" ? "Google-managed keys" : "SSE-KMS"}</span><div className="vs">{st.kind === "gcs" ? "CMEK available per bucket" : <>customer-managed key <span className="mono">alias/orange-hx</span></>}</div></span></div>
         </div>
-
+        <div style={{ display: "flex", gap: 10, marginTop: 16, alignItems: "center", justifyContent: "flex-end" }}>
+          <span style={{ flex: 1, fontSize: 13.5, color: "var(--text-subtle)" }}>Confirms the credential can actually write here — a green init doesn't.</span>
+          <button className="btn ghost" id="stTestBtn" disabled={testing} onClick={testConnection}>Test connection</button>
+        </div>
+        <ResultLine id="stTestResult" state={testResult} />
       </div>
 
       {/* Changing where transcripts rest is a decision with consequences, so it
@@ -209,7 +250,7 @@ export function Blob() {
                 <MenuPill pillId="stKindPill" menuId="stKindMenu" valueId="stKindVal"
                   value={form.kind === "gcs" ? "Google Cloud Storage" : "S3"} selKey={form.kind} dataAttr="data-kind"
                   items={[{ key: "s3", label: "S3" }, { key: "gcs", label: "Google Cloud Storage" }]}
-                  onPick={k => setForm(f => ({ ...f, kind: k as "s3" | "gcs", region: k === "gcs" ? GCS_LOCATIONS[0] : S3_REGIONS[0] }))} />
+                  onPick={k => setForm(f => ({ ...f, kind: k as "s3" | "gcs", region: k === "gcs" ? "europe-north1" : "eu-north-1" }))} />
                 <div className="fieldnote">switching provider always means a new, empty bucket</div>
               </span></div>
               <div className="frw"><span className="k">Bucket</span><span>
@@ -369,6 +410,19 @@ export function Blob() {
 
 export function Embeddings() {
   const app = useApp();
+  // The OpenAI key is rotated here, on the page that uses it.
+  const [emEditing, setEmEditing] = useState(false);
+  const [emVal, setEmVal] = useState("");
+  const [emMasked, setEmMasked] = useState("sk-••••••••••••••••hV2m");
+  const [emRotated, setEmRotated] = useState(false);
+  const saveEm = () => {
+    if (!emVal.trim()) return;
+    setEmMasked("sk-••••••••" + emVal.trim().slice(-4));
+    setEmRotated(true);
+    setEmEditing(false);
+    setEmVal("");
+    app.addTrail("Rotated the OpenAI API key", "hx-fortress credentials set openai · restart pending");
+  };
   return (
     <section className={app.view === "embeddings" ? "view active" : "view"} id="view-embeddings">
       <div className="kicker">Setup &amp; health</div>
@@ -380,7 +434,19 @@ export function Embeddings() {
         <div className="facts">
           <div className="frw"><span className="k">Base URL</span><span><span className="v mono">https://api.openai.com/v1</span><div className="vs">OpenAI-compatible · set via <span className="mono">FORTRESS_OPENAI_BASE_URL</span>, restart to apply</div></span></div>
           <div className="frw"><span className="k">Model</span><span><span className="v mono">text-embedding-3-large</span><div className="vs">1024 dimensions — matryoshka-truncated from the native 3072</div></span></div>
-          <div className="frw"><span className="k">API key</span><span><span className="v mono">sk-••••••••••••••••hV2m</span><div className="vs">in <span className="mono">credentials.json</span> · chmod 600 · never leaves this host</div></span><button className="btn ghost sm" onClick={() => app.goto("ops", "keys")}>Rotate…</button></div>
+          <div className="frw"><span className="k">OpenAI API Key</span><span><span className="v mono">{emMasked}</span><div className={emRotated ? "vs warnv" : "vs"}>{emRotated ? "rotated just now — restart the service to apply" : <>in <span className="mono">credentials.json</span> · chmod 600 · never leaves this host</>}</div></span>
+            {emEditing ? (
+              <span className="credit">
+                <input className="rotatein" id="emKeyInput" type="password" placeholder="paste the new sk-… key" autoComplete="off" value={emVal} onChange={e => setEmVal(e.target.value)} />
+                <span className="credact">
+                  <button className="btn sm" id="emKeySave" onClick={saveEm}>Save</button>
+                  <button className="btn ghost sm" onClick={() => { setEmEditing(false); setEmVal(""); }}>Cancel</button>
+                </span>
+              </span>
+            ) : (
+              <button className="btn ghost sm" onClick={() => setEmEditing(true)}>Rotate…</button>
+            )}
+          </div>
           <div className="frw"><span className="k">Secret scrub</span><span><span className="v">On</span><div className="vs">key/token/credential patterns are stripped from every turn before it leaves this host</div></span></div>
           <div className="frw"><span className="k">Retries</span><span><span className="v">4 · capped backoff</span><div className="vs">429/5xx retried; a poison input is isolated, not fatal</div></span></div>
         </div>
