@@ -19,9 +19,15 @@ const initialLogs = () => [
 export default function Logs() {
   const app = useApp();
   const [logs, setLogs] = useState<any[]>(initialLogs);
-  const [src, setSrc] = useState("all");
-  const [lvl, setLvl] = useState("all");
-  const [range, setRange] = useState("24h");
+  // Source, level and range are durable, shareable dimensions — they live in
+  // the URL. The text filter is a live scrub over a moving tail (and its field
+  // tokens carry ="…"), so it stays local rather than uglifying the path.
+  const src = app.route.logSrc;
+  const lvl = app.route.logLevel;
+  const range = app.route.logRange;
+  const setSrc = (v: string) => app.navigate({ logSrc: v });
+  const setLvl = (v: string) => app.navigate({ logLevel: v });
+  const setRange = (v: string) => app.navigate({ logRange: v });
   const [q, setQ] = useState("");
   const [ctx, setCtx] = useState(false);
   const [tail, setTail] = useState(true);
@@ -139,7 +145,8 @@ export default function Logs() {
     downloadBlob(text, "text/plain", "fortress-logs-filtered.txt");
   };
   const clearFilters = () => {
-    setQ(""); setSrc("all"); setLvl("all");
+    setQ("");
+    app.navigate({ logSrc: "all", logLevel: "all" });
   };
 
   return (

@@ -7,7 +7,8 @@ import { sleep } from "../lib/util";
 
 export function Postgres() {
   const app = useApp();
-  const [pgPreview, setPgPreview] = useState(false);
+  const pgPreview = app.route.pgPreview;
+  const setPgPreview = (on: boolean) => app.navigate({ pgPreview: on });
 
   return (
     <section className={app.view === "postgres" ? "view active" : "view"} id="view-postgres">
@@ -51,7 +52,7 @@ export function Postgres() {
         <div className="why-note" style={{ marginTop: 16 }} id="pgRemedy" dangerouslySetInnerHTML={{ __html: pgRemedyHtml(pgPreview) }} />
         <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
           <button className="btn ghost sm" id="pgFailPreviewBtn" style={{ display: pgPreview ? "none" : "" }} onClick={() => { setPgPreview(true); window.scrollTo({ top: 0, behavior: "smooth" }); }}>Preview a failed boot</button>
-          <button className="btn ghost sm" onClick={() => app.goto("logs")}>Boot logs</button>
+          <button className="btn ghost sm" onClick={() => app.navigate({ view: "logs", logSrc: "postgres", logLevel: "all", logRange: "boot" })}>Boot logs</button>
         </div>
       </div>
 

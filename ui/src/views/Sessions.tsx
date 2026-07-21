@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { useApp } from "../state";
 import { MenuPill, SearchBox } from "../components";
 import { sessionListHtml, SES_GLBL, sdLedeHtml, sdFactsHtml, sdActivityHtml, sdWhereHtml, objectPath } from "../render";
@@ -6,8 +6,11 @@ import { SESSIONS, fmtInt, fmtMB, TOTAL_SESSIONS, TOTAL_KB, N_WITH_SESSIONS, N_R
 
 export function Sessions() {
   const app = useApp();
-  const [sesGroup, setSesGroup] = useState("team");
-  const [sesQuery, setSesQuery] = useState("");
+  const sesGroup = app.route.sesGroup;
+  const sesQuery = app.route.sesQuery;
+  const setSesGroup = (g: string) => app.navigate({ sesGroup: g });
+  // Typing replaces rather than stacks history — one Back leaves the search.
+  const setSesQuery = (q: string) => app.navigate({ sesQuery: q }, { replace: true });
 
   const onList = (e: React.MouseEvent) => {
     const pl = (e.target as HTMLElement).closest(".personlink") as HTMLElement | null;

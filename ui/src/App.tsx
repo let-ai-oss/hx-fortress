@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AppProvider, useApp, ViewName } from "./state";
-import { PEOPLE, FORT } from "./data";
+import { FORT } from "./data";
 import { I } from "./icons";
 import { closeAllMenus, copyText } from "./lib/util";
 import Overview from "./views/Overview";
@@ -225,7 +225,7 @@ function VerifyOverlay() {
 
 export default function App() {
   return (
-    <AppProvider people={PEOPLE}>
+    <AppProvider>
       <Chrome />
     </AppProvider>
   );

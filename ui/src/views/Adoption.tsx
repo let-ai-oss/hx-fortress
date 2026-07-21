@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { useApp } from "../state";
 import { MenuPill, SearchBox } from "../components";
 import { funnelHtml, peopleListHtml, AD_FILTERS, AD_GLBL, pdCoverageHtml, pdFootprintHtml, pdDevicesHtml, pdSessionsHtml, COVER_WORDS } from "../render";
@@ -14,8 +14,10 @@ const FUNNEL = [
 
 export function Adoption() {
   const app = useApp();
-  const [adGroup, setAdGroup] = useState("team");
-  const [adQuery, setAdQuery] = useState("");
+  const adGroup = app.route.adGroup;
+  const adQuery = app.route.adQuery;
+  const setAdGroup = (g: string) => app.navigate({ adGroup: g });
+  const setAdQuery = (q: string) => app.navigate({ adQuery: q }, { replace: true });
   const { adFilter, setAdFilter } = app;
 
   const { html: listHtml, count } = peopleListHtml(adQuery, adGroup, adFilter);

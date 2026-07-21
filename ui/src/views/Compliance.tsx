@@ -1,15 +1,13 @@
-import React, { useRef, useState } from "react";
+import React, { useState } from "react";
 import { useApp } from "../state";
 import { egressHtml, trailHtml, buildReport } from "../render";
 import { fmtInt, TOTAL_SESSIONS } from "../data";
-import { copyText, downloadBlob, flashPanel } from "../lib/util";
+import { copyText, downloadBlob } from "../lib/util";
 import { reportPdfBytes } from "../lib/pdf";
 
 export default function Compliance() {
   const app = useApp();
   const [report, setReport] = useState("");
-  const retentionRef = useRef<HTMLDivElement>(null);
-  const audittrailRef = useRef<HTMLDivElement>(null);
   const total = fmtInt(TOTAL_SESSIONS);
 
   const showReport = () => {
@@ -42,30 +40,30 @@ export default function Compliance() {
           <div className="tstate">Verified</div>
           <div className="tsub" id="postResSub">{total} of {total} · nightly audit</div>
         </div>
-        <div className="tile" onClick={() => flashPanel(document.getElementById("egressPanel"))}>
+        <div className="tile" onClick={() => app.navigate({ anchor: "egress" })}>
           <div className="thead"><span className="tdot"></span> Egress</div>
           <div className="tstate">Inventoried</div>
           <div className="tsub">4 documented paths · nothing else</div>
         </div>
-        <div className="tile" onClick={() => flashPanel(retentionRef.current)}>
+        <div className="tile" onClick={() => app.navigate({ anchor: "retention" })}>
           <div className="thead"><span className="tdot"></span> Retention</div>
           <div className="tstate">Indefinite</div>
           <div className="tsub">bucket versioning on · no expiry rule</div>
         </div>
-        <div className="tile" onClick={() => flashPanel(audittrailRef.current)}>
+        <div className="tile" onClick={() => app.navigate({ anchor: "audit" })}>
           <div className="thead"><span className="tdot"></span> Admin audit</div>
           <div className="tstate">Logged</div>
           <div className="tsub">every console action · 180-day trail</div>
         </div>
       </div>
 
-      <div className="panel" id="egressPanel">
+      <div className="panel" id="egressPanel" ref={el => app.registerPanel("egress", el)}>
         <h2>Egress Inventory</h2>
         <div className="h2sub">Every way bytes can leave this host — the complete list. Anything not here does not happen.</div>
         <div className="rowlist ops" id="egressList" dangerouslySetInnerHTML={{ __html: egressHtml() }} />
       </div>
 
-      <div className="panel" id="retentionPanel" ref={retentionRef}>
+      <div className="panel" id="retentionPanel" ref={el => app.registerPanel("retention", el)}>
         <h2>Retention</h2>
         <div className="facts wide">
           <div className="frw"><span className="k">Transcripts (bucket)</span><span><span className="v">Kept indefinitely</span><div className="vs">no lifecycle expiry configured on <span className="mono">orange-corp-hx-fortress</span> — retention is governed by the org's own bucket policy, nothing else</div></span></div>
@@ -76,7 +74,7 @@ export default function Compliance() {
         </div>
       </div>
 
-      <div className="panel" id="audittrailPanel" ref={audittrailRef}>
+      <div className="panel" id="audittrailPanel" ref={el => app.registerPanel("audit", el)}>
         <h2>Admin Audit Trail</h2>
         <div className="h2sub">Every state-changing action taken in this console, newest first. Read-only views are not logged.</div>
         <div className="rowlist ops" id="trailList" dangerouslySetInnerHTML={{ __html: trailHtml(app.trail) }} />

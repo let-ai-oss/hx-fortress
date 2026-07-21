@@ -10,7 +10,8 @@ import { copyText, sleep } from "../lib/util";
 
 export default function Residency() {
   const app = useApp();
-  const [incident, setIncident] = useState(false);
+  const incident = app.route.incident;
+  const setIncident = (on: boolean) => app.navigate({ incident: on });
   const [auditRuns, setAuditRuns] = useState<any[]>(AUDIT_RUNS_SEED);
   const [auditing, setAuditing] = useState(false);
   const [flow, setFlow] = useState({ on: false, phase: "Auditing…", pct: 0 });
