@@ -45,6 +45,9 @@
 .choice .ctxt b { font-weight: 600; font-size: 15.5px; }
 .choice .ctxt p { margin: 3px 0 0; color: var(--text-muted); font-size: 14.5px; max-width: 620px; }
 .choice.danger .ctxt p { color: var(--text); }
+/* Stacked choices form a column, so their buttons share one width — the
+   no-zig-zag rule, applied to buttons. */
+.choice .btn { min-width: 156px; }
 
 /* Run header: id + route + status, on one calm line. */
 .runhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }

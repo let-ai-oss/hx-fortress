@@ -35,8 +35,8 @@ a cold load of any link below lands exactly where it says.
 | `/compliance/{egress\|retention\|audit}` | …at that panel |
 | `/postgres` · `/postgres/failed-boot` | Postgres, and the failed-boot preview |
 | `/storage` · `/embeddings` | Blob storage · embeddings |
-| `/storage/credentials` | …rotating the store key in place |
-| `/storage/target` | …changing provider, bucket or region |
+| `/storage/credentials` | …rotating the store key, inline in its row |
+| `/storage/target` | …the change-target dialog |
 | `/storage/runs/{runId}` | One migration run and its log, e.g. `/storage/runs/mig_7f3a` |
 | `/ops` · `/ops/keys` | Ops tools, and the keys panel |
 | `/logs` | Log viewer |
@@ -68,7 +68,8 @@ the key, GCS a whole service-account document — and needs only a service
 restart, because the store is built once at module init.
 
 Changing the **provider, bucket or region** is different: the new target is
-empty, so the console asks the one question that matters before anything moves.
+empty, so it opens as a dialog — form first, then the one question that matters
+before anything moves.
 
 - **Copy & switch** — a run copies every object to the new bucket, verifies the
   byte counts, and only then rewrites `credentials.json`. Nothing is deleted

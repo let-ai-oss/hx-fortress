@@ -75,6 +75,7 @@ interface AppState {
 
   shortcutsOpen: boolean; toggleShortcuts: () => void; closeShortcuts: () => void;
   anyDialogOpen: boolean; dismissDialog: () => void;
+  closeStorageDialog: () => void;
 
   store: StoreState;
   rotateStoreCredentials: (masked: string, label: string) => void;
@@ -367,11 +368,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     else navigate({ shortcuts: true }, { modal: true });
   }, [navigate, closeShortcuts]);
 
-  const anyDialogOpen = verifyOpen || shortcutsOpen;
+  // Changing where transcripts rest is a dialog too — same dismiss rules.
+  const storageDialogOpen = route.view === "blob" && route.stEdit === "target";
+  const closeStorageDialog = useCallback(() => dismiss({ stEdit: undefined }), [dismiss]);
+
+  const anyDialogOpen = verifyOpen || shortcutsOpen || storageDialogOpen;
   const dismissDialog = useCallback(() => {
     if (routeRef.current.shortcuts) closeShortcuts();
-    else closeVerify();
-  }, [closeShortcuts, closeVerify]);
+    else if (routeRef.current.verify) closeVerify();
+    else closeStorageDialog();
+  }, [closeShortcuts, closeVerify, closeStorageDialog]);
 
   const value = useMemo<AppState>(() => ({
     route, view: route.view, navigate, goto, registerPanel,
@@ -380,12 +386,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     adFilter: route.adFilter, setAdFilter,
     currentSession, openSession, currentPerson, openPerson,
     verifyOpen, verifySession, closeVerify, verifySteps, verifyStatus, verifyProof, verifyDone, verifyTarget,
-    shortcutsOpen, toggleShortcuts, closeShortcuts, anyDialogOpen, dismissDialog,
+    shortcutsOpen, toggleShortcuts, closeShortcuts, anyDialogOpen, dismissDialog, closeStorageDialog,
     store, rotateStoreCredentials, runs, startMigration, retryMigration,
   }), [route, navigate, goto, registerPanel, svcRunning, pid, ver, trail, addTrail, setAdFilter,
        currentSession, openSession, currentPerson, openPerson,
        verifyOpen, verifySession, closeVerify, verifySteps, verifyStatus, verifyProof, verifyDone, verifyTarget,
-       shortcutsOpen, toggleShortcuts, closeShortcuts, anyDialogOpen, dismissDialog,
+       shortcutsOpen, toggleShortcuts, closeShortcuts, anyDialogOpen, dismissDialog, closeStorageDialog,
        store, rotateStoreCredentials, runs, startMigration, retryMigration]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

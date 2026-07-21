@@ -94,12 +94,13 @@ export function Blob() {
     if (editing === "target") {
       setForm({ kind: st.kind, bucket: st.bucket, region: st.region, projectId: st.projectId ?? "", keyA: "", keyB: "" });
       setPending(null);
-    }
+    } else if (!editing) setPending(null);
     if (editing === "credentials") { setCredA(""); setCredB(""); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
 
-  const openEditor = (which: "credentials" | "target") => app.navigate({ view: "blob", stEdit: which, runId: undefined });
+  const openEditor = (which: "credentials" | "target") =>
+    app.navigate({ view: "blob", stEdit: which, runId: undefined }, which === "target" ? { modal: true } : undefined);
   const closeEditor = () => app.navigate({ view: "blob", stEdit: undefined });
 
   const saveCredentials = () => {
@@ -182,10 +183,27 @@ export function Blob() {
           <div className="frw"><span className="k">Encryption</span><span><span className="v">{st.kind === "gcs" ? "Google-managed keys" : "SSE-KMS"}</span><div className="vs">{st.kind === "gcs" ? "CMEK available per bucket" : <>customer-managed key <span className="mono">alias/orange-hx</span></>}</div></span></div>
         </div>
 
-        {editing === "target" && !pending ? (
+      </div>
+
+      {/* Changing where transcripts rest is a decision with consequences, so it
+          gets the room and the focus of a dialog rather than growing the page. */}
+      <div className={editing === "target" ? "overlayw open" : "overlayw"} id="stTargetOverlay"
+        onClick={e => { if (e.target === e.currentTarget || (e.target as HTMLElement).closest("[data-close]")) app.closeStorageDialog(); }}>
+        <div className="modal" style={{ width: "min(720px,100%)" }}>
+          <div className="mhead">
+            <div className="row1">
+              <h3>{pending ? `What happens to the ${fmtInt(st.objects)} objects already stored?` : "Change storage target"}</h3>
+              <button className="x" data-close>✕</button>
+            </div>
+            <p className="msub">
+              {pending
+                ? <>This fortress holds {fmtMB(st.kb)} in <span className="mono">{storeUri(st)}</span>. The new target is empty.</>
+                : <>Transcripts move only if you ask them to — the next step says exactly what happens to the {fmtInt(st.objects)} objects already here.</>}
+            </p>
+          </div>
+          <div className="mbody scrolly">
+          {!pending ? (
           <div className="stform">
-            <div className="sechead" style={{ marginTop: 26 }}>Change storage target</div>
-            <div className="h2sub">Transcripts move only if you ask them to — the next step says exactly what happens to the {fmtInt(st.objects)} objects already here.</div>
             <div className="facts wide">
               <div className="frw"><span className="k">Provider</span><span>
                 <MenuPill pillId="stKindPill" menuId="stKindMenu" valueId="stKindVal"
@@ -222,17 +240,9 @@ export function Blob() {
                 <div className="fieldnote">written to <span className="mono">~/.let/session-vault/credentials.json</span>, chmod 600 — it never leaves this host</div>
               </span></div>
             </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
-              <button className="btn ghost" onClick={closeEditor}>Cancel</button>
-              <button className="btn" id="stContinue" disabled={!canContinue} onClick={continueTarget}>Continue</button>
-            </div>
           </div>
-        ) : null}
-
-        {pending ? (
+          ) : (
           <div className="stform" id="stDecision">
-            <div className="sechead" style={{ marginTop: 26 }}>What happens to the {fmtInt(st.objects)} objects already stored?</div>
-            <div className="h2sub">This fortress holds {fmtMB(st.kb)} in <span className="mono">{storeUri(st)}</span>. The new target is empty.</div>
             <div className="choice">
               <div className="ctxt"><b>Copy them across, then switch</b><p>One run copies every object to <span className="mono">{storeUri(pending)}</span>, verifies the byte counts, and only then rewrites <span className="mono">credentials.json</span>. Nothing is deleted from the old bucket.</p></div>
               <button className="btn" id="stCopy" onClick={() => { app.startMigration(pending, "copy"); setPending(null); }}>Copy &amp; switch</button>
@@ -241,11 +251,21 @@ export function Blob() {
               <div className="ctxt"><b>Switch now and start fresh</b><p>New sessions land in <span className="mono">{storeUri(pending)}</span> immediately. The {fmtInt(st.objects)} objects here stay where they are and stop resolving from this fortress — residency verification will fail for all {fmtInt(TOTAL_SESSIONS)} sessions.</p></div>
               <button className="btn danger" id="stFresh" onClick={() => { app.startMigration(pending, "fresh"); setPending(null); }}>Start fresh</button>
             </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "flex-end" }}>
-              <button className="btn ghost" onClick={() => setPending(null)}>Back</button>
-            </div>
           </div>
-        ) : null}
+          )}
+          </div>
+          <div className="mfoot">
+            <span className="grow"></span>
+            {pending ? (
+              <button className="btn ghost" onClick={() => setPending(null)}>Back</button>
+            ) : (
+              <>
+                <button className="btn ghost" data-close>Cancel</button>
+                <button className="btn" id="stContinue" disabled={!canContinue} onClick={continueTarget}>Continue</button>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       {shownRun ? (
