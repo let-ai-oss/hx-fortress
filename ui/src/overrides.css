@@ -1,0 +1,7 @@
+/* Deliberate departures from the approved prototype, kept out of styles.css so
+   that file stays byte-identical to the prototype and every intentional change
+   lives in one reviewable place. Imported after styles.css. */
+
+/* The page lede wraps at the same width as the content blocks below it, rather
+   than the prototype's narrower 700px measure. Applies on every page. */
+.lede { max-width: none; }
