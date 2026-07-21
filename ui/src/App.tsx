@@ -20,7 +20,7 @@ function Chrome() {
   const app = useApp();
   const [theme, setThemeState] = useState<string>(() =>
     matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  const [kbdOpen, setKbdOpen] = useState(false);
+  const kbdOpen = app.shortcutsOpen;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -32,24 +32,24 @@ function Chrome() {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === "?") { setKbdOpen(o => !o); return; }
+      if (e.key === "?") { app.toggleShortcuts(); return; }
       const v = VIEW_KEYS[e.key];
       if (v) app.goto(v);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [app.goto]);
+  }, [app.goto, app.toggleShortcuts]);
   useEffect(() => {
     const onEsc = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const shell = document.getElementById("logShell");
       if (shell && shell.classList.contains("full")) { window.dispatchEvent(new CustomEvent("hx-exit-logfull")); return; }
-      if (app.verifyOpen || kbdOpen) { app.closeVerify(); setKbdOpen(false); return; }
+      if (app.anyDialogOpen) { app.dismissDialog(); return; }
       closeAllMenus();
     };
     document.addEventListener("keydown", onEsc);
     return () => document.removeEventListener("keydown", onEsc);
-  }, [app.verifyOpen, kbdOpen, app.closeVerify]);
+  }, [app.anyDialogOpen, app.dismissDialog]);
 
   return (
     <>
@@ -161,7 +161,7 @@ function Chrome() {
       </footer>
 
       <div className={kbdOpen ? "overlayw open" : "overlayw"} id="kbdOverlay"
-        onClick={e => { if (e.target === e.currentTarget || (e.target as HTMLElement).closest("[data-close]")) setKbdOpen(false); }}>
+        onClick={e => { if (e.target === e.currentTarget || (e.target as HTMLElement).closest("[data-close]")) app.closeShortcuts(); }}>
         <div className="modal" style={{ width: "min(560px,100%)" }}>
           <div className="mhead">
             <div className="row1"><h3>Keyboard Shortcuts</h3><button className="x" data-close>✕</button></div>

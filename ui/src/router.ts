@@ -1,23 +1,21 @@
 // Pretty URLs — the path is the single source of truth for what the console
 // shows. No query strings, no hashes: every stateful surface is a real,
-// bookmarkable, semantically-named location.
+// bookmarkable, semantically-named location. Dialogs included: a dialog is a
+// thing you can be looking at, so it gets an address like everything else.
 //
 //   /                                     Overview
 //   /sessions                             metadata explorer
 //   /sessions/by/person                   …grouped
 //   /sessions/search/routing+gates        …searched
 //   /sessions/claude-cli/59e3ccf5-8f8b    one session (its storage key)
+//   /sessions/claude-cli/59e3ccf5-8f8b/verify        …its residency proof
+//   /residency/verify/claude-cli/59e3ccf5-8f8b       the same proof, from the audit
 //   /people/erik                          one person
-//   /adoption                             roster vs reality
-//   /adoption/by/coverage                 …grouped
-//   /adoption/not-installed               …one cohort
-//   /residency                            residency proof
-//   /residency/gates                      …scrolled to the routing gates
-//   /residency/incident                   …the incident preview
-//   /compliance/egress                    posture, at the egress inventory
-//   /postgres/failed-boot                 the failed-boot preview
-//   /storage · /embeddings · /ops · /ops/keys
+//   /adoption/by/coverage/not-installed   grouped + one cohort
+//   /residency/gates · /residency/incident
+//   /compliance/egress · /postgres/failed-boot · /ops/keys
 //   /logs/session_vault/errors/7d         source · level · range, any order
+//   …/shortcuts                           the keyboard map, over any page
 //
 // Vocabularies are disjoint per segment position, so nothing is ambiguous and
 // defaults are simply omitted — the shortest URL that says what you mean.
@@ -47,6 +45,11 @@ export interface Route {
   logSrc: string;              // all | host | session_vault | embed-worker | postgres | gateway
   logLevel: string;            // all | warn | error
   logRange: string;            // 1h | 24h | 7d | boot
+  /** dialogs — overlays on the page beneath, so they nest under its path */
+  verify: boolean;
+  verifyFamily?: string;
+  verifySid?: string;
+  shortcuts: boolean;
 }
 
 export const DEFAULT_ROUTE: Route = {
@@ -55,6 +58,7 @@ export const DEFAULT_ROUTE: Route = {
   adGroup: "team", adQuery: "", adFilter: null,
   incident: false, pgPreview: false,
   logSrc: "all", logLevel: "all", logRange: "24h",
+  verify: false, shortcuts: false,
 };
 
 // ── vocabularies ────────────────────────────────────────
@@ -92,8 +96,11 @@ const decodeQ = (s: string) => decodeURIComponent(s.replace(/\+/g, " "));
 
 // ── parse ───────────────────────────────────────────────
 export function parsePath(pathname: string): Route {
-  const raw = pathname.split("/").filter(Boolean);
+  let raw = pathname.split("/").filter(Boolean).map(s => s);
   const r: Route = { ...DEFAULT_ROUTE };
+
+  // The keyboard map overlays any page, so it is always the last segment.
+  if (raw[raw.length - 1] === "shortcuts") { r.shortcuts = true; raw = raw.slice(0, -1); }
   if (!raw.length) return r;
 
   const head = raw[0];
@@ -106,7 +113,7 @@ export function parsePath(pathname: string): Route {
   }
 
   const view = SEGMENT_VIEW[head];
-  if (!view) return r;                    // unknown path → Overview
+  if (!view) return { ...r, shortcuts: r.shortcuts };   // unknown path → Overview
   r.view = view;
 
   if (view === "sessions") {
@@ -115,10 +122,15 @@ export function parsePath(pathname: string): Route {
       const seg = rest[i];
       if (seg === "by" && rest[i + 1]) { r.sesGroup = SES_GROUP_KEY[rest[i + 1]] ?? r.sesGroup; i += 2; }
       else if (seg === "search" && rest[i + 1]) { r.sesQuery = decodeQ(rest[i + 1]); i += 2; }
+      else if (seg === "verify") { r.verify = true; i += 1; }
       else if (rest[i + 1]) {              // family + id → a single session
         r.view = "session-detail"; r.family = seg; r.sid = decodeQ(rest[i + 1]); i += 2;
       } else i += 1;
     }
+    // On a session's own page the proof is about that session — no need to
+    // repeat the key in the path.
+    if (r.verify && r.view === "session-detail") { r.verifyFamily = r.family; r.verifySid = r.sid; }
+    else if (r.verify) r.verify = false;
     return r;
   }
 
@@ -147,27 +159,37 @@ export function parsePath(pathname: string): Route {
     return r;
   }
 
-  for (const seg of rest) {
-    if (view === "residency" && seg === "incident") r.incident = true;
-    else if ((ANCHORS[view] ?? []).includes(seg)) r.anchor = seg;
+  let i = 0;
+  while (i < rest.length) {
+    const seg = rest[i];
+    if (view === "residency" && seg === "incident") { r.incident = true; i += 1; }
+    // Verifying from the audit names the session, because the page beneath
+    // isn't about one.
+    else if (seg === "verify" && rest[i + 1] && rest[i + 2]) {
+      r.verify = true; r.verifyFamily = rest[i + 1]; r.verifySid = decodeQ(rest[i + 2]); i += 3;
+    }
+    else { if ((ANCHORS[view] ?? []).includes(seg)) r.anchor = seg; i += 1; }
   }
   return r;
 }
 
 // ── format ──────────────────────────────────────────────
 export function formatPath(r: Route): string {
-  const parts: string[] = [];
+  const tail = r.shortcuts ? ["shortcuts"] : [];
+  const done = (parts: string[]) => "/" + [...parts, ...tail].join("/");
 
-  if (r.view === "person-detail") return r.personId ? `/people/${encodeQ(r.personId)}` : "/adoption";
+  if (r.view === "person-detail") return r.personId ? done(["people", encodeQ(r.personId)]) : done(["adoption"]);
 
   if (r.view === "session-detail") {
-    if (r.family && r.sid) return `/sessions/${r.family}/${encodeQ(r.sid)}`;
-    return "/sessions";
+    if (!r.family || !r.sid) return done(["sessions"]);
+    const parts = ["sessions", r.family, encodeQ(r.sid)];
+    if (r.verify) parts.push("verify");
+    return done(parts);
   }
 
   const head = VIEW_SEGMENT[r.view];
-  if (!head) return "/";
-  parts.push(head);
+  if (!head) return done([]);
+  const parts = [head];
 
   if (r.view === "sessions") {
     if (r.sesGroup !== "team") parts.push("by", SES_GROUP_URL[r.sesGroup] ?? r.sesGroup);
@@ -185,7 +207,8 @@ export function formatPath(r: Route): string {
   } else {
     if (r.view === "residency" && r.incident) parts.push("incident");
     if (r.anchor && (ANCHORS[r.view] ?? []).includes(r.anchor)) parts.push(r.anchor);
+    if (r.verify && r.verifyFamily && r.verifySid) parts.push("verify", r.verifyFamily, encodeQ(r.verifySid));
   }
 
-  return "/" + parts.join("/");
+  return done(parts);
 }

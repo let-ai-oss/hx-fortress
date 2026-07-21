@@ -13,11 +13,13 @@ export interface VerifyStepState {
   shown: boolean; done: boolean;
 }
 
+interface NavOpts { replace?: boolean; modal?: boolean }
+
 interface AppState {
   route: Route;
   view: ViewName;
   /** Change any part of the route; the URL is written, then the UI follows. */
-  navigate: (patch: Partial<Route>, opts?: { replace?: boolean }) => void;
+  navigate: (patch: Partial<Route>, opts?: NavOpts) => void;
   goto: (v: ViewName, then?: string) => void;
   registerPanel: (key: string, el: HTMLElement | null) => void;
 
@@ -36,6 +38,9 @@ interface AppState {
   verifyOpen: boolean; verifySession: (s: any) => void; closeVerify: () => void;
   verifySteps: VerifyStepState[]; verifyStatus: string; verifyProof: string; verifyDone: boolean;
   verifyTarget: any;
+
+  shortcutsOpen: boolean; toggleShortcuts: () => void; closeShortcuts: () => void;
+  anyDialogOpen: boolean; dismissDialog: () => void;
 }
 
 const Ctx = createContext<AppState>(null as unknown as AppState);
@@ -60,15 +65,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const navigate = useCallback((patch: Partial<Route>, opts?: { replace?: boolean }) => {
-    const next: Route = { ...routeRef.current, ...patch };
+  const navigate = useCallback((patch: Partial<Route>, opts?: NavOpts) => {
+    const cur = routeRef.current;
+    // Going somewhere else dismisses whatever dialog is open — otherwise an
+    // overlay would ride along and pile up in every later URL.
+    const leaving = patch.view !== undefined && patch.view !== cur.view;
+    const cleared: Partial<Route> = leaving
+      ? { shortcuts: false, verify: false, verifyFamily: undefined, verifySid: undefined }
+      : {};
+    const next: Route = { ...cur, ...cleared, ...patch };
     const path = formatPath(next);
     if (path !== window.location.pathname) {
-      window.history[opts?.replace ? "replaceState" : "pushState"]({}, "", path);
+      // Opening a dialog marks its history entry, so dismissing can simply go
+      // back — no leftover entry that re-opens it on Back.
+      const histState = opts?.modal ? { hxDialog: true } : {};
+      window.history[opts?.replace ? "replaceState" : "pushState"](histState, "", path);
     }
     routeRef.current = next;
     setRoute(next);
   }, []);
+
+  /** Close a dialog: rewind if we pushed it, otherwise (a cold-loaded dialog
+   *  link) rewrite to the page underneath. */
+  const dismiss = useCallback((patch: Partial<Route>) => {
+    if ((window.history.state as any)?.hxDialog) window.history.back();
+    else navigate(patch, { replace: true });
+  }, [navigate]);
 
   const [svcRunning, setSvcRunning] = useState(true);
   const [pid, setPid] = useState<number>(FORT.pid);
@@ -98,12 +120,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const openSession = useCallback((s: any) => {
-    navigate({ view: "session-detail", family: s.family, sid: s.sid, anchor: undefined });
+    navigate({ view: "session-detail", family: s.family, sid: s.sid, anchor: undefined, verify: false });
     window.scrollTo(0, 0);
   }, [navigate]);
 
   const openPerson = useCallback((id: string) => {
-    navigate({ view: "person-detail", personId: id, anchor: undefined });
+    navigate({ view: "person-detail", personId: id, anchor: undefined, verify: false });
     window.scrollTo(0, 0);
   }, [navigate]);
 
@@ -117,43 +139,66 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     () => (route.personId ? PEOPLE.find((p: any) => p.id === route.personId) ?? null : null),
     [route.personId]);
 
-  // ── Verify-residency modal — transient, so it stays out of the URL.
-  const [verifyOpen, setVerifyOpen] = useState(false);
-  const [verifyTarget, setVerifyTarget] = useState<any>(null);
+  // ── Verify-residency dialog — a proof about one session, so it has its own
+  //    address and re-runs whenever that address is loaded.
+  const verifyTarget = useMemo(
+    () => (route.verifyFamily && route.verifySid
+      ? SESSIONS.find((s: any) => s.family === route.verifyFamily && s.sid === route.verifySid) ?? null
+      : null),
+    [route.verifyFamily, route.verifySid]);
+  const verifyOpen = route.verify && !!verifyTarget;
+
   const [verifySteps, setVerifySteps] = useState<VerifyStepState[]>([]);
   const [verifyStatus, setVerifyStatus] = useState("Running checks…");
   const [verifyProof, setVerifyProof] = useState("");
   const [verifyDone, setVerifyDone] = useState(false);
-  const verifyRun = useRef(0);
-  const verifyOpenRef = useRef(false);
 
-  const closeVerify = useCallback(() => {
-    verifyOpenRef.current = false;
-    setVerifyOpen(false);
-  }, []);
-
-  const verifySession = useCallback(async (s: any) => {
-    const run = ++verifyRun.current;
-    verifyOpenRef.current = true;
-    setVerifyOpen(true);
-    setVerifyTarget(s);
+  useEffect(() => {
+    if (!verifyOpen || !verifyTarget) return;
+    let cancelled = false;
+    const target = verifyTarget;
+    const steps = verifyStepsFor(target).map((st: any) => ({ ...st, shown: false, done: false }));
+    setVerifySteps(steps.map(st => ({ ...st })));
     setVerifyStatus("Running checks…");
     setVerifyProof("");
     setVerifyDone(false);
-    const steps = verifyStepsFor(s).map((st: any) => ({ ...st, shown: false, done: false }));
-    setVerifySteps(steps.map(st => ({ ...st })));
-    for (let i = 0; i < steps.length; i++) {
-      await sleep(120);
-      if (run !== verifyRun.current || !verifyOpenRef.current) return;
-      setVerifySteps(prev => prev.map((st, j) => (j === i ? { ...st, shown: true } : st)));
-      await sleep(steps[i].ms);
-      if (run !== verifyRun.current || !verifyOpenRef.current) return;
-      setVerifySteps(prev => prev.map((st, j) => (j === i ? { ...st, shown: true, done: true } : st)));
-    }
-    setVerifyStatus("done");
-    setVerifyProof(verifyProofText(s));
-    setVerifyDone(true);
-  }, []);
+    (async () => {
+      for (let i = 0; i < steps.length; i++) {
+        await sleep(120);
+        if (cancelled) return;
+        setVerifySteps(prev => prev.map((st, j) => (j === i ? { ...st, shown: true } : st)));
+        await sleep(steps[i].ms);
+        if (cancelled) return;
+        setVerifySteps(prev => prev.map((st, j) => (j === i ? { ...st, shown: true, done: true } : st)));
+      }
+      if (cancelled) return;
+      setVerifyStatus("done");
+      setVerifyProof(verifyProofText(target));
+      setVerifyDone(true);
+    })();
+    return () => { cancelled = true; };
+  }, [verifyOpen, verifyTarget]);
+
+  const verifySession = useCallback((s: any) => {
+    navigate({ verify: true, verifyFamily: s.family, verifySid: s.sid }, { modal: true });
+  }, [navigate]);
+  const closeVerify = useCallback(
+    () => dismiss({ verify: false, verifyFamily: undefined, verifySid: undefined }),
+    [dismiss]);
+
+  // ── Keyboard-map dialog — overlays any page, so it nests under that page.
+  const shortcutsOpen = route.shortcuts;
+  const closeShortcuts = useCallback(() => dismiss({ shortcuts: false }), [dismiss]);
+  const toggleShortcuts = useCallback(() => {
+    if (routeRef.current.shortcuts) closeShortcuts();
+    else navigate({ shortcuts: true }, { modal: true });
+  }, [navigate, closeShortcuts]);
+
+  const anyDialogOpen = verifyOpen || shortcutsOpen;
+  const dismissDialog = useCallback(() => {
+    if (routeRef.current.shortcuts) closeShortcuts();
+    else closeVerify();
+  }, [closeShortcuts, closeVerify]);
 
   const value = useMemo<AppState>(() => ({
     route, view: route.view, navigate, goto, registerPanel,
@@ -162,9 +207,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     adFilter: route.adFilter, setAdFilter,
     currentSession, openSession, currentPerson, openPerson,
     verifyOpen, verifySession, closeVerify, verifySteps, verifyStatus, verifyProof, verifyDone, verifyTarget,
+    shortcutsOpen, toggleShortcuts, closeShortcuts, anyDialogOpen, dismissDialog,
   }), [route, navigate, goto, registerPanel, svcRunning, pid, ver, trail, addTrail, setAdFilter,
        currentSession, openSession, currentPerson, openPerson,
-       verifyOpen, verifySession, closeVerify, verifySteps, verifyStatus, verifyProof, verifyDone, verifyTarget]);
+       verifyOpen, verifySession, closeVerify, verifySteps, verifyStatus, verifyProof, verifyDone, verifyTarget,
+       shortcutsOpen, toggleShortcuts, closeShortcuts, anyDialogOpen, dismissDialog]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

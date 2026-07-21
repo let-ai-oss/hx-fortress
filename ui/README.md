@@ -21,6 +21,7 @@ a cold load of any link below lands exactly where it says.
 | `/sessions/by/{team\|person\|project\|repo\|newest}` | …grouped |
 | `/sessions/search/routing+gates` | …searched (spaces are `+`) |
 | `/sessions/{family}/{sessionId}` | One session — its storage key, e.g. `/sessions/claude-cli/59e3ccf5-8f8b` |
+| `/sessions/{family}/{sessionId}/verify` | …its residency proof, re-run on load |
 | `/people/{id}` | One person, e.g. `/people/erik` |
 | `/adoption` | Roster vs reality |
 | `/adoption/by/{team\|group\|coverage\|status}` | …grouped |
@@ -29,6 +30,7 @@ a cold load of any link below lands exactly where it says.
 | `/residency` | Residency proof |
 | `/residency/gates` | …scrolled to the routing gates |
 | `/residency/incident` | …the incident preview |
+| `/residency/verify/{family}/{sessionId}` | …proving one session, without leaving the audit |
 | `/compliance` | Posture, egress, retention, audit |
 | `/compliance/{egress\|retention\|audit}` | …at that panel |
 | `/postgres` · `/postgres/failed-boot` | Postgres, and the failed-boot preview |
@@ -36,11 +38,19 @@ a cold load of any link below lands exactly where it says.
 | `/ops` · `/ops/keys` | Ops tools, and the keys panel |
 | `/logs` | Log viewer |
 | `/logs/{source}/{warnings\|errors}/{1h\|7d\|boot}` | …filtered, e.g. `/logs/session_vault/errors/7d` |
+| `…/shortcuts` | The keyboard map, over any page — `/shortcuts`, `/logs/errors/shortcuts` |
 
 Segments compose (`/adoption/by/coverage/not-installed`) and defaults are
 omitted, so the URL is always the shortest thing that says what you mean. The
 log segments use disjoint vocabularies, so order doesn't matter and any subset
 works — `/logs/boot`, `/logs/errors`, `/logs/postgres/boot` all parse.
+
+Dialogs are locations too. They nest under the page they cover, so the backdrop
+is never lost and a shared link opens the dialog over the right context.
+Opening one pushes a marked history entry, so dismissing it — button, `Esc`, or
+browser Back — rewinds instead of leaving debris; a dialog link opened cold
+rewrites to the page underneath instead. Navigating to another section
+dismisses whatever dialog is open, so overlays never pile up in later URLs.
 
 Unknown paths rewrite themselves to `/`.
 
