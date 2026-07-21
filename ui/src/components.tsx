@@ -1,13 +1,16 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MENU_CLOSE_EVENT } from "./lib/util";
 
 // ── Custom dropdown menu (gpill + menu) — closes on pick, outside click, Esc.
-// The open menu is PORTALED to <body> and fixed-positioned, so it floats above
-// everything (dialogs included) and never grows a scroll container. It opens
-// downward, or flips up when the room is below; long lists scroll internally.
+// The open menu is PORTALED to <body>, fixed-positioned and given a z-index
+// above dialogs, so it floats over everything and never grows a scroll
+// container. It's placed by measuring the real menu height after mount: opens
+// downward when it fits, flips up when it doesn't, clamps + scrolls internally
+// when neither side has room. Always positioned via `top` (never `bottom`), so
+// it never conflicts with the .menu class's own `top` rule.
 export interface MenuItem { key: string; label: string; }
-interface MenuPos { left: number; top?: number; bottom?: number; minWidth: number; maxHeight: number; }
+interface MenuPos { left: number; top: number; minWidth: number; maxHeight: number; }
 export function MenuPill(props: {
   pillId: string; menuId: string; valueId: string;
   label?: string; value: string; mini?: boolean; right?: boolean;
@@ -19,20 +22,31 @@ export function MenuPill(props: {
   const pillRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const place = () => {
+  // Provisional downward placement so the menu can render and be measured.
+  const openMenu = () => {
     const el = pillRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    const below = window.innerHeight - r.bottom;
-    const above = r.top;
-    const flipUp = below < 260 && above > below;
-    setPos({
-      left: r.left,
-      minWidth: Math.max(r.width, 230),
-      maxHeight: Math.max(140, (flipUp ? above : below) - 16),
-      ...(flipUp ? { bottom: window.innerHeight - r.top + 8 } : { top: r.bottom + 8 }),
-    });
+    setPos({ left: r.left, top: r.bottom + 8, minWidth: Math.max(r.width, 230), maxHeight: window.innerHeight - r.bottom - 16 });
+    setOpen(true);
   };
+
+  // Correct the placement once the real menu height is known.
+  useLayoutEffect(() => {
+    if (!open || !menuRef.current || !pillRef.current) return;
+    const r = pillRef.current.getBoundingClientRect();
+    const h = menuRef.current.scrollHeight;              // natural content height
+    const spaceBelow = window.innerHeight - r.bottom - 16;
+    const spaceAbove = r.top - 16;
+    let top: number, maxHeight: number;
+    if (h <= spaceBelow || spaceBelow >= spaceAbove) {   // fits below, or below has more room
+      top = r.bottom + 8; maxHeight = spaceBelow;
+    } else {                                             // flip up
+      maxHeight = spaceAbove;
+      top = Math.max(8, r.top - 8 - Math.min(h, spaceAbove));
+    }
+    setPos(p => (p && (p.top !== top || p.maxHeight !== maxHeight) ? { ...p, top, maxHeight } : p));
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -56,12 +70,12 @@ export function MenuPill(props: {
 
   return (
     <div className={props.mini ? "gpill mini" : "gpill"} id={props.pillId} ref={pillRef} style={props.style}
-      onClick={() => (open ? setOpen(false) : (place(), setOpen(true)))}>
+      onClick={() => (open ? setOpen(false) : openMenu())}>
       {props.label ? <><span className="lbl">{props.label}</span>{" "}</> : null}
       <span id={props.valueId}>{props.value}</span> <span className="caret"></span>
       {open && pos ? createPortal(
         <div className="menu openm" id={props.menuId} ref={menuRef}
-          style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom, minWidth: pos.minWidth, maxHeight: pos.maxHeight, overflowY: "auto" }}>
+          style={{ position: "fixed", left: pos.left, top: pos.top, bottom: "auto", minWidth: pos.minWidth, maxHeight: pos.maxHeight, overflowY: "auto", zIndex: 200 }}>
           {props.items.map(it => (
             <button key={it.key} {...{ [props.dataAttr]: it.key }}
               className={it.key === props.selKey ? "sel" : undefined}

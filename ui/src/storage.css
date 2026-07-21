@@ -3,20 +3,25 @@
    the same tokens and reuses the same primitives. */
 
 .stform { margin-top: 6px; }
+/* Controls and their subtext share one text inset (18px), matching the pill's,
+   so a fieldnote lines up with the value inside the control above it — not with
+   the control's border. This is the app-wide alignment for control subtext. */
 .stform .frw input,
 .stform .frw textarea {
   font-family: var(--mono); font-size: 13.5px; color: var(--text);
   border: 1px solid var(--border-strong); border-radius: 999px;
-  padding: 0 16px; height: 36px; outline: none; background: var(--surface);
+  padding: 0 18px; height: 36px; outline: none; background: var(--surface);
   width: 100%; max-width: 340px;
 }
 .stform .frw textarea {
-  border-radius: var(--radius-sm); height: auto; padding: 10px 14px;
+  border-radius: var(--radius-sm); height: auto; padding: 10px 18px;
   line-height: 1.5; resize: vertical; min-height: 76px;
 }
 .stform .frw input:focus,
 .stform .frw textarea:focus { border-color: var(--accent); }
-.stform .fieldnote { font-size: 13px; color: var(--text-subtle); margin-top: 4px; }
+/* 19px = the control's 1px border + 18px text padding, so the note's text
+   lands exactly under the value inside the control above it. */
+.stform .fieldnote { font-size: 13px; color: var(--text-subtle); margin-top: 4px; padding-left: 19px; }
 
 /* Two-field credential edit, right-aligned inside the row it belongs to. */
 .credit { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }

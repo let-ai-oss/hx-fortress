@@ -192,7 +192,7 @@ export function Blob() {
       <div className="panel">
         <h2>Store</h2>
         <div className="facts">
-          <div className="frw"><span className="k">Kind</span><span><span className="v">{st.kind === "gcs" ? "Google Cloud Storage" : "S3"}</span><div className="vs">from <span className="mono">credentials.json</span> · {st.kind === "gcs" ? "S3" : "GCS"} equally supported</div></span><button className="btn ghost sm" onClick={() => openEditor("target")}>Change…</button></div>
+          <div className="frw"><span className="k">Kind</span><span><span className="v">{st.kind === "gcs" ? "GCP Cloud Storage" : "AWS S3"}</span><div className="vs">from <span className="mono">credentials.json</span> · {st.kind === "gcs" ? "S3" : "GCS"} equally supported</div></span><button className="btn ghost sm" onClick={() => openEditor("target")}>Change…</button></div>
           <div className="frw"><span className="k">Bucket</span><span><span className="v mono">{st.bucket}</span><div className="vs">{st.region} · public access blocked · versioning on</div></span></div>
           {st.kind === "gcs" ? (
             <div className="frw"><span className="k">Project</span><span><span className="v mono">{st.projectId}</span><div className="vs">the GCP project that owns the bucket</div></span></div>
@@ -248,8 +248,8 @@ export function Blob() {
             <div className="facts wide">
               <div className="frw"><span className="k">Provider</span><span>
                 <MenuPill pillId="stKindPill" menuId="stKindMenu" valueId="stKindVal"
-                  value={form.kind === "gcs" ? "Google Cloud Storage" : "S3"} selKey={form.kind} dataAttr="data-kind"
-                  items={[{ key: "s3", label: "S3" }, { key: "gcs", label: "Google Cloud Storage" }]}
+                  value={form.kind === "gcs" ? "GCP Cloud Storage" : "AWS S3"} selKey={form.kind} dataAttr="data-kind"
+                  items={[{ key: "s3", label: "AWS S3" }, { key: "gcs", label: "GCP Cloud Storage" }]}
                   onPick={k => setForm(f => ({ ...f, kind: k as "s3" | "gcs", region: k === "gcs" ? "europe-north1" : "eu-north-1" }))} />
                 <div className="fieldnote">switching provider always means a new, empty bucket</div>
               </span></div>
