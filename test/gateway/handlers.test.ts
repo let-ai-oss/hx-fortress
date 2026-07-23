@@ -44,6 +44,7 @@ function fakeStore(overrides: Partial<SessionStore> = {}): SessionStore {
     readArtifactText: async () => null,
     listSessionMetadata: async () => SAMPLE_METADATA,
     selfTest: async () => {},
+    deleteSession: async () => ({ complete: true, deleted: 0 }),
   };
   return { ...base, ...overrides };
 }
