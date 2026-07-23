@@ -51,6 +51,17 @@ export function listPrefix(userId: string): string {
   return `${userId}/`;
 }
 
+/** The two list prefixes that together cover EVERY object of one session: its
+ *  own directory (`…/sid/`) and every agent lane (`…/sid:a:` — sibling
+ *  prefixes, not nested). Both are exact-segment shaped: the char after the
+ *  session id is `/` or `:`, so a longer sibling id can never match. Callers
+ *  pass the BASE session id (no `:a:` composite). */
+export function sessionDeletePrefixes(k: SessionKey): [string, string] {
+  if (k.sessionId.includes(":")) throw new Error("deleteSession requires the base session id");
+  const p = sessionPrefix(k);
+  return [`${p}/`, `${p}:a:`];
+}
+
 export function stagingObject(k: SessionKey, chunkId: string): string {
   assertSegment(chunkId, "chunkId");
   return `${sessionPrefix(k)}/.staging/${chunkId}.jsonl`;

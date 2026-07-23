@@ -25,6 +25,7 @@ import {
   type CapabilityClaims,
   type GrantClaims,
 } from "./capability-token";
+import { isSessionDeleted } from "../ingest/delete";
 import { ingestAgentCommit, ingestCommit, maxIso, type IngestAttribution } from "../ingest/ingest";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestNotification } from "../host/types";
@@ -323,6 +324,14 @@ export async function flushPostCommitWork(): Promise<void> {
 // is ample for the control-plane JSON (commit metadata, MCP JSON-RPC).
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
 
+// The direct-ingest write routes that must refuse hard-deleted sessions (410).
+const INGEST_WRITE_ROUTES = new Set([
+  "/sessions/append-url",
+  "/sessions/commit",
+  "/sessions/agent-append-url",
+  "/sessions/agent-commit",
+]);
+
 export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
   const server = Bun.serve({
     port: deps.port,
@@ -400,6 +409,19 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
           // (This subsumes main's #51 body.userId guard, keyed on claims.sub.)
           if (typeof body.userId === "string" && body.userId !== userId) {
             return json({ error: "principal_object_mismatch" }, 403);
+          }
+          // Hard-deleted sessions: refuse every direct-ingest write with the
+          // same 410 body the cloud gateway uses, so the hx client has one
+          // tombstone code path. Cross-family by identity (a stale-family
+          // child/sidecar upload must not slip past). A fortress without ready
+          // Postgres cannot consult tombstones — documented limitation of the
+          // PG-less bootstrap state.
+          if (INGEST_WRITE_ROUTES.has(url.pathname)) {
+            const guardDb = deps.dbRead();
+            const sid = str(body.sessionId);
+            if (guardDb && sid && (await isSessionDeleted(guardDb, userId, sid))) {
+              return json({ error: "session_deleted" }, 410);
+            }
           }
           switch (url.pathname) {
             case "/sessions/append-url":

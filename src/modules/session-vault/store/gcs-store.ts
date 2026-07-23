@@ -15,6 +15,8 @@ import { Storage, type StorageOptions, type Bucket } from "@google-cloud/storage
 import type {
   AppendOptions,
   ComposeResult,
+  DeleteSessionOptions,
+  DeleteSessionResult,
   SessionKey,
   SessionMetadata,
   SessionStore,
@@ -26,7 +28,14 @@ import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
-import { artifactObject, canonicalObject, listPrefix, sessionPrefix, stagingObject } from "./keys.js";
+import {
+  artifactObject,
+  canonicalObject,
+  listPrefix,
+  sessionDeletePrefixes,
+  sessionPrefix,
+  stagingObject,
+} from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
 
 export interface GcsStoreConfig {
@@ -211,6 +220,41 @@ export class GcsStore implements SessionStore {
       if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
     }
     return out;
+  }
+
+  async deleteSession(key: SessionKey, opts?: DeleteSessionOptions): Promise<DeleteSessionResult> {
+    const limit = Math.max(1, opts?.batchLimit ?? 800);
+    let deleted = 0;
+    for (const prefix of sessionDeletePrefixes(key)) {
+      for (;;) {
+        if (deleted >= limit) return { complete: false, deleted };
+        // versions:true — the bucket is provisioned with versioning, so each
+        // noncurrent generation must be deleted explicitly (a plain delete
+        // leaves prior generations recoverable). Generation-pinned deletes make
+        // the removal permanent (bucket-level soft-delete retention, if
+        // configured, expires on the provider's clock — ≤7 days).
+        const [files] = await this.bucket().getFiles({
+          prefix,
+          versions: true,
+          maxResults: Math.min(1000, limit - deleted),
+          autoPaginate: false,
+        });
+        if (files.length === 0) break;
+        for (const f of files) {
+          const generation = Number(f.metadata?.generation ?? 0);
+          const target = generation
+            ? this.bucket().file(f.name, { generation })
+            : this.bucket().file(f.name);
+          // 404 = a concurrent delete won the race — fine; anything else must
+          // surface so the purge job retries instead of reporting complete.
+          await target.delete().catch((err) => {
+            if ((err as { code?: number }).code !== 404) throw err;
+          });
+          deleted += 1;
+        }
+      }
+    }
+    return { complete: true, deleted };
   }
 
   async selfTest(): Promise<void> {
