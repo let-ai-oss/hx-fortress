@@ -60,6 +60,19 @@ export interface SessionMetadata {
   deviceName: string | null;
 }
 
+export interface DeleteSessionResult {
+  /** No object (or version) remains under the session's prefixes. */
+  complete: boolean;
+  /** Objects/versions removed by THIS call. */
+  deleted: number;
+}
+
+export interface DeleteSessionOptions {
+  /** Max objects/versions to remove in one call (bounded so a call always fits
+   *  the tunnel RPC window; the caller re-invokes until `complete`). */
+  batchLimit?: number;
+}
+
 export interface SessionStore {
   /** Mint a signed PUT URL for a staging chunk. The caller PUTs raw NDJSON bytes. */
   signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload>;
@@ -95,4 +108,11 @@ export interface SessionStore {
    *  bad bucket/permission surfaces immediately, not at the first session) and
    *  by the panel's "Send a test session". */
   selfTest(): Promise<void>;
+  /** PERMANENTLY delete every object of one session — the canonical, staging
+   *  chunks, sidecar artifacts AND every agent lane (`${sessionId}:a:*`, a
+   *  sibling prefix), including every noncurrent VERSION and delete marker
+   *  (both bucket kinds are provisioned with versioning, so a current-version
+   *  delete alone leaves the bytes recoverable). Bounded per call; idempotent —
+   *  the caller re-invokes until `complete`. */
+  deleteSession(key: SessionKey, opts?: DeleteSessionOptions): Promise<DeleteSessionResult>;
 }

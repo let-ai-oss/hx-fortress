@@ -1,6 +1,6 @@
 {
   "name": "hx-fortress",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -38,6 +38,9 @@
     "jose": "^6.2.3"
   },
   "overrides": {
-    "uuid": "^11.1.1"
+    "uuid": "^11.1.1",
+    "@hono/node-server": "^2.0.11",
+    "fast-uri": "^3.1.4",
+    "brace-expansion": "^5.0.7"
   }
 }

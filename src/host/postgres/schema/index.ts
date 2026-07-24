@@ -3,6 +3,7 @@
 // circular dependency through this file.
 export { hxSchema } from "./namespace";
 
+export * from "./deleted-sessions";
 export * from "./dimensions";
 export * from "./sessions";
 export * from "./transcript";

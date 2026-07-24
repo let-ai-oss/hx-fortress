@@ -20,6 +20,7 @@ import { hxEmbeddings } from "../host/postgres/schema/embeddings";
 import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
+import { isSessionDeleted } from "./delete";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { parseChunk, type ParsedChunk, type ParsedToolCall, type ParsedTurn } from "./parse";
 
@@ -480,6 +481,12 @@ export function maxIso(a: string | null | undefined, b: string | null | undefine
 export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<void> {
   const userExternalId = input.key.userId;
   if (!userExternalId) return; // no user → can't satisfy the NOT NULL session FK
+  // Hard-deleted sessions must never come back — mirrors re-push on activity
+  // and migrate-from-workbench replays whole histories; the tombstone outranks
+  // every producer.
+  if (await isSessionDeleted(db, userExternalId, input.key.sessionId)) {
+    throw new Error("session_deleted");
+  }
   const now = new Date().toISOString();
   const dedupeKey = `${userExternalId}:${input.key.family}:${input.key.sessionId}:${input.chunkId}`;
   const parsed = parseChunk(input.chunkText);
@@ -658,6 +665,11 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
 export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput): Promise<void> {
   const userExternalId = input.key.userId;
   if (!userExternalId || !input.agentId) return;
+  // Cross-family by identity — child lanes can carry a stale family (see
+  // isSessionDeleted); a deleted parent blocks every lane.
+  if (await isSessionDeleted(db, userExternalId, input.key.sessionId)) {
+    throw new Error("session_deleted");
+  }
   const now = new Date().toISOString();
   const dedupeKey = `${userExternalId}:${input.key.family}:${input.key.sessionId}:a:${input.agentId}:${input.chunkId}`;
   const parsed = parseChunk(input.chunkText);

@@ -5,6 +5,7 @@
 // carries these messages; nothing here knows about sockets.
 
 import type { HxDb } from "../../../host/postgres/db.js";
+import { baseSessionId, markSessionDeleted, purgeSessionPg } from "../../../ingest/delete.js";
 import {
   ingestAgentCommit,
   ingestCommit,
@@ -97,6 +98,12 @@ export type VaultRpcRequest =
   // the unknown method, which the cloud treats as best-effort.
   | ({ method: "ingestCommit" } & IngestCommitRpc)
   | ({ method: "ingestAgentCommit"; agentId: string } & IngestCommitRpc)
+  // Permanent hard delete of one session (cloud-initiated). Tombstones the
+  // identity first, then purges Postgres + every bucket object/version in
+  // bounded batches — idempotent, the cloud re-calls until `complete`. Older
+  // binaries reject the unknown method; the cloud gates on the fortress
+  // version and parks the purge as "update required".
+  | { method: "deleteSession"; key: SessionKey; batchLimit?: number }
   | { method: "selfTest" };
 
 export type VaultRpcResult =
@@ -112,6 +119,7 @@ export type VaultRpcResult =
   | { method: "listSessions"; value: FortressSessionRow[] }
   | { method: "ingestCommit"; value: { ok: true } }
   | { method: "ingestAgentCommit"; value: { ok: true } }
+  | { method: "deleteSession"; value: { complete: boolean; deleted: number } }
   | { method: "selfTest"; value: { ok: true } };
 
 export interface VaultRpcError {
@@ -135,6 +143,7 @@ const VAULT_WRITE_METHODS: ReadonlySet<string> = new Set([
   "writeArtifact",
   "ingestCommit",
   "ingestAgentCommit",
+  "deleteSession",
 ]);
 
 /** True for a mutating vault RPC method (drives the ingest vs read grant purpose). */
@@ -326,6 +335,21 @@ export async function handleVaultRpc(
         attribution: req.attribution,
       });
       return { method: req.method, value: { ok: true } };
+    }
+    case "deleteSession": {
+      // Tombstone + purge both need Postgres; without it the guard could not
+      // hold, so fail typed (the cloud parks the job, no attempt burned).
+      if (!db) throw new Error("postgres_not_ready");
+      const key = { ...req.key, sessionId: baseSessionId(req.key.sessionId) };
+      // Tombstone FIRST — re-ingest is blocked even if the purge below is
+      // interrupted; every subsequent call is a converging retry.
+      await markSessionDeleted(db, key);
+      const pg = await purgeSessionPg(db, key, Date.now() + 10_000);
+      const bucket = await store.deleteSession(key, { batchLimit: req.batchLimit ?? 500 });
+      return {
+        method: req.method,
+        value: { complete: pg.complete && bucket.complete, deleted: bucket.deleted },
+      };
     }
     case "selfTest":
       await store.selfTest();

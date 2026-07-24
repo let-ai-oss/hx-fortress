@@ -27,12 +27,16 @@ import {
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
   ListObjectsV2Command,
+  ListObjectVersionsCommand,
+  DeleteObjectsCommand,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type {
   AppendOptions,
   ComposeResult,
+  DeleteSessionOptions,
+  DeleteSessionResult,
   SessionKey,
   SessionMetadata,
   SessionStore,
@@ -44,7 +48,13 @@ import {
   parseSessionMetadata,
   SESSION_METADATA_ARTIFACT,
 } from "./session-metadata.js";
-import { artifactObject, canonicalObject, listPrefix, stagingObject } from "./keys.js";
+import {
+  artifactObject,
+  canonicalObject,
+  listPrefix,
+  sessionDeletePrefixes,
+  stagingObject,
+} from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
 
 export interface S3StoreConfig {
@@ -249,6 +259,44 @@ export class S3Store implements SessionStore {
       if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
     }
     return out;
+  }
+
+  async deleteSession(key: SessionKey, opts?: DeleteSessionOptions): Promise<DeleteSessionResult> {
+    const limit = Math.max(1, opts?.batchLimit ?? 800);
+    let deleted = 0;
+    for (const prefix of sessionDeletePrefixes(key)) {
+      for (;;) {
+        if (deleted >= limit) return { complete: false, deleted };
+        // ListObjectVersions (not ListObjectsV2): the bucket is versioned, so a
+        // plain delete only writes a delete marker and every noncurrent version
+        // survives. Enumerate versions AND delete markers and remove each by
+        // VersionId — that is what makes the delete permanent.
+        const page = await this.s3.send(
+          new ListObjectVersionsCommand({
+            Bucket: this.bucket,
+            Prefix: prefix,
+            MaxKeys: Math.min(1000, limit - deleted),
+          }),
+        );
+        const entries = [...(page.Versions ?? []), ...(page.DeleteMarkers ?? [])]
+          .filter((v) => typeof v.Key === "string" && v.Key.length > 0)
+          .map((v) => (v.VersionId ? { Key: v.Key as string, VersionId: v.VersionId } : { Key: v.Key as string }));
+        if (entries.length === 0) break;
+        const res = await this.s3.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: { Objects: entries, Quiet: true },
+          }),
+        );
+        // A partial failure must surface (the purge job retries) — silently
+        // reporting `complete` would leave bytes behind forever.
+        if (res.Errors && res.Errors.length > 0) {
+          throw new Error(`session_delete_failed:${res.Errors[0]?.Code ?? "unknown"}`);
+        }
+        deleted += entries.length;
+      }
+    }
+    return { complete: true, deleted };
   }
 
   async selfTest(): Promise<void> {

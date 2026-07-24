@@ -18,6 +18,7 @@ import sql0008SessionFacts from "./0008_session_facts.sql" with { type: "text" }
 import sql0010EmbeddingsIndexes from "./0010_embeddings_indexes.sql" with { type: "text" };
 import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "text" };
 import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
+import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -45,4 +46,7 @@ export const migrations: Migration[] = [
   // Net-new durable daily embed-token budget table (M-9e). NOT gated — the embed
   // worker reads/increments it to hold a per-day OpenAI spend ceiling.
   { name: "0012_embed_budget", sql: sql0012EmbedBudget },
+  // Net-new permanent session-delete tombstones. NOT gated — every ingest
+  // surface consults it to refuse re-uploads of hard-deleted sessions.
+  { name: "0013_deleted_sessions", sql: sql0013DeletedSessions },
 ];
