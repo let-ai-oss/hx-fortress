@@ -103,6 +103,11 @@ export interface SessionStore {
   /** List lightweight session metadata for one user without reading every
    *  canonical transcript. */
   listSessionMetadata(userId: string): Promise<SessionMetadata[]>;
+  /** Enumerate the SessionKey of every canonical transcript in the store,
+   *  name-only (no metadata read / no download) — the discovery primitive for
+   *  the G reconciler's orphan anti-join. Whole-bucket scan; agent lanes appear
+   *  as their `:a:` composite sessionId. */
+  listAllCanonicalKeys(): Promise<SessionKey[]>;
   /** Prove the bucket + credentials actually work: write→read→delete a
    *  throwaway probe object. Throws on any failure. Run at enroll time (so a
    *  bad bucket/permission surfaces immediately, not at the first session) and

@@ -27,6 +27,7 @@ import {
 } from "./capability-token";
 import { isSessionDeleted } from "../ingest/delete";
 import { ingestAgentCommit, ingestCommit, maxIso, type IngestAttribution } from "../ingest/ingest";
+import { signalReconcile } from "../ingest/reconcile-signal";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestNotification } from "../host/types";
 import type { Embedder } from "../modules/embed-worker/openai";
@@ -226,7 +227,12 @@ async function ingestCommitMetadata(
   meta: Record<string, unknown> | null,
 ): Promise<void> {
   const db = deps.db();
-  if (!db) return;
+  if (!db) {
+    // Canonical is durable but the index can't be written now → row-less. Nudge
+    // the guarantor (symmetric with the tunnel path's PG-down branch).
+    signalReconcile();
+    return;
+  }
   try {
     await ingestCommit(db, {
       attribution: attributionFromClaims(claims),
@@ -244,6 +250,8 @@ async function ingestCommitMetadata(
       sessionId: key.sessionId,
       error: err instanceof Error ? err.message : String(err),
     });
+    // Row-less canonical: nudge the guarantor to re-index it soon.
+    signalReconcile();
   }
 }
 
@@ -259,7 +267,11 @@ async function ingestAgentCommitMetadata(
   meta: Record<string, unknown> | null,
 ): Promise<void> {
   const db = deps.db();
-  if (!db) return;
+  if (!db) {
+    // Row-less canonical (PG not ready) → nudge the guarantor, as above.
+    signalReconcile();
+    return;
+  }
   try {
     await ingestAgentCommit(db, {
       attribution: attributionFromClaims(claims),
@@ -279,6 +291,8 @@ async function ingestAgentCommitMetadata(
       agentId,
       error: err instanceof Error ? err.message : String(err),
     });
+    // Row-less canonical: nudge the guarantor to re-index it soon.
+    signalReconcile();
   }
 }
 

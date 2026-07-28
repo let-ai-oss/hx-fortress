@@ -78,6 +78,7 @@ function createMockStore(overrides: Partial<SessionStore> = {}): SessionStore {
     listSessionMetadata: async () => [],
     selfTest: async () => {},
     deleteSession: async () => ({ complete: true, deleted: 0 }),
+    listAllCanonicalKeys: async () => [],
     ...overrides,
   };
 }

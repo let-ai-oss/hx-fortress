@@ -47,6 +47,8 @@ import { verifyGrant, type GrantClaims } from "../gateway/capability-token";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
 import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
+import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
+import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 
 export interface HostMainDependencies {
   root?: string;
@@ -420,11 +422,54 @@ export async function runFortressHost(
     embedWorker.start();
   }
 
+  // Component G (MC-2606) — the guarantor. Re-indexes any canonical transcript
+  // that reached the bucket but has NO hx.sessions row (the row-less state behind
+  // the title incident), re-running the FULL ingest so rows, FTS, tool_calls,
+  // session_facts, dimensions, embeddings and the real title are all rebuilt. ON
+  // by default (FORTRESS_GUARANTOR_DISABLED turns it off). Reads the same lazily-
+  // resolved RW db + live vault store the gateway uses, so it's safe to start
+  // before either is ready (a pass that finds them down just reschedules).
+  //
+  // Pacing knobs (optional): a boot-drain of the whole backlog re-ingests every
+  // orphan at once, which enqueues all their turns for embedding at the daily
+  // budget. Titles/rows appear immediately (written in the ingest txn); only
+  // embeddings lag. Unbounded by default (fast restore, accept a short semantic-
+  // search lag); FORTRESS_GUARANTOR_MAX_ORPHANS_PER_PASS caps a pass so the
+  // backlog drains across the hourly sweeps instead. FORTRESS_CORRECT_TITLES
+  // opts into the one-time backfill of pre-existing fallback/empty titles (off by
+  // default — it re-reads every such canonical, and restores already get their
+  // real title from the cascade).
+  let guarantor: Guarantor | null = null;
+  if (guarantorEnabled()) {
+    const maxOrphansRaw = Number(process.env.FORTRESS_GUARANTOR_MAX_ORPHANS_PER_PASS);
+    const maxOrphans =
+      Number.isFinite(maxOrphansRaw) && maxOrphansRaw > 0 ? Math.trunc(maxOrphansRaw) : undefined;
+    const batchDelayRaw = Number(process.env.FORTRESS_GUARANTOR_BATCH_DELAY_MS);
+    const batchDelayMs =
+      Number.isFinite(batchDelayRaw) && batchDelayRaw >= 0 ? Math.trunc(batchDelayRaw) : undefined;
+    guarantor = createGuarantor({
+      db: resolveHxDb,
+      store: () => vaultModule.getStore(),
+      logger: bus.scopeFor("guarantor"),
+      correctExistingTitles: parseBooleanEnv(process.env.FORTRESS_CORRECT_TITLES),
+      reconcile: { maxOrphans, batchDelayMs },
+    });
+    guarantor.start();
+    // A known best-effort-mirror failure (PG down / index threw after the
+    // canonical was stored) nudges the guarantor to re-index the orphan soon,
+    // rather than waiting for the next hourly sweep.
+    setReconcileSignalHandler(() => guarantor?.signal());
+  } else {
+    bus.scopeFor("guarantor").warn("guarantor disabled (FORTRESS_GUARANTOR_DISABLED)");
+  }
+
   try {
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     gatewayHandle?.stop();
     setEmbedSignalHandler(() => {});
+    setReconcileSignalHandler(() => {});
     await embedWorker?.stop();
+    await guarantor?.stop();
   }
 }

@@ -37,17 +37,33 @@ export function baseSessionId(sessionId: string): string {
   return i === -1 ? sessionId : sessionId.slice(0, i);
 }
 
+/** The advisory-lock identity for a session — cross-family on the BASE session
+ *  id so parent + agent lanes + the tombstone all serialize on ONE key. Fed to
+ *  pg_advisory_xact_lock via hashtextextended() (M2). */
+export function sessionLockKey(userExternalId: string, sessionId: string): string {
+  return `${userExternalId}:${baseSessionId(sessionId)}`;
+}
+
 /** Record the tombstone. Idempotent; safe to call before the session ever
  *  existed here (a delete can arrive for a session this fortress never saw). */
 export async function markSessionDeleted(db: HxDb, key: SessionKey): Promise<void> {
-  await db
-    .insert(hxDeletedSessions)
-    .values({
-      userExternalId: key.userId,
-      family: key.family,
-      sessionId: baseSessionId(key.sessionId),
-    })
-    .onConflictDoNothing();
+  await db.transaction(async (tx) => {
+    // M2: take the same per-session advisory lock ingest takes, so the tombstone
+    // write serializes against an in-flight ingest/reconcile for this session —
+    // tombstone-first ordering + the in-lock ingest re-check closes the
+    // resurrect-and-re-embed window.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(key.userId, key.sessionId)}, 0))`,
+    );
+    await tx
+      .insert(hxDeletedSessions)
+      .values({
+        userExternalId: key.userId,
+        family: key.family,
+        sessionId: baseSessionId(key.sessionId),
+      })
+      .onConflictDoNothing();
+  });
 }
 
 /** True when (user, sessionId) is tombstoned in ANY family. Cross-family on
@@ -55,7 +71,7 @@ export async function markSessionDeleted(db: HxDb, key: SessionKey): Promise<voi
  *  repairs it via the session row, which no longer exists after a delete), so
  *  an exact-family match would let a stale-family upload slip past the guard. */
 export async function isSessionDeleted(
-  db: HxDb,
+  db: HxDb | HxTx,
   userExternalId: string,
   sessionId: string,
 ): Promise<boolean> {

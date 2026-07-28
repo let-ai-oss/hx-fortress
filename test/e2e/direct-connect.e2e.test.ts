@@ -82,6 +82,7 @@ describe("hx → Fortress gateway → bucket", () => {
         listSessionMetadata: async () => [],
         selfTest: async () => { },
         deleteSession: async () => ({ complete: true, deleted: 0 }),
+        listAllCanonicalKeys: async () => [],
       };
 
       const { publicKeyB64url, token } = await mintKeyAndToken({
@@ -171,6 +172,7 @@ describe("hx → Fortress gateway → bucket", () => {
         ],
         selfTest: async () => { },
         deleteSession: async () => ({ complete: true, deleted: 0 }),
+        listAllCanonicalKeys: async () => [],
       };
 
       const { publicKeyB64url, token } = await mintKeyAndToken({

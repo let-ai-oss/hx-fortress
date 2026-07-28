@@ -4,7 +4,7 @@
 // one chunk lands in a single transaction; a per-chunk dedupe key on
 // hx.ingest_events makes a re-committed chunk a no-op (idempotent retries).
 
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { HxDb, HxTx } from "../host/postgres/db";
 import {
@@ -20,8 +20,9 @@ import { hxEmbeddings } from "../host/postgres/schema/embeddings";
 import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
-import { isSessionDeleted } from "./delete";
+import { isSessionDeleted, sessionLockKey } from "./delete";
 import { deriveFallbackTitle } from "./derive-title";
+import { extractRealTitle } from "./real-title";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { parseChunk, type ParsedChunk, type ParsedToolCall, type ParsedTurn } from "./parse";
 
@@ -230,6 +231,11 @@ export interface IngestCommitInput {
   componentCount: number;
   replace: boolean;
   meta: Record<string, unknown> | null;
+  /** Recovery write (G reconciler). FILL null attribution from the existing row
+   *  instead of overwriting it, and stamp attributionSource='recovered'. Default
+   *  (authoritative live/mirror/gateway writes) applies incoming attribution
+   *  UNCONDITIONALLY — including an authoritative unassign-to-null — unchanged. */
+  recovered?: boolean;
 }
 
 export interface IngestAgentCommitInput extends IngestCommitInput {
@@ -492,8 +498,23 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   const dedupeKey = `${userExternalId}:${input.key.family}:${input.key.sessionId}:${input.chunkId}`;
   const parsed = parseChunk(input.chunkText);
   scrubParsed(parsed);
+  // Tier-A real title, extracted from the canonical PRE-transaction (non-throwing)
+  // so a parse edge can never abort ingest. Effective when chunkText is the whole
+  // transcript (whole-transcript producers + C/G/corrective, which pass the full
+  // canonical); a chunked delta yields null → the first-message floor, as today.
+  const realTitle = extractRealTitle(input.chunkText);
 
   const committed = await db.transaction(async (tx) => {
+    // M2: exclusive per-session advisory lock FIRST (auto-released on
+    // commit/rollback), then re-check the tombstone INSIDE the lock — this plus
+    // tombstone-first ordering closes the resurrect-and-re-embed race the pre-txn
+    // check above only narrows.
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
+    );
+    if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
+      throw new Error("session_deleted");
+    }
     if (await alreadyIngested(tx, dedupeKey)) return null;
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
@@ -511,6 +532,16 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
         )
         .limit(1)
     )[0];
+
+    // A recovered write (Component G) exists only to MATERIALIZE a row-less
+    // orphan. If a live upload / another actor already created the row by the
+    // time we hold the lock, no-op — never rebuild it. Rebuilding would nuke a
+    // concurrent live delta (replace path) or let a subsequent live append
+    // double-count turns against a lane G rebuilt from a whole-canonical
+    // snapshot. G's reconciler already skips existing rows; this closes the
+    // check→lock race for a fresh, actively-uploading orphan (the inactive 1,531
+    // backlog can never reach it).
+    if (input.recovered && existing) return null;
 
     const prev = input.replace ? undefined : existing;
     const rollup = {
@@ -533,6 +564,10 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       ? (parsed.lastActivityAt ?? existing?.lastActivityAt ?? now)
       : (maxIso(existing?.lastActivityAt, parsed.lastActivityAt) ?? now);
     const meta = input.meta;
+    // Empty-string ('') titles count as ABSENT (a client can forward title="");
+    // never let one clobber a real existing title, and let the cascade fill it.
+    const metaTitleRaw = metaStr(meta, "title");
+    const metaTitle = metaTitleRaw && metaTitleRaw.trim() ? metaTitleRaw : null;
 
     let sessionRowId: string;
     if (existing) {
@@ -540,12 +575,12 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
         .update(hxSessions)
         .set({
           deviceId: dims.deviceId ?? existing.deviceId,
-          orgId: dims.orgId,
-          projectId: dims.projectId,
-          repoId: dims.repoId,
+          orgId: input.recovered ? (dims.orgId ?? existing.orgId) : dims.orgId,
+          projectId: input.recovered ? (dims.projectId ?? existing.projectId) : dims.projectId,
+          repoId: input.recovered ? (dims.repoId ?? existing.repoId) : dims.repoId,
           modelId: dims.modelId ?? existing.modelId,
-          attributionSource: "auto",
-          title: metaStr(meta, "title") ?? existing.title,
+          attributionSource: input.recovered ? "recovered" : "auto",
+          title: metaTitle ?? existing.title,
           titleSource: titleSourceOf(meta) ?? existing.titleSource,
           ccdSessionId: metaStr(meta, "ccdSessionId") ?? existing.ccdSessionId,
           sourcePath: metaStr(meta, "sourcePath") ?? existing.sourcePath,
@@ -575,14 +610,14 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
           family: input.key.family,
           sessionId: input.key.sessionId,
           ccdSessionId: metaStr(meta, "ccdSessionId"),
-          title: metaStr(meta, "title"),
+          title: metaTitle,
           titleSource: titleSourceOf(meta),
           sourcePath: metaStr(meta, "sourcePath"),
           cwd: metaStr(meta, "cwd"),
           gitBranch: metaStr(meta, "gitBranch"),
           entrypoint: metaStr(meta, "entrypoint"),
           originator: metaStr(meta, "originator"),
-          attributionSource: "auto",
+          attributionSource: input.recovered ? "recovered" : "auto",
           lastUserText: parsed.lastUserText,
           lastAssistantText: parsed.lastAssistantText,
           ...rollup,
@@ -613,36 +648,48 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     await insertTurns(tx, sessionRowId, null, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
 
-    // Fallback title: the hx client only synthesizes a title on a FROM-ZERO
-    // upload (watch.ts: stepOffset === 0), so a resumed session — or one first
-    // uploaded by a client predating that logic — arrives with no meta.title and
-    // would render as a bare session id in the cloud UI. The fortress is the
-    // source of truth for session content, so derive one here from the first
-    // user turn we now hold. Guarded on title IS NULL: idempotent, version-
-    // independent, and any real user/AI title (this commit or a later one) wins.
-    if ((metaStr(meta, "title") ?? existing?.title ?? null) == null) {
-      const [firstUser] = await tx
-        .select({ text: hxTurns.text })
-        .from(hxTurns)
-        .where(
-          and(
-            eq(hxTurns.sessionId, sessionRowId),
-            isNull(hxTurns.agentId),
-            eq(hxTurns.kind, "user_text"),
-          ),
-        )
-        .orderBy(asc(hxTurns.seq))
-        .limit(1);
-      const derived = deriveFallbackTitle(
-        firstUser?.text ?? null,
-        metaStr(meta, "cwd") ?? existing?.cwd ?? null,
-        metaStr(meta, "repoSlug"),
+    // Title cascade — real client title first, first-message only as the floor.
+    // #89 jumped straight to the first-message guess even when the canonical held
+    // a real ai-title/custom-title; tier A (extractRealTitle over the canonical we
+    // hold) recovers the correct name for resumed / older-client / orphaned
+    // sessions, and deriveFallbackTitle stays as the tier-C floor so no session is
+    // ever nameless. Empty-string ('') titles count as absent. The guarded UPDATE
+    // (title IS NULL OR '') is idempotent and lets any real user/AI title (this
+    // commit or a later one) win.
+    if (!metaTitle && !(existing?.title && existing.title.trim())) {
+      const titleAbsent = and(
+        eq(hxSessions.id, sessionRowId),
+        or(isNull(hxSessions.title), eq(hxSessions.title, "")),
       );
-      if (derived) {
+      if (realTitle) {
         await tx
           .update(hxSessions)
-          .set({ title: derived, titleSource: "fallback", updatedAt: now })
-          .where(and(eq(hxSessions.id, sessionRowId), isNull(hxSessions.title)));
+          .set({ title: realTitle.title, titleSource: realTitle.titleSource, updatedAt: now })
+          .where(titleAbsent);
+      } else {
+        const [firstUser] = await tx
+          .select({ text: hxTurns.text })
+          .from(hxTurns)
+          .where(
+            and(
+              eq(hxTurns.sessionId, sessionRowId),
+              isNull(hxTurns.agentId),
+              eq(hxTurns.kind, "user_text"),
+            ),
+          )
+          .orderBy(asc(hxTurns.seq))
+          .limit(1);
+        const derived = deriveFallbackTitle(
+          firstUser?.text ?? null,
+          metaStr(meta, "cwd") ?? existing?.cwd ?? null,
+          metaStr(meta, "repoSlug"),
+        );
+        if (derived) {
+          await tx
+            .update(hxSessions)
+            .set({ title: derived, titleSource: "fallback", updatedAt: now })
+            .where(titleAbsent);
+        }
       }
     }
 
@@ -710,6 +757,15 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
   scrubParsed(parsed);
 
   await db.transaction(async (tx) => {
+    // M2: same per-session advisory lock + in-lock tombstone re-check as the
+    // parent path (keyed on the base session id, so parent + agent + purge
+    // serialize together).
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
+    );
+    if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
+      throw new Error("session_deleted");
+    }
     if (await alreadyIngested(tx, dedupeKey)) return;
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
@@ -742,7 +798,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
           repoId: dims.repoId,
           family: input.key.family,
           sessionId: input.key.sessionId,
-          attributionSource: "auto",
+          attributionSource: input.recovered ? "recovered" : "auto",
           firstEventAt: parsed.firstActivityAt ?? now,
           lastActivityAt: parsed.lastActivityAt ?? now,
         })
@@ -760,6 +816,11 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
         )
         .limit(1)
     )[0];
+    // As in ingestCommit: a recovered write only materializes a MISSING lane. If
+    // the agent lane already exists under the lock, no-op rather than rebuild it
+    // (which would race a concurrent live delta for the same lane). The parent
+    // row here is pre-existing when the agent exists (FK), so no stub was made.
+    if (input.recovered && existingAgent) return;
     const prev = input.replace ? undefined : existingAgent;
     const agentRollup = {
       eventCount: (prev?.eventCount ?? 0) + parsed.eventCount,

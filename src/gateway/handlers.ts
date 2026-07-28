@@ -136,5 +136,10 @@ export async function handleListSessionMetadata(
   store: SessionStore,
   input: ListSessionMetadataInput,
 ): Promise<{ sessions: SessionMetadata[] }> {
+  // NB: the HTTP /sessions route is the self-hosted direct-connect client's
+  // PRIMARY list (no PG-backed HTTP alternative — "no PG bookkeeping" above), so
+  // it keeps serving the artifact title. The PG-authoritative title policy
+  // (MC-2606) applies to the tunnel fallback in rpc.ts, where listSessions (PG)
+  // is the primary and this store scan is only the degraded fallback.
   return { sessions: await store.listSessionMetadata(input.userId) };
 }
