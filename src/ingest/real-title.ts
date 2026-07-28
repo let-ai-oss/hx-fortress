@@ -84,7 +84,13 @@ function codexTitle(text: string): RealTitle | null {
 export function extractRealTitle(canonicalText: string): RealTitle | null {
   if (!canonicalText) return null;
   try {
-    return claudeTitle(canonicalText) ?? codexTitle(canonicalText);
+    const t = claudeTitle(canonicalText) ?? codexTitle(canonicalText);
+    // Empty-as-absent (a fortress invariant enforced everywhere): the codex
+    // branch mirrors the client's no-trim read, so an empty/whitespace
+    // thread_meta title reaches here as `{title:"",…}` — treat it as no real
+    // title so the caller falls to the first-message floor instead of stamping a
+    // blank title (which would render id-only, the exact MC-2606 symptom).
+    return t && t.title.trim() ? t : null;
   } catch {
     // Defensive: the per-line guards already prevent throws; this is belt-and-
     // suspenders so a title derivation can never abort an ingest.

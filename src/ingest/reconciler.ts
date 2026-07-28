@@ -148,10 +148,20 @@ export async function reconcileOrphans(
     const kb = `${b.userId}/${b.family}/${b.sessionId}`;
     return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
+  // Base session keys whose PARENT re-ingest threw this pass. ingestAgentCommit
+  // inserts a title/turn-less parent stub when the parent row is absent, and that
+  // stub would then enter the `have`/keyExists gate and block the parent's real
+  // re-ingest forever (permanent content loss). So if a parent failed this pass,
+  // defer its agent lanes — the parent (still orphaned) retries next sweep first.
+  const failedParents = new Set<string>();
   for (const key of keys) {
     res.scanned += 1;
     if (opts.maxOrphans != null && opts.maxOrphans > 0 && res.restored >= opts.maxOrphans) break;
     if (have.has(`${key.userId}/${key.family}/${key.sessionId}`)) continue;
+    const laneIdx = key.sessionId.indexOf(AGENT_LANE);
+    const baseSid = laneIdx >= 0 ? key.sessionId.slice(0, laneIdx) : key.sessionId;
+    const baseKey = `${key.userId}/${key.family}/${baseSid}`;
+    if (laneIdx >= 0 && failedParents.has(baseKey)) continue; // parent failed → defer the lane
     res.orphans += 1;
     try {
       // Re-check at ingest time so we don't redundantly rebuild a row that
@@ -178,16 +188,11 @@ export async function reconcileOrphans(
         },
         recovered: true as const,
       };
-      const laneIdx = key.sessionId.indexOf(AGENT_LANE);
       if (laneIdx >= 0) {
         // Agent lane → the parent session key + the agentId.
         await ingestAgentCommit(db, {
           ...base,
-          key: {
-            userId: key.userId,
-            family: key.family,
-            sessionId: key.sessionId.slice(0, laneIdx),
-          },
+          key: { userId: key.userId, family: key.family, sessionId: baseSid },
           agentId: key.sessionId.slice(laneIdx + AGENT_LANE.length),
         });
       } else {
@@ -198,6 +203,7 @@ export async function reconcileOrphans(
       // A parse failure, a missing canonical, or a transient DB/store error must
       // never abort the pass — the session is retried on the next scan.
       res.errors += 1;
+      if (laneIdx < 0) failedParents.add(baseKey); // parent threw → defer its lanes this pass
       opts.logger?.warn?.("reconciler: skipped one orphan", {
         err: String(err),
         sessionId: key.sessionId,
