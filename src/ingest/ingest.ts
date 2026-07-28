@@ -21,6 +21,7 @@ import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
 import { isSessionDeleted } from "./delete";
+import { deriveFallbackTitle } from "./derive-title";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { parseChunk, type ParsedChunk, type ParsedToolCall, type ParsedTurn } from "./parse";
 
@@ -611,6 +612,39 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
 
     await insertTurns(tx, sessionRowId, null, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
+
+    // Fallback title: the hx client only synthesizes a title on a FROM-ZERO
+    // upload (watch.ts: stepOffset === 0), so a resumed session — or one first
+    // uploaded by a client predating that logic — arrives with no meta.title and
+    // would render as a bare session id in the cloud UI. The fortress is the
+    // source of truth for session content, so derive one here from the first
+    // user turn we now hold. Guarded on title IS NULL: idempotent, version-
+    // independent, and any real user/AI title (this commit or a later one) wins.
+    if ((metaStr(meta, "title") ?? existing?.title ?? null) == null) {
+      const [firstUser] = await tx
+        .select({ text: hxTurns.text })
+        .from(hxTurns)
+        .where(
+          and(
+            eq(hxTurns.sessionId, sessionRowId),
+            isNull(hxTurns.agentId),
+            eq(hxTurns.kind, "user_text"),
+          ),
+        )
+        .orderBy(asc(hxTurns.seq))
+        .limit(1);
+      const derived = deriveFallbackTitle(
+        firstUser?.text ?? null,
+        metaStr(meta, "cwd") ?? existing?.cwd ?? null,
+        metaStr(meta, "repoSlug"),
+      );
+      if (derived) {
+        await tx
+          .update(hxSessions)
+          .set({ title: derived, titleSource: "fallback", updatedAt: now })
+          .where(and(eq(hxSessions.id, sessionRowId), isNull(hxSessions.title)));
+      }
+    }
 
     await tx.insert(hxIngestEvents).values({
       userId: dims.userId,
