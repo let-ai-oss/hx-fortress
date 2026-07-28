@@ -264,14 +264,24 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
       .where(eq(hxTurns.sessionId, before!.id));
 
     // A recovered (G) write racing the same session must NOT rebuild it — else a
-    // concurrent live delta double-counts / gets nuked. It must no-op.
+    // concurrent live delta double-counts / gets nuked. It must no-op. Use a
+    // LARGER canonical for the recovered write so that a rebuild (the bug) would
+    // change the turn count — making the no-op assertion actually discriminating.
+    const longerText =
+      text +
+      "\n" +
+      JSON.stringify({
+        type: "user",
+        timestamp: TS,
+        message: { content: [{ type: "text", text: "an extra turn a rebuild would add" }] },
+      });
     await ingestCommit(db, {
       attribution: { orgExternalId: null, projectExternalId: null, repoSlug: null, deviceId: null },
       key,
       chunkId: "reconcile",
       replace: true,
-      chunkText: text,
-      totalBytes: Buffer.byteLength(text),
+      chunkText: longerText,
+      totalBytes: Buffer.byteLength(longerText),
       componentCount: 1,
       meta: null,
       recovered: true,
