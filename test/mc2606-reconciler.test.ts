@@ -241,4 +241,90 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
     expect(after!.title).toBe("The Real Title");
     expect(after!.titleSource).toBe("ai");
   });
+
+  test("a recovered write no-ops on an already-indexed row (no rebuild, no demote)", async () => {
+    const s = suffix();
+    const key: SessionKey = { userId: `u-${s}`, family: "claude-cli", sessionId: `sess-${s}` };
+    const text = claudeCanonical("Live Owned");
+    // An authoritative (auto) write creates the row first.
+    await ingestCommit(db, {
+      attribution: ATTR,
+      key,
+      chunkId: "c1",
+      replace: true,
+      chunkText: text,
+      totalBytes: Buffer.byteLength(text),
+      componentCount: 1,
+      meta: null,
+    });
+    const before = await sessionRow(key);
+    const turnsBefore = await db
+      .select({ id: hxTurns.id })
+      .from(hxTurns)
+      .where(eq(hxTurns.sessionId, before!.id));
+
+    // A recovered (G) write racing the same session must NOT rebuild it — else a
+    // concurrent live delta double-counts / gets nuked. It must no-op.
+    await ingestCommit(db, {
+      attribution: { orgExternalId: null, projectExternalId: null, repoSlug: null, deviceId: null },
+      key,
+      chunkId: "reconcile",
+      replace: true,
+      chunkText: text,
+      totalBytes: Buffer.byteLength(text),
+      componentCount: 1,
+      meta: null,
+      recovered: true,
+    });
+    const after = await sessionRow(key);
+    const turnsAfter = await db
+      .select({ id: hxTurns.id })
+      .from(hxTurns)
+      .where(eq(hxTurns.sessionId, after!.id));
+    expect(turnsAfter.length).toBe(turnsBefore.length); // no rebuild / duplication
+    expect(after!.attributionSource).toBe("auto"); // not demoted to 'recovered'
+  });
+
+  test("defers an agent lane when its parent re-ingest throws; retries next sweep", async () => {
+    const s = suffix();
+    const base = `sess-${s}`;
+    const key: SessionKey = { userId: `u-${s}`, family: "claude-cli", sessionId: base };
+    const laneKey: SessionKey = { userId: key.userId, family: key.family, sessionId: `${base}:a:agent-1` };
+    const text = claudeCanonical("Parent Session");
+    const canon = new Map([
+      [canonicalObject(key), text],
+      [canonicalObject(laneKey), text],
+    ]);
+    // A store that throws on the PARENT canonical read (transient), lane read OK.
+    let failParent = true;
+    const flaky: SessionStore = {
+      ...memStore(canon),
+      readCanonicalText: async (k: SessionKey) => {
+        if (failParent && k.sessionId === base) throw new Error("transient store error");
+        const t = canon.get(canonicalObject(k));
+        if (t === undefined) throw new Error("NoSuchKey");
+        return t;
+      },
+    };
+
+    const r1 = await reconcileOrphans(db, flaky, { batchDelayMs: 0, correctExistingTitles: false });
+    expect(r1.errors).toBeGreaterThanOrEqual(1); // parent threw
+    expect(r1.deferred).toBeGreaterThanOrEqual(1); // lane deferred, not stubbed
+    expect(await sessionRow(key)).toBeNull(); // no title-less parent stub created
+
+    // Store heals → next sweep restores the parent (first) then its lane.
+    failParent = false;
+    const r2 = await reconcileOrphans(db, flaky, { batchDelayMs: 0, correctExistingTitles: false });
+    expect(r2.restored).toBe(2);
+    const parent = await sessionRow(key);
+    expect(parent).not.toBeNull();
+    const [agent] = await db
+      .select({ id: hxSessionAgents.id })
+      .from(hxSessionAgents)
+      .where(
+        and(eq(hxSessionAgents.sessionId, parent!.id), eq(hxSessionAgents.agentExternalId, "agent-1")),
+      )
+      .limit(1);
+    expect(agent).toBeTruthy();
+  });
 });

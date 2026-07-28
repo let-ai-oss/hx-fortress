@@ -533,6 +533,16 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
         .limit(1)
     )[0];
 
+    // A recovered write (Component G) exists only to MATERIALIZE a row-less
+    // orphan. If a live upload / another actor already created the row by the
+    // time we hold the lock, no-op — never rebuild it. Rebuilding would nuke a
+    // concurrent live delta (replace path) or let a subsequent live append
+    // double-count turns against a lane G rebuilt from a whole-canonical
+    // snapshot. G's reconciler already skips existing rows; this closes the
+    // check→lock race for a fresh, actively-uploading orphan (the inactive 1,531
+    // backlog can never reach it).
+    if (input.recovered && existing) return null;
+
     const prev = input.replace ? undefined : existing;
     const rollup = {
       eventCount: (prev?.eventCount ?? 0) + parsed.eventCount,
@@ -806,6 +816,11 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
         )
         .limit(1)
     )[0];
+    // As in ingestCommit: a recovered write only materializes a MISSING lane. If
+    // the agent lane already exists under the lock, no-op rather than rebuild it
+    // (which would race a concurrent live delta for the same lane). The parent
+    // row here is pre-existing when the agent exists (FK), so no stub was made.
+    if (input.recovered && existingAgent) return;
     const prev = input.replace ? undefined : existingAgent;
     const agentRollup = {
       eventCount: (prev?.eventCount ?? 0) + parsed.eventCount,

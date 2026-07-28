@@ -45,6 +45,10 @@ export interface ReconcileResult {
   orphans: number;
   restored: number;
   skippedTombstoned: number;
+  /** Agent lanes deferred this pass because their parent re-ingest threw — they
+   *  retry on the next sweep. A persistently-nonzero value flags a parent that
+   *  never re-ingests (e.g. an unreadable canonical). */
+  deferred: number;
   errors: number;
   titlesCorrected: number;
 }
@@ -110,6 +114,7 @@ export async function reconcileOrphans(
     orphans: 0,
     restored: 0,
     skippedTombstoned: 0,
+    deferred: 0,
     errors: 0,
     titlesCorrected: 0,
   };
@@ -161,7 +166,10 @@ export async function reconcileOrphans(
     const laneIdx = key.sessionId.indexOf(AGENT_LANE);
     const baseSid = laneIdx >= 0 ? key.sessionId.slice(0, laneIdx) : key.sessionId;
     const baseKey = `${key.userId}/${key.family}/${baseSid}`;
-    if (laneIdx >= 0 && failedParents.has(baseKey)) continue; // parent failed → defer the lane
+    if (laneIdx >= 0 && failedParents.has(baseKey)) {
+      res.deferred += 1; // parent failed this pass → defer the lane to the next sweep
+      continue;
+    }
     res.orphans += 1;
     try {
       // Re-check at ingest time so we don't redundantly rebuild a row that
