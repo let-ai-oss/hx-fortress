@@ -21,8 +21,13 @@ import {
 } from "../host/postgres/schema/index.js";
 import type { FortressSessionRow } from "../modules/session-vault/store/rpc.js";
 
-const DEFAULT_LIMIT = 500;
-const MAX_LIMIT = 1000;
+// MC-2606: the "my sessions" title-donor read (readFortressSessionsForList in
+// the workbench) calls listSessions with NO limit, so this DEFAULT is what gates
+// how many of a user's sessions get their fortress title. At 500 a user with
+// >500 sessions saw the rest render id-only. Raised to cover every real user;
+// ~0.8 KB/row × 5000 ≈ 4 MB, well under the 32 MB tunnel frame (maxTunnelResultBytes).
+const DEFAULT_LIMIT = 5000;
+const MAX_LIMIT = 5000;
 
 export interface ListSessionsOptions {
   /** Cloud user id, carried as hx_users.external_id. */
