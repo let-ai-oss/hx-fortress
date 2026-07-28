@@ -32,6 +32,7 @@ import {
   artifactObject,
   canonicalObject,
   listPrefix,
+  parseCanonicalKey,
   sessionDeletePrefixes,
   sessionPrefix,
   stagingObject,
@@ -218,6 +219,26 @@ export class GcsStore implements SessionStore {
     }
     for (const fallback of canonicalFallbacks) {
       if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
+    }
+    return out;
+  }
+
+  async listAllCanonicalKeys(): Promise<SessionKey[]> {
+    const out: SessionKey[] = [];
+    const bucket = this.bucket();
+    // Name-only whole-bucket scan (no getMetadata / no download), paginated.
+    let query: Record<string, unknown> | null = { autoPaginate: false, maxResults: 1000 };
+    while (query) {
+      const res = (await bucket.getFiles(query as never)) as unknown as [
+        Array<{ name: string }>,
+        Record<string, unknown> | null,
+        unknown,
+      ];
+      for (const file of res[0]) {
+        const key = parseCanonicalKey(file.name);
+        if (key) out.push(key);
+      }
+      query = res[1] ?? null;
     }
     return out;
   }

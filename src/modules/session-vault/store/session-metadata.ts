@@ -39,6 +39,17 @@ export function parseSessionMetadata(value: unknown): SessionMetadata | null {
   };
 }
 
+/** MC-2606 — the session-list title is PG-authoritative (served by
+ *  listSessionsForUser). The session.json artifact is content-only; strip its
+ *  title from the legacy `listSessionMetadata` fallback so a stale artifact title
+ *  can never diverge from PG. During a fortress PG outage the fallback list is
+ *  then untitled rather than stale-titled — one source of truth for the title. */
+export function stripListTitle(sessions: SessionMetadata[]): SessionMetadata[] {
+  return sessions.map((s) =>
+    s.title === null && s.titleSource === null ? s : { ...s, title: null, titleSource: null },
+  );
+}
+
 export function metadataFromCanonicalObjectName(
   userId: string,
   objectName: string,

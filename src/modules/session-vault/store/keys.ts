@@ -71,6 +71,20 @@ export function canonicalObject(k: SessionKey): string {
   return `${sessionPrefix(k)}/log.jsonl`;
 }
 
+/** Inverse of canonicalObject: a bucket object name → its SessionKey, or null if
+ *  it isn't a canonical log. `${userId}/${family}/${sessionId}/log.jsonl` — the
+ *  sessionId keeps the `${sessionId}:a:${agentId}` agent-lane composite as one
+ *  segment. Rejects staging/artifact/other objects (wrong segment count/tail).
+ *  Used by the G reconciler's whole-bucket orphan scan. */
+export function parseCanonicalKey(objectName: string): SessionKey | null {
+  if (!objectName.endsWith("/log.jsonl")) return null;
+  const parts = objectName.split("/");
+  if (parts.length !== 4 || parts[3] !== "log.jsonl") return null;
+  const [userId, family, sessionId] = parts;
+  if (!userId || !family || !sessionId) return null;
+  return { userId, family, sessionId };
+}
+
 // Only these sidecar artifacts may be written/read by name — the `name` on the
 // artifact RPC / gateway route is caller-controlled, so an allowlist prevents it
 // naming ".staging/…", "log.jsonl", or a traversal path.

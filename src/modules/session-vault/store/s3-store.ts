@@ -52,6 +52,7 @@ import {
   artifactObject,
   canonicalObject,
   listPrefix,
+  parseCanonicalKey,
   sessionDeletePrefixes,
   stagingObject,
 } from "./keys.js";
@@ -258,6 +259,22 @@ export class S3Store implements SessionStore {
     for (const fallback of canonicalFallbacks) {
       if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
     }
+    return out;
+  }
+
+  async listAllCanonicalKeys(): Promise<SessionKey[]> {
+    const out: SessionKey[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(
+        new ListObjectsV2Command({ Bucket: this.bucket, ContinuationToken: token }),
+      );
+      for (const obj of page.Contents ?? []) {
+        const key = parseCanonicalKey(obj.Key ?? "");
+        if (key) out.push(key);
+      }
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
     return out;
   }
 

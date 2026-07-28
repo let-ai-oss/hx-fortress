@@ -27,6 +27,7 @@ import {
 } from "./capability-token";
 import { isSessionDeleted } from "../ingest/delete";
 import { ingestAgentCommit, ingestCommit, maxIso, type IngestAttribution } from "../ingest/ingest";
+import { signalReconcile } from "../ingest/reconcile-signal";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestNotification } from "../host/types";
 import type { Embedder } from "../modules/embed-worker/openai";
@@ -244,6 +245,8 @@ async function ingestCommitMetadata(
       sessionId: key.sessionId,
       error: err instanceof Error ? err.message : String(err),
     });
+    // Row-less canonical: nudge the guarantor to re-index it soon.
+    signalReconcile();
   }
 }
 
@@ -279,6 +282,8 @@ async function ingestAgentCommitMetadata(
       agentId,
       error: err instanceof Error ? err.message : String(err),
     });
+    // Row-less canonical: nudge the guarantor to re-index it soon.
+    signalReconcile();
   }
 }
 

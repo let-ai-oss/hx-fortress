@@ -45,6 +45,7 @@ function fakeStore(overrides: Partial<SessionStore> = {}): SessionStore {
     listSessionMetadata: async () => SAMPLE_METADATA,
     selfTest: async () => {},
     deleteSession: async () => ({ complete: true, deleted: 0 }),
+    listAllCanonicalKeys: async () => [],
   };
   return { ...base, ...overrides };
 }

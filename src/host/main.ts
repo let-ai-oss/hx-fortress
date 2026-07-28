@@ -47,6 +47,8 @@ import { verifyGrant, type GrantClaims } from "../gateway/capability-token";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
 import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
+import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
+import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 
 export interface HostMainDependencies {
   root?: string;
@@ -420,11 +422,37 @@ export async function runFortressHost(
     embedWorker.start();
   }
 
+  // Component G (MC-2606) — the guarantor. Re-indexes any canonical transcript
+  // that reached the bucket but has NO hx.sessions row (the row-less state behind
+  // the title incident), re-running the FULL ingest so rows, FTS, tool_calls,
+  // session_facts, dimensions, embeddings and the real title are all rebuilt —
+  // plus a one-time fallback-title backfill on its boot-drain pass. ON by default
+  // (FORTRESS_GUARANTOR_DISABLED turns it off). Reads the same lazily-resolved RW
+  // db + live vault store the gateway uses, so it's safe to start before either is
+  // ready (a pass that finds them down just reschedules).
+  let guarantor: Guarantor | null = null;
+  if (guarantorEnabled()) {
+    guarantor = createGuarantor({
+      db: resolveHxDb,
+      store: () => vaultModule.getStore(),
+      logger: bus.scopeFor("guarantor"),
+    });
+    guarantor.start();
+    // A known best-effort-mirror failure (PG down / index threw after the
+    // canonical was stored) nudges the guarantor to re-index the orphan soon,
+    // rather than waiting for the next hourly sweep.
+    setReconcileSignalHandler(() => guarantor?.signal());
+  } else {
+    bus.scopeFor("guarantor").warn("guarantor disabled (FORTRESS_GUARANTOR_DISABLED)");
+  }
+
   try {
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     gatewayHandle?.stop();
     setEmbedSignalHandler(() => {});
+    setReconcileSignalHandler(() => {});
     await embedWorker?.stop();
+    await guarantor?.stop();
   }
 }

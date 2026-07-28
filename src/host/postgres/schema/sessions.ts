@@ -6,7 +6,7 @@ import { hxSchema } from "./namespace";
 
 export type HxTitleSource = "user" | "ai" | "fallback";
 export type HxSessionOrigin = "local" | "let_ai_cloud";
-export type HxAttributionSource = "auto" | "manual";
+export type HxAttributionSource = "auto" | "manual" | "recovered";
 
 // ── Sessions ────────────────────────────────────────────────────────────────
 // One index row per mirrored session. Denormalized rollup counters live here

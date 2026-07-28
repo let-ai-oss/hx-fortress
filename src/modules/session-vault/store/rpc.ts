@@ -6,6 +6,7 @@
 
 import type { HxDb } from "../../../host/postgres/db.js";
 import { baseSessionId, markSessionDeleted, purgeSessionPg } from "../../../ingest/delete.js";
+import { signalReconcile } from "../../../ingest/reconcile-signal.js";
 import {
   ingestAgentCommit,
   ingestCommit,
@@ -13,6 +14,7 @@ import {
 } from "../../../ingest/ingest.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
 import { maxTunnelResultBytes } from "./limits.js";
+import { stripListTitle } from "./session-metadata.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -252,7 +254,8 @@ export async function handleVaultRpc(
     case "readArtifactText":
       return { method: req.method, value: await store.readArtifactText(req.key, req.name) };
     case "listSessionMetadata":
-      return { method: req.method, value: await store.listSessionMetadata(req.userId) };
+      // MC-2606 — PG owns the list title; this legacy fallback serves content-only.
+      return { method: req.method, value: stripListTitle(await store.listSessionMetadata(req.userId)) };
     case "listSessions": {
       // Least-privilege: the "my sessions" metadata read is SELECT-only, so it
       // runs on the RO handle (falling back to the RW handle when a single handle
@@ -281,6 +284,8 @@ export async function handleVaultRpc(
           logger?.warn("ingestCommit indexed skipped: postgres unavailable", {
             sessionId: req.key.sessionId,
           });
+          // Row-less canonical: nudge the guarantor to re-index once PG returns.
+          signalReconcile();
           return { method: req.method, value: { ok: true } };
         }
         try {
@@ -302,6 +307,8 @@ export async function handleVaultRpc(
             sessionId: req.key.sessionId,
             error: err instanceof Error ? err.message : String(err),
           });
+          // Row-less canonical: nudge the guarantor to re-index it soon.
+          signalReconcile();
         }
         return { method: req.method, value: { ok: true } };
       }
