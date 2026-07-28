@@ -19,6 +19,7 @@ import sql0010EmbeddingsIndexes from "./0010_embeddings_indexes.sql" with { type
 import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "text" };
 import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
+import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -49,4 +50,10 @@ export const migrations: Migration[] = [
   // Net-new permanent session-delete tombstones. NOT gated — every ingest
   // surface consults it to refuse re-uploads of hard-deleted sessions.
   { name: "0013_deleted_sessions", sql: sql0013DeletedSessions },
+  // One-shot DATA backfill (no schema change): derive a fallback title for
+  // pre-existing sessions that reached the fortress title-less — the hx client
+  // only titles a from-zero upload, so older-client / pre-fortress sessions sit
+  // title-less and show a bare id. Fills only NULL titles (idempotent). NOT
+  // gated. Going forward ingestCommit derives titles inline (src/ingest/ingest.ts).
+  { name: "0014_backfill_session_titles", sql: sql0014BackfillTitles },
 ];
