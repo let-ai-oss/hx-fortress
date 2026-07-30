@@ -29,9 +29,10 @@ running, enrolled Fortress as the `curl … | sh` path above — it just compile
 the binary locally with [Bun](https://bun.sh) first (installed automatically
 if missing).
 
-Both parameters are optional: the `--cloud` URL defaults to beta (current
-prod), and if you omit the enrollment token the wizard walks you through
-acquiring one (via browser or paste) once the build finishes.
+Both parameters are optional: the `--cloud` URL defaults to production
+(`wss://let.ai/_api/hx-gateway/vault-tunnel`), and if you omit the enrollment
+token the wizard walks you through acquiring one (via browser or paste) once
+the build finishes.
 
 ```sh
 git clone https://github.com/let-ai-oss/hx-fortress && cd hx-fortress

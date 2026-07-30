@@ -1,12 +1,12 @@
 #!/bin/sh
 # hx-fortress — build-from-source installer + enroll entrypoint.
-# Params are optional: the cloud URL defaults to beta (current prod), and an empty
+# Params are optional: the cloud URL defaults to production (let.ai), and an empty
 # token triggers the interactive key-acquisition flow (browser or paste) at enroll.
 set -eu
 
 INSTALL_DIR="${HOME}/.let/bin"
 BIN="${INSTALL_DIR}/hx-fortress"
-DEFAULT_CLOUD_URL="wss://beta.let.ai/_api/hx-gateway/vault-tunnel"
+DEFAULT_CLOUD_URL="wss://let.ai/_api/hx-gateway/vault-tunnel"
 
 usage() { echo "usage: ./hx-fortress/install-from-source.sh [token] [--cloud <url>]" >&2; exit 2; }
 
