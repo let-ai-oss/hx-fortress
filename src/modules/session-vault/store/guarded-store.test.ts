@@ -156,6 +156,14 @@ describe("GuardedStore", () => {
     }
     expect(builds).toBe(3);
     expect(wedged).toBe(1);
+    // A STILL-wedged store re-escalates only after two MORE rebuilds (the
+    // degraded-mode scream cadence), not on every subsequent rebuild.
+    for (let i = 0; i < 3; i += 1) {
+      await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    }
+    expect(wedged).toBe(1);
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    expect(wedged).toBe(2);
     // A counted success starts a fresh episode: the next futile cycle must
     // reach TWO rebuilds again before escalating again.
     healthy = true;
@@ -164,7 +172,35 @@ describe("GuardedStore", () => {
     for (let i = 0; i < 4; i += 1) {
       await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
     }
-    expect(wedged).toBe(2);
+    expect(wedged).toBe(3);
+  });
+
+  it("reports whether the write path EVER succeeded, for the restart-futility gate", async () => {
+    const seen: boolean[] = [];
+    let healthy = false;
+    const store = new GuardedStore(
+      () =>
+        ({
+          ...stubStore({}),
+          selfTest: () =>
+            new Promise<void>((resolve) => {
+              if (healthy) resolve();
+              else setTimeout(resolve, 1_000);
+            }),
+        }) as SessionStore,
+      fast({
+        rebuildAfter: 1,
+        exhaustAfterRebuilds: 1,
+        onWedgedBeyondRecovery: ({ hadCountedSuccess }) => seen.push(hadCountedSuccess),
+      }),
+    );
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    expect(seen).toEqual([false]); // never worked: restart is known-futile
+    healthy = true;
+    await store.selfTest();
+    healthy = false;
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    expect(seen).toEqual([false, true]); // worked once: restart can cure pool state
   });
 
   it("backend errors pass through unchanged and never count as breaches", async () => {

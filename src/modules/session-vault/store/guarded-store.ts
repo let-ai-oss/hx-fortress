@@ -57,8 +57,12 @@ export interface GuardedStoreOptions {
   exhaustAfterRebuilds?: number;
   /** Invoked once per wedge episode when rebuilds have proven futile. The
    *  store keeps operating (and breaching) after the call — the callback owns
-   *  the escalation (typically a supervised process exit). */
-  onWedgedBeyondRecovery?: () => void;
+   *  the escalation (typically a supervised process exit).
+   *  `hadCountedSuccess` = at least one write-class call succeeded since boot:
+   *  false means a fresh process never worked either, so a restart is
+   *  known-futile (bad credentials / deleted bucket / regional outage) and the
+   *  callback must NOT crash-loop the supervisor. */
+  onWedgedBeyondRecovery?: (info: { hadCountedSuccess: boolean }) => void;
   logger?: ScopedLogger;
 }
 
@@ -79,12 +83,13 @@ export class GuardedStore implements SessionStore {
   private inner: SessionStore;
   private breaches = 0;
   private rebuildsWithoutRecovery = 0;
+  private hadCountedSuccess = false;
   private readonly opTimeoutMs: number;
   private readonly heavyOpTimeoutMs: number;
   private readonly scanTimeoutMs: number;
   private readonly rebuildAfter: number;
   private readonly exhaustAfterRebuilds: number;
-  private readonly onWedgedBeyondRecovery?: () => void;
+  private readonly onWedgedBeyondRecovery?: (info: { hadCountedSuccess: boolean }) => void;
   private readonly logger?: ScopedLogger;
 
   constructor(
@@ -124,6 +129,7 @@ export class GuardedStore implements SessionStore {
       if (counted && this.inner === s) {
         this.breaches = 0;
         this.rebuildsWithoutRecovery = 0;
+        this.hadCountedSuccess = true;
       }
       return result;
     } catch (err) {
@@ -157,7 +163,7 @@ export class GuardedStore implements SessionStore {
               // amount of client rebuilding can reach. Hand the decision to
               // the escalation callback and start a fresh episode either way.
               this.rebuildsWithoutRecovery = 0;
-              this.onWedgedBeyondRecovery?.();
+              this.onWedgedBeyondRecovery?.({ hadCountedSuccess: this.hadCountedSuccess });
             }
           }
         }

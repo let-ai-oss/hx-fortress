@@ -35,14 +35,20 @@ function deadlineEnvOverrides(): Pick<
 /** True when a supervisor will resurrect this process after exit(1):
  *  systemd (Restart=on-failure in our unit) sets INVOCATION_ID, launchd
  *  (KeepAlive in our plist) sets XPC_SERVICE_NAME, Railway restarts crashed
- *  services by policy. FORTRESS_STORE_EXIT_ON_WEDGE=on|off overrides. */
-function supervisedRestartAvailable(): boolean {
-  const override = process.env.FORTRESS_STORE_EXIT_ON_WEDGE;
-  if (override === "on") return true;
-  if (override === "off") return false;
-  return Boolean(
-    process.env.INVOCATION_ID ?? process.env.XPC_SERVICE_NAME ?? process.env.RAILWAY_ENVIRONMENT,
-  );
+ *  services by policy. Desktop shells LEAK both INVOCATION_ID (gnome-terminal
+ *  runs under a user unit) and XPC_SERVICE_NAME (every macOS terminal), so a
+ *  TTY vetoes the heuristic — a supervised daemon never has one, a manual
+ *  `hx-fortress host` in a terminal does. FORTRESS_STORE_EXIT_ON_WEDGE
+ *  overrides both ways (`on|true|1` / `off|false|0`). Exported for tests. */
+export function supervisedRestartAvailable(
+  env: Record<string, string | undefined> = process.env,
+  isTty: boolean = Boolean(process.stdout.isTTY),
+): boolean {
+  const override = (env.FORTRESS_STORE_EXIT_ON_WEDGE ?? "").toLowerCase();
+  if (override === "on" || override === "true" || override === "1") return true;
+  if (override === "off" || override === "false" || override === "0") return false;
+  if (isTty) return false;
+  return Boolean(env.INVOCATION_ID || env.XPC_SERVICE_NAME || env.RAILWAY_ENVIRONMENT);
 }
 
 /** The concrete backend, wrapped in GuardedStore: every call gets a hard
@@ -72,7 +78,17 @@ export function buildStore(c: VaultCredentials, logger?: ScopedLogger): SessionS
   return new GuardedStore(factory, {
     logger,
     ...deadlineEnvOverrides(),
-    onWedgedBeyondRecovery: () => {
+    onWedgedBeyondRecovery: ({ hadCountedSuccess }) => {
+      // A process whose write path NEVER worked proves the wedge is not pool
+      // state — bad credentials, a deleted bucket, a regional outage — and a
+      // restart is known-futile. Exiting anyway would crash-loop Railway into
+      // its restart cap and take DOWN the reads that survive a write wedge.
+      if (!hadCountedSuccess) {
+        logger?.error(
+          "store write path has never succeeded since boot — a restart cannot cure this (credentials/bucket/outage); continuing degraded",
+        );
+        return;
+      }
       if (supervisedRestartAvailable()) {
         logger?.error(
           "store write path wedged beyond in-process recovery — exiting for supervisor restart",
