@@ -130,6 +130,43 @@ describe("GuardedStore", () => {
     await store.selfTest();
   });
 
+  it("escalates once per episode when rebuilds prove futile, and recovery resets it", async () => {
+    let builds = 0;
+    let wedged = 0;
+    let healthy = false;
+    const store = new GuardedStore(
+      () => {
+        builds += 1;
+        return {
+          ...stubStore({}),
+          // Reads `healthy` at CALL time, so a rebuild mid-episode stays
+          // wedged until the test flips the flag.
+          selfTest: () =>
+            new Promise<void>((resolve) => {
+              if (healthy) resolve();
+              else setTimeout(resolve, 1_000);
+            }),
+        } as SessionStore;
+      },
+      fast({ rebuildAfter: 2, exhaustAfterRebuilds: 2, onWedgedBeyondRecovery: () => (wedged += 1) }),
+    );
+    // 2 breaches -> rebuild #1; 2 more -> rebuild #2 -> escalation fires once.
+    for (let i = 0; i < 4; i += 1) {
+      await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    }
+    expect(builds).toBe(3);
+    expect(wedged).toBe(1);
+    // A counted success starts a fresh episode: the next futile cycle must
+    // reach TWO rebuilds again before escalating again.
+    healthy = true;
+    await store.selfTest();
+    healthy = false;
+    for (let i = 0; i < 4; i += 1) {
+      await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    }
+    expect(wedged).toBe(2);
+  });
+
   it("backend errors pass through unchanged and never count as breaches", async () => {
     let builds = 0;
     const store = new GuardedStore(() => stubStore({}, () => (builds += 1)), fast({ rebuildAfter: 1 }));

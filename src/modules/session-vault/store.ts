@@ -3,7 +3,6 @@
 // credentials — inline in credentials.json, or (when a block is absent) the
 // host's own ADC / instance role. let.ai never sees either.
 
-import { createRequire } from "node:module";
 import { GcsStore, type GcsStoreConfig } from "./store/gcs-store.js";
 import { GuardedStore, type GuardedStoreOptions } from "./store/guarded-store.js";
 import { S3Store } from "./store/s3-store.js";
@@ -33,28 +32,17 @@ function deadlineEnvOverrides(): Pick<
   return out;
 }
 
-// teeny-request (the GCS SDK's transport) keeps its keep-alive agents in a
-// MODULE-GLOBAL pool shared by every Storage instance — rebuilding the client
-// without evicting the pool hands the fresh client the exact poisoned sockets
-// the rebuild exists to shed (the 2026-07-30 wedge). The pool is not exported
-// from the package root, so reach into the module the SDK itself loads.
-// Best-effort: a future layout change degrades to a warning, never a crash.
-function evictGcsAgentPool(logger?: ScopedLogger): void {
-  try {
-    const require_ = createRequire(import.meta.url);
-    const agents = require_("teeny-request/build/src/agents.js") as {
-      pool?: Map<string, { destroy?: () => void }>;
-    };
-    if (!agents.pool) throw new Error("agent pool not found");
-    for (const [key, agent] of agents.pool) {
-      agent.destroy?.();
-      agents.pool.delete(key);
-    }
-  } catch (err) {
-    logger?.warn("could not evict GCS agent pool on store rebuild", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+/** True when a supervisor will resurrect this process after exit(1):
+ *  systemd (Restart=on-failure in our unit) sets INVOCATION_ID, launchd
+ *  (KeepAlive in our plist) sets XPC_SERVICE_NAME, Railway restarts crashed
+ *  services by policy. FORTRESS_STORE_EXIT_ON_WEDGE=on|off overrides. */
+function supervisedRestartAvailable(): boolean {
+  const override = process.env.FORTRESS_STORE_EXIT_ON_WEDGE;
+  if (override === "on") return true;
+  if (override === "off") return false;
+  return Boolean(
+    process.env.INVOCATION_ID ?? process.env.XPC_SERVICE_NAME ?? process.env.RAILWAY_ENVIRONMENT,
+  );
 }
 
 /** The concrete backend, wrapped in GuardedStore: every call gets a hard
@@ -64,17 +52,38 @@ function evictGcsAgentPool(logger?: ScopedLogger): void {
 export function buildStore(c: VaultCredentials, logger?: ScopedLogger): SessionStore {
   let lastInner: SessionStore | null = null;
   const factory = (): SessionStore => {
-    // Rebuild-time transport hygiene: the fresh store must not inherit the
-    // old client's sockets — GCS shares a process-global agent pool (evict
-    // it); an S3 client owns its handler (destroy it).
-    if (lastInner) {
-      if (c.store === "gcs") evictGcsAgentPool(logger);
-      else (lastInner as S3Store).destroyClient();
+    // Rebuild-time hygiene: shed what THIS layer can actually reach — SDK and
+    // auth state, and the S3 client's own handler. Under Bun the HTTP sockets
+    // live in the process-global native-fetch pool no JS layer can evict;
+    // when rebuilds prove futile, onWedgedBeyondRecovery escalates instead of
+    // pretending. Best-effort: a destroy failure must not break the rebuild.
+    if (lastInner && c.store !== "gcs") {
+      try {
+        (lastInner as S3Store).destroyClient();
+      } catch (err) {
+        logger?.warn("could not destroy previous S3 client on rebuild", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     lastInner = buildInnerStore(c);
     return lastInner;
   };
-  return new GuardedStore(factory, { logger, ...deadlineEnvOverrides() });
+  return new GuardedStore(factory, {
+    logger,
+    ...deadlineEnvOverrides(),
+    onWedgedBeyondRecovery: () => {
+      if (supervisedRestartAvailable()) {
+        logger?.error(
+          "store write path wedged beyond in-process recovery — exiting for supervisor restart",
+        );
+        process.exit(1);
+      }
+      logger?.error(
+        "store write path wedged beyond in-process recovery — no supervisor detected, continuing degraded (set FORTRESS_STORE_EXIT_ON_WEDGE=on to opt into exit)",
+      );
+    },
+  });
 }
 
 function buildInnerStore(c: VaultCredentials): SessionStore {

@@ -57,6 +57,10 @@ import {
   stagingObject,
 } from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
+import { randomUUID } from "node:crypto";
+
+/** Per-process self-test object key — see GcsStore.selfTest. */
+const SELFTEST_KEY = `.session-vault/selftest-${randomUUID().slice(0, 8)}.txt`;
 
 export interface S3StoreConfig {
   region: string;
@@ -323,9 +327,8 @@ export class S3Store implements SessionStore {
   }
 
   async selfTest(): Promise<void> {
-    // Fixed name — see GcsStore.selfTest: the minutely probe must not strand
-    // one object per run.
-    const keyName = ".session-vault/selftest.txt";
+    // Per-process name — see GcsStore.selfTest for the rationale.
+    const keyName = SELFTEST_KEY;
     await this.s3.send(
       new PutObjectCommand({ Bucket: this.bucket, Key: keyName, Body: "ok", ContentType: "text/plain" }),
     );

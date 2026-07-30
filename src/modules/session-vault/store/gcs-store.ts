@@ -38,6 +38,10 @@ import {
   stagingObject,
 } from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
+import { randomUUID } from "node:crypto";
+
+/** Per-process self-test object key — see selfTest for the naming rationale. */
+const SELFTEST_OBJECT = `.session-vault/selftest-${randomUUID().slice(0, 8)}.txt`;
 
 export interface GcsStoreConfig {
   projectId: string;
@@ -59,10 +63,12 @@ export class GcsStore implements SessionStore {
   constructor(cfg: GcsStoreConfig) {
     const opts: StorageOptions = {
       projectId: cfg.projectId,
-      // Fail fast instead of hanging on a poisoned keep-alive socket (the
-      // 2026-07-30 incident): every request gets a transport timeout and
-      // bounded retries. GuardedStore's per-call deadline above this remains
-      // the hard ceiling; these knobs keep the SDK from parking forever.
+      // retryOptions bound the SDK's JS-level RETRY loop (real under any
+      // runtime). `timeout` reaches the transport only on Node, where
+      // node-fetch is real; the shipped Bun binary swaps in Bun's native
+      // fetch, which ignores it — there, GuardedStore's per-call deadline is
+      // the ONLY effective bound (2026-07-30 incident; verified empirically).
+      // Kept as defense for Node-run deployments of this module.
       timeout: 15_000,
       retryOptions: {
         autoRetry: true,
@@ -183,10 +189,11 @@ export class GcsStore implements SessionStore {
   }
 
   async writeCanonicalText(key: SessionKey, text: string): Promise<void> {
-    // StorageOptions.timeout does NOT apply to simple uploads — file.save only
-    // honors a PER-CALL timeout (the 2026-07-30 wedge lived exactly here).
-    // node-fetch's timeout spans the whole request including the body, so a
-    // large canonical gets generous headroom rather than the 15s default.
+    // Per-call timeout: on Node runtimes simple uploads honor only the
+    // per-call value (client-level timeout does not reach file.save), and
+    // node-fetch's timeout spans the whole request body — hence the generous
+    // budget. Under the shipped Bun binary this knob is inert (native fetch
+    // ignores it) and GuardedStore's heavy deadline is the effective bound.
     await this.bucket()
       .file(canonicalObject(key))
       .save(text, { contentType: "application/x-ndjson", resumable: false, timeout: 120_000 });
@@ -296,10 +303,13 @@ export class GcsStore implements SessionStore {
   }
 
   async selfTest(): Promise<void> {
-    // Fixed name: the probe runs every minute — unique names would strand a
-    // current object per failed run and litter versioned buckets; overwriting
-    // one well-known object keeps accumulation at a single key.
-    const file = this.bucket().file(".session-vault/selftest.txt");
+    // Per-PROCESS name: stable within a process (no per-minute litter of
+    // stranded current objects from failed runs), distinct across processes
+    // (the enroll wizard and the daemon probe must not race save/delete on
+    // one key and report a spurious failure). Versioned buckets still accrue
+    // noncurrent generations per probe — a lifecycle rule on
+    // `.session-vault/` is the real answer there.
+    const file = this.bucket().file(SELFTEST_OBJECT);
     await file.save("ok", { contentType: "text/plain", resumable: false, timeout: 15_000 });
     const [buf] = await file.download();
     if (buf.toString("utf8") !== "ok") throw new Error("self-test readback mismatch");

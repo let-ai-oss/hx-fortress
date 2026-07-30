@@ -50,6 +50,15 @@ export interface GuardedStoreOptions {
   scanTimeoutMs?: number;
   /** Consecutive deadline breaches before the inner store is rebuilt. */
   rebuildAfter?: number;
+  /** Consecutive FUTILE rebuilds (no counted success in between) before
+   *  `onWedgedBeyondRecovery` fires. Under Bun a rebuild sheds SDK/auth state
+   *  but CANNOT shed the process-global native-fetch socket pool — when
+   *  rebuilds don't help, only a process restart does. */
+  exhaustAfterRebuilds?: number;
+  /** Invoked once per wedge episode when rebuilds have proven futile. The
+   *  store keeps operating (and breaching) after the call — the callback owns
+   *  the escalation (typically a supervised process exit). */
+  onWedgedBeyondRecovery?: () => void;
   logger?: ScopedLogger;
 }
 
@@ -69,10 +78,13 @@ export class GuardedStore implements SessionStore {
 
   private inner: SessionStore;
   private breaches = 0;
+  private rebuildsWithoutRecovery = 0;
   private readonly opTimeoutMs: number;
   private readonly heavyOpTimeoutMs: number;
   private readonly scanTimeoutMs: number;
   private readonly rebuildAfter: number;
+  private readonly exhaustAfterRebuilds: number;
+  private readonly onWedgedBeyondRecovery?: () => void;
   private readonly logger?: ScopedLogger;
 
   constructor(
@@ -83,6 +95,8 @@ export class GuardedStore implements SessionStore {
     this.heavyOpTimeoutMs = opts.heavyOpTimeoutMs ?? 120_000;
     this.scanTimeoutMs = opts.scanTimeoutMs ?? 600_000;
     this.rebuildAfter = opts.rebuildAfter ?? 3;
+    this.exhaustAfterRebuilds = opts.exhaustAfterRebuilds ?? 2;
+    this.onWedgedBeyondRecovery = opts.onWedgedBeyondRecovery;
     this.logger = opts.logger;
     this.inner = this.factory();
   }
@@ -107,7 +121,10 @@ export class GuardedStore implements SessionStore {
       // Only a WRITE-class success on the CURRENT client resets the streak: a
       // healthy read must not absolve a wedged write path, and a stale success
       // from a discarded client must not vouch for the fresh one.
-      if (counted && this.inner === s) this.breaches = 0;
+      if (counted && this.inner === s) {
+        this.breaches = 0;
+        this.rebuildsWithoutRecovery = 0;
+      }
       return result;
     } catch (err) {
       if (err instanceof StoreDeadlineError) {
@@ -129,9 +146,19 @@ export class GuardedStore implements SessionStore {
           if (this.breaches >= this.rebuildAfter) {
             this.inner = this.factory();
             this.breaches = 0;
+            this.rebuildsWithoutRecovery += 1;
             this.logger?.error("storage client rebuilt after consecutive deadline breaches", {
               method,
+              rebuildsWithoutRecovery: this.rebuildsWithoutRecovery,
             });
+            if (this.rebuildsWithoutRecovery >= this.exhaustAfterRebuilds) {
+              // Rebuilding demonstrably does not help: under Bun the hung
+              // sockets live in the process-global native-fetch pool, which no
+              // amount of client rebuilding can reach. Hand the decision to
+              // the escalation callback and start a fresh episode either way.
+              this.rebuildsWithoutRecovery = 0;
+              this.onWedgedBeyondRecovery?.();
+            }
           }
         }
       }
