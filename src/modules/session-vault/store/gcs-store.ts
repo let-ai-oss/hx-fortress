@@ -40,9 +40,6 @@ import {
 import { maxCanonicalBytes } from "./limits.js";
 import { randomUUID } from "node:crypto";
 
-/** Per-process self-test object key — see selfTest for the naming rationale. */
-const SELFTEST_OBJECT = `.session-vault/selftest-${randomUUID().slice(0, 8)}.txt`;
-
 export interface GcsStoreConfig {
   projectId: string;
   bucketName: string;
@@ -303,13 +300,13 @@ export class GcsStore implements SessionStore {
   }
 
   async selfTest(): Promise<void> {
-    // Per-PROCESS name: stable within a process (no per-minute litter of
-    // stranded current objects from failed runs), distinct across processes
-    // (the enroll wizard and the daemon probe must not race save/delete on
-    // one key and report a spurious failure). Versioned buckets still accrue
-    // noncurrent generations per probe — a lifecycle rule on
-    // `.session-vault/` is the real answer there.
-    const file = this.bucket().file(SELFTEST_OBJECT);
+    // Per-CALL name: the daemon probe, the cloud's test-connection RPC and the
+    // enroll wizard can all run selfTest concurrently in/across processes — a
+    // shared key lets one caller's delete land inside another's save→read
+    // window and report a spurious failure on a healthy store. Stranded
+    // objects from failed deletes (and versioned-bucket accrual) are owned by
+    // the provisioned `.session-vault/` lifecycle rules, not by naming.
+    const file = this.bucket().file(`.session-vault/selftest-${randomUUID().slice(0, 12)}.txt`);
     await file.save("ok", { contentType: "text/plain", resumable: false, timeout: 15_000 });
     const [buf] = await file.download();
     if (buf.toString("utf8") !== "ok") throw new Error("self-test readback mismatch");

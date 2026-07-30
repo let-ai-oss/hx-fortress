@@ -107,13 +107,16 @@ re-`hello` with the saved credential instead of re-enrolling).
 | `FORTRESS_STORE_PROBE_INTERVAL_MS` | no | Write-path self-test cadence (default `60000`; `0` disables). A hung probe counts toward the storage-client rebuild. |
 | `FORTRESS_STORE_EXIT_ON_WEDGE` | no | `on`/`off`: force or forbid exiting for a supervisor restart when storage rebuilds prove futile. Default: auto-detect systemd/launchd/Railway; never exits from a terminal, never exits if the write path has not succeeded since boot. |
 
-Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rule new
-enrolls provision automatically; add it once so the minutely write-probe's
+Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rules new
+enrolls provision automatically; add them once so the minutely write-probe's
 noncurrent versions expire (scoped to `.session-vault/` — customer data is
-untouched): GCS — `gcloud storage buckets update gs://<bucket>
---lifecycle-file=<json with the .session-vault/ noncurrent-delete rule>`;
-S3 — `aws s3api put-bucket-lifecycle-configuration --bucket <bucket>
---lifecycle-configuration '{"Rules":[{"ID":"hx-session-vault-probe","Status":"Enabled","Filter":{"Prefix":".session-vault/"},"NoncurrentVersionExpiration":{"NoncurrentDays":1},"Expiration":{"ExpiredObjectDeleteMarker":true}}]}'`.
+untouched). **Both commands REPLACE the bucket's entire lifecycle
+configuration** — if your bucket already carries lifecycle rules (transitions,
+expiries), merge these into your existing set instead of pasting verbatim.
+GCS — `gcloud storage buckets update gs://<bucket> --lifecycle-file=<json with
+the .session-vault/ noncurrent-delete + age-7 rules>`; S3 — `aws s3api
+put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration
+'{"Rules":[{"ID":"hx-session-vault-probe","Status":"Enabled","Filter":{"Prefix":".session-vault/"},"NoncurrentVersionExpiration":{"NoncurrentDays":1},"Expiration":{"ExpiredObjectDeleteMarker":true}},{"ID":"hx-session-vault-probe-strays","Status":"Enabled","Filter":{"Prefix":".session-vault/"},"Expiration":{"Days":7}}]}'`.
 
 `FORTRESS_ENROLL_TOKEN` + `FORTRESS_CLOUD_URL` are consumed only on the first
 boot of a fresh volume; once a credential is saved they are ignored. Storage

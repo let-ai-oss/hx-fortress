@@ -94,18 +94,28 @@ export async function createGcsBucket(o: GcsBucketOpts, log: Log): Promise<boole
         action: { type: "Delete" },
         condition: { matchesPrefix: [".session-vault/"], daysSinceNoncurrentTime: 1 },
       },
+      // Current probe objects stranded by a failed delete (wedge windows) —
+      // only probe artifacts ever live under this prefix.
+      {
+        action: { type: "Delete" },
+        condition: { matchesPrefix: [".session-vault/"], age: 7 },
+      },
+      // Incomplete multipart uploads (e.g. a compose abandoned mid-wedge)
+      // bill storage invisibly; aborting them never touches completed data.
+      { action: { type: "AbortIncompleteMultipartUpload" }, condition: { age: 1 } },
     ],
   });
   const lifecycleFile = path.join(os.tmpdir(), `hx-fortress-lifecycle-${Date.now()}.json`);
   try {
     await writeFile(lifecycleFile, lifecycle, "utf8");
-    await capture("gcloud", [
+    const lr = await capture("gcloud", [
       "storage",
       "buckets",
       "update",
       `gs://${o.bucket}`,
       `--lifecycle-file=${lifecycleFile}`,
     ]);
+    if (!lr.ok) log(`Lifecycle rule not applied (probe versions will accrue): ${lr.stderr || "unknown error"}`);
   } finally {
     await unlink(lifecycleFile).catch(() => {});
   }
@@ -160,8 +170,9 @@ export async function createS3Bucket(o: S3BucketOpts, log: Log): Promise<boolean
     "Status=Enabled",
   ]);
   // Probe-prefix lifecycle — see the GCS arm: expire noncurrent probe versions
-  // and their delete markers; customer data untouched.
-  await capture("aws", [
+  // and their delete markers, reap stranded current probe objects, and abort
+  // incomplete multipart uploads; customer data untouched.
+  const s3lr = await capture("aws", [
     "s3api",
     "put-bucket-lifecycle-configuration",
     "--bucket",
@@ -176,9 +187,22 @@ export async function createS3Bucket(o: S3BucketOpts, log: Log): Promise<boolean
           NoncurrentVersionExpiration: { NoncurrentDays: 1 },
           Expiration: { ExpiredObjectDeleteMarker: true },
         },
+        {
+          ID: "hx-session-vault-probe-strays",
+          Status: "Enabled",
+          Filter: { Prefix: ".session-vault/" },
+          Expiration: { Days: 7 },
+        },
+        {
+          ID: "hx-abort-incomplete-mpu",
+          Status: "Enabled",
+          Filter: {},
+          AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+        },
       ],
     }),
   ]);
+  if (!s3lr.ok) log(`Lifecycle rules not applied (probe versions will accrue): ${s3lr.stderr || "unknown error"}`);
   const encryption = o.kmsKey
     ? `{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"${o.kmsKey}"}}]}`
     : '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}';

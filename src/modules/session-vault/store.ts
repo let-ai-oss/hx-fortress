@@ -53,10 +53,6 @@ export function supervisedRestartAvailable(
   return Boolean(env.INVOCATION_ID || env.XPC_SERVICE_NAME || env.RAILWAY_ENVIRONMENT);
 }
 
-/** The concrete backend, wrapped in GuardedStore: every call gets a hard
- *  deadline and the SDK client is rebuilt after consecutive breaches — a hung
- *  keep-alive pool wedged prod ingest for three hours on 2026-07-30. The
- *  factory hands GuardedStore a way to rebuild the inner store fresh. */
 /** The effective heavy-op deadline (ms) — for callers outside GuardedStore
  *  that need the same budget (the raw readCanonical fetch). */
 export function storeHeavyTimeoutMs(): number {
@@ -113,6 +109,10 @@ export function createWedgeEscalation(opts: {
   };
 }
 
+/** The concrete backend, wrapped in GuardedStore: every call gets a hard
+ *  deadline and the SDK client is rebuilt after consecutive breaches — a hung
+ *  keep-alive pool wedged prod ingest for three hours on 2026-07-30. The
+ *  factory hands GuardedStore a way to rebuild the inner store fresh. */
 export function buildStore(
   c: VaultCredentials,
   logger?: ScopedLogger,
