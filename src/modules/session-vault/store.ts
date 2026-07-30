@@ -96,15 +96,20 @@ export function createWedgeEscalation(opts: {
       "store write path wedged beyond in-process recovery — exiting for supervisor restart",
     );
     void (async (): Promise<void> => {
-      if (opts.beforeExit) {
-        // Bounded: stopping the embedded Postgres is loopback pg_ctl (seconds)
-        // and must never be able to hold the exit hostage to the wedge.
-        await Promise.race([
-          opts.beforeExit().catch(() => {}),
-          new Promise<void>((resolve) => setTimeout(resolve, boundMs)),
-        ]);
+      try {
+        if (opts.beforeExit) {
+          // Bounded: stopping the embedded Postgres is loopback pg_ctl
+          // (seconds) and must never hold the exit hostage to the wedge.
+          await Promise.race([
+            opts.beforeExit().catch(() => {}),
+            new Promise<void>((resolve) => setTimeout(resolve, boundMs)),
+          ]);
+        }
+      } finally {
+        // Unconditional: even a synchronous beforeExit throw must not leave
+        // the process running after we committed to restarting it.
+        exit(1);
       }
-      exit(1);
     })();
   };
 }

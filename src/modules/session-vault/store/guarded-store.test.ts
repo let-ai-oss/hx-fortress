@@ -203,6 +203,35 @@ describe("GuardedStore", () => {
     expect(seen).toEqual([false, true]); // worked once: restart can cure pool state
   });
 
+  it("presign successes cannot starve the rebuild streak or arm the futility gate", async () => {
+    // The 2026-07-30 daytime shape: every chunk presigns (local crypto,
+    // instant) before its write breaches. Presign must neither reset the
+    // streak nor count as the write success that legitimizes a restart.
+    let builds = 0;
+    const seen: boolean[] = [];
+    const counting = new GuardedStore(
+      () => {
+        builds += 1;
+        return {
+          ...stubStore({ write: 1_000 }),
+          signStagingUpload: () =>
+            Promise.resolve({ url: "u", objectName: "o", expiresAt: "e" }),
+        } as SessionStore;
+      },
+      fast({
+        rebuildAfter: 2,
+        exhaustAfterRebuilds: 2,
+        onWedgedBeyondRecovery: ({ hadCountedSuccess }) => seen.push(hadCountedSuccess),
+      }),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      await counting.signStagingUpload(KEY, "c" + i); // interleaved presigns
+      await expect(counting.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    }
+    expect(builds).toBe(3); // streak reached rebuild twice despite presigns
+    expect(seen).toEqual([false]); // presign success never armed the gate
+  });
+
   it("backend errors pass through unchanged and never count as breaches", async () => {
     let builds = 0;
     const store = new GuardedStore(() => stubStore({}, () => (builds += 1)), fast({ rebuildAfter: 1 }));

@@ -70,9 +70,17 @@ export class GuardedStore implements SessionStore {
   /** Methods whose hang signature matches the write-path wedge class; ONLY
    *  these drive (and reset) the rebuild streak. Read traffic staying healthy
    *  must not mask a write-only wedge — 2026-07-30 had exactly that shape:
-   *  Postgres and JSON-API reads green, every upload hung. */
+   *  Postgres and JSON-API reads green, every upload hung.
+   *
+   *  signStagingUpload is deliberately EXCLUDED: in every deployed credential
+   *  config a presign is pure local crypto — no network, instant success —
+   *  so counting it would let daytime chunk traffic (each chunk presigns
+   *  first) reset the streak forever and starve rebuild+escalation during the
+   *  exact incident this class exists for; and its network-free "success"
+   *  must never arm the restart-futility gate. The 60s selfTest probe is the
+   *  legitimate reset source (and damps slow-link false breaches from long
+   *  purges). */
   private static readonly BREACH_METHODS = new Set([
-    "signStagingUpload",
     "appendChunkToCanonical",
     "writeCanonicalText",
     "writeArtifact",
