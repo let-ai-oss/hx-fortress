@@ -183,15 +183,19 @@ export class GcsStore implements SessionStore {
   }
 
   async writeCanonicalText(key: SessionKey, text: string): Promise<void> {
+    // StorageOptions.timeout does NOT apply to simple uploads — file.save only
+    // honors a PER-CALL timeout (the 2026-07-30 wedge lived exactly here).
+    // node-fetch's timeout spans the whole request including the body, so a
+    // large canonical gets generous headroom rather than the 15s default.
     await this.bucket()
       .file(canonicalObject(key))
-      .save(text, { contentType: "application/x-ndjson", resumable: false });
+      .save(text, { contentType: "application/x-ndjson", resumable: false, timeout: 120_000 });
   }
 
   async writeArtifact(key: SessionKey, name: string, text: string): Promise<void> {
     await this.bucket()
       .file(artifactObject(key, name))
-      .save(text, { contentType: "application/json", resumable: false });
+      .save(text, { contentType: "application/json", resumable: false, timeout: 15_000 });
   }
 
   async readArtifactText(key: SessionKey, name: string): Promise<string | null> {
@@ -292,8 +296,11 @@ export class GcsStore implements SessionStore {
   }
 
   async selfTest(): Promise<void> {
-    const file = this.bucket().file(`.session-vault/selftest-${Date.now()}.txt`);
-    await file.save("ok", { contentType: "text/plain", resumable: false });
+    // Fixed name: the probe runs every minute — unique names would strand a
+    // current object per failed run and litter versioned buckets; overwriting
+    // one well-known object keeps accumulation at a single key.
+    const file = this.bucket().file(".session-vault/selftest.txt");
+    await file.save("ok", { contentType: "text/plain", resumable: false, timeout: 15_000 });
     const [buf] = await file.download();
     if (buf.toString("utf8") !== "ok") throw new Error("self-test readback mismatch");
     await file.delete().catch(() => {});

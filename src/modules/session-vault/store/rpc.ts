@@ -237,7 +237,10 @@ export async function handleVaultRpc(
         // redirect:"error" — a validated signed URL must not 3xx-redirect into a
         // private/metadata address (SSRF): a redirect makes fetch throw, which we
         // map to the URL-free network reason below (fail-closed).
-        res = await fetch(url, { redirect: "error" });
+        // AbortSignal.timeout — this raw fetch bypasses the store and therefore
+        // GuardedStore's deadlines; without its own bound it is the one
+        // storage-dependent hang left on the RPC path (2026-07-30 class).
+        res = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(120_000) });
       } catch {
         throw new Error("canonical_fetch_failed:network");
       }

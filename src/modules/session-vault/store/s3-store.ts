@@ -316,8 +316,16 @@ export class S3Store implements SessionStore {
     return { complete: true, deleted };
   }
 
+  /** Release the SDK client's sockets so a GuardedStore rebuild cannot leak
+   *  the old pool (S3Client owns its handler, unlike GCS's shared agent). */
+  destroyClient(): void {
+    this.s3.destroy();
+  }
+
   async selfTest(): Promise<void> {
-    const keyName = `.session-vault/selftest-${Date.now()}.txt`;
+    // Fixed name — see GcsStore.selfTest: the minutely probe must not strand
+    // one object per run.
+    const keyName = ".session-vault/selftest.txt";
     await this.s3.send(
       new PutObjectCommand({ Bucket: this.bucket, Key: keyName, Body: "ok", ContentType: "text/plain" }),
     );

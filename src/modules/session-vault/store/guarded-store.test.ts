@@ -1,31 +1,32 @@
 // GuardedStore: the per-call deadline + rebuild-after-breaches decorator born
-// from the 2026-07-30 prod wedge (hung GCS pool, silent zero-ingest for 3h).
+// from the 2026-07-30 prod wedge (hung GCS pool, silent zero-ingest, twice in
+// one day). The rebuild streak is WRITE-scoped: healthy reads must not absolve
+// a wedged write path, and stale clients must not charge fresh ones.
 import { describe, expect, it } from "bun:test";
 import { GuardedStore, StoreDeadlineError, type GuardedStoreOptions } from "./guarded-store.js";
 import type { SessionStore } from "./types.js";
 
 const KEY = { userId: "u", family: "claude-cli", sessionId: "s" };
 
-/** A stub store whose statCanonical resolves after `delayMs`; everything else
- *  is unreachable in these tests. */
-function stubStore(delayMs: number, onCall?: () => void): SessionStore {
+/** Stub store: per-method delays; unused methods reject loudly. */
+function stubStore(delays: { read?: number; write?: number }, onBuild?: () => void): SessionStore {
+  onBuild?.();
+  const after = <T,>(ms: number, value: T): Promise<T> =>
+    new Promise((resolve) => setTimeout(() => resolve(value), ms));
   const never = (): Promise<never> => Promise.reject(new Error("unused in test"));
   return {
-    statCanonical: () => {
-      onCall?.();
-      return new Promise((resolve) => setTimeout(() => resolve(1), delayMs));
-    },
-    selfTest: () => new Promise((resolve) => setTimeout(resolve, delayMs)),
+    statCanonical: () => after(delays.read ?? 0, 1),
+    selfTest: () => after(delays.write ?? 0, undefined) as Promise<void>,
+    listAllCanonicalKeys: () => after(delays.read ?? 0, []),
+    appendChunkToCanonical: () => Promise.reject(new Error("backend_says_no")),
     signStagingUpload: never,
     readChunkText: never,
-    appendChunkToCanonical: () => Promise.reject(new Error("backend_says_no")),
     signCanonicalDownload: never,
     readCanonicalText: never,
     writeCanonicalText: never,
     writeArtifact: never,
     readArtifactText: never,
     listSessionMetadata: never,
-    listAllCanonicalKeys: () => new Promise((resolve) => setTimeout(() => resolve([]), delayMs)),
     deleteSession: never,
   } as SessionStore;
 }
@@ -40,49 +41,98 @@ const fast = (over: Partial<GuardedStoreOptions> = {}): GuardedStoreOptions => (
 
 describe("GuardedStore", () => {
   it("turns a hung call into a StoreDeadlineError instead of waiting forever", async () => {
-    const store = new GuardedStore(() => stubStore(1_000), fast());
+    const store = new GuardedStore(() => stubStore({ read: 1_000 }), fast());
     await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
   });
 
-  it("rebuilds the inner store after consecutive breaches, and the rebuilt one serves", async () => {
+  it("rebuilds after consecutive WRITE breaches, and the rebuilt client serves", async () => {
     let builds = 0;
-    const store = new GuardedStore(() => {
-      builds += 1;
-      // First client hangs everything; the rebuilt one is healthy.
-      return stubStore(builds === 1 ? 1_000 : 0);
-    }, fast());
+    const store = new GuardedStore(
+      () => stubStore({ write: builds === 0 ? 1_000 : 0 }, () => (builds += 1)),
+      fast(),
+    );
     for (let i = 0; i < 3; i += 1) {
-      await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
+      await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
     }
     expect(builds).toBe(2);
-    expect(await store.statCanonical(KEY)).toBe(1);
+    await store.selfTest(); // rebuilt client is healthy
   });
 
-  it("a success resets the breach streak", async () => {
+  it("a WRITE success resets the streak", async () => {
     let builds = 0;
-    let delay = 1_000;
+    let writeDelay = 1_000;
     const store = new GuardedStore(() => {
       builds += 1;
       return {
-        ...stubStore(0),
-        statCanonical: () => new Promise((resolve) => setTimeout(() => resolve(1), delay)),
+        ...stubStore({}),
+        selfTest: () => new Promise<void>((resolve) => setTimeout(resolve, writeDelay)),
       } as SessionStore;
     }, fast());
-    await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
-    await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
-    delay = 0;
-    expect(await store.statCanonical(KEY)).toBe(1); // streak resets here
-    delay = 1_000;
-    await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
-    expect(builds).toBe(1); // never reached rebuildAfter consecutively
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    writeDelay = 0;
+    await store.selfTest(); // streak resets here
+    writeDelay = 1_000;
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    writeDelay = 0;
+    await store.selfTest();
+    expect(builds).toBe(1); // never reached 3 consecutive — no rebuild
   });
 
-  it("backend errors pass through unchanged and do not count as breaches", async () => {
+  it("READ breaches neither count toward nor reset the write streak", async () => {
     let builds = 0;
-    const store = new GuardedStore(() => {
-      builds += 1;
-      return stubStore(0);
-    }, fast({ rebuildAfter: 1 }));
+    const store = new GuardedStore(
+      () => stubStore({ read: 1_000, write: 1_000 }, () => (builds += 1)),
+      fast(),
+    );
+    // Five read breaches: never a rebuild.
+    for (let i = 0; i < 5; i += 1) {
+      await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
+    }
+    expect(builds).toBe(1);
+    // Two write breaches + an interleaved read breach + a third write breach:
+    // the read must not have reset the write streak — rebuild fires.
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    expect(builds).toBe(2);
+  });
+
+  it("stale-client breaches do not charge the fresh client", async () => {
+    let builds = 0;
+    const store = new GuardedStore(
+      () => stubStore({ write: builds === 0 ? 300 : 0 }, () => (builds += 1)),
+      fast({ opTimeoutMs: 30 }),
+    );
+    // Four concurrent writes on the wedged first client: the first three
+    // breaches rebuild once; the fourth is stale and must not count.
+    const results = await Promise.allSettled([
+      store.selfTest(),
+      store.selfTest(),
+      store.selfTest(),
+      store.selfTest(),
+    ]);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(builds).toBe(2);
+    // Two fresh breaches on the new client must NOT trigger a rebuild yet —
+    // the stale fourth breach didn't pre-charge the streak.
+    let flip = 1_000;
+    const wedgy = store as unknown as { inner: SessionStore };
+    wedgy.inner = {
+      ...stubStore({}),
+      selfTest: () => new Promise<void>((resolve) => setTimeout(resolve, flip)),
+    } as SessionStore;
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    await expect(store.selfTest()).rejects.toBeInstanceOf(StoreDeadlineError);
+    expect(builds).toBe(2);
+    flip = 0;
+    await store.selfTest();
+  });
+
+  it("backend errors pass through unchanged and never count as breaches", async () => {
+    let builds = 0;
+    const store = new GuardedStore(() => stubStore({}, () => (builds += 1)), fast({ rebuildAfter: 1 }));
     for (let i = 0; i < 3; i += 1) {
       await expect(store.appendChunkToCanonical(KEY, "c1")).rejects.toThrow("backend_says_no");
     }
@@ -90,9 +140,7 @@ describe("GuardedStore", () => {
   });
 
   it("the whole-bucket scan gets its own larger budget", async () => {
-    // Hangs past the op deadline but inside the scan deadline: op-classed calls
-    // breach, the scan succeeds.
-    const store = new GuardedStore(() => stubStore(50), fast());
+    const store = new GuardedStore(() => stubStore({ read: 50 }), fast());
     await expect(store.statCanonical(KEY)).rejects.toBeInstanceOf(StoreDeadlineError);
     expect(await store.listAllCanonicalKeys()).toEqual([]);
   });

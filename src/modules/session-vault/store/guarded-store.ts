@@ -39,7 +39,8 @@ export class StoreDeadlineError extends Error {
 }
 
 export interface GuardedStoreOptions {
-  /** Deadline for ordinary calls (signing, compose, stat, chunk reads). */
+  /** Deadline for ordinary single-round-trip calls (signing, stat, small
+   *  reads/writes, the self-test probe). */
   opTimeoutMs?: number;
   /** Deadline for calls that legitimately move lots of data (whole-canonical
    *  read/write, metadata list, one bounded delete batch). */
@@ -53,6 +54,19 @@ export interface GuardedStoreOptions {
 }
 
 export class GuardedStore implements SessionStore {
+  /** Methods whose hang signature matches the write-path wedge class; ONLY
+   *  these drive (and reset) the rebuild streak. Read traffic staying healthy
+   *  must not mask a write-only wedge — 2026-07-30 had exactly that shape:
+   *  Postgres and JSON-API reads green, every upload hung. */
+  private static readonly BREACH_METHODS = new Set([
+    "signStagingUpload",
+    "appendChunkToCanonical",
+    "writeCanonicalText",
+    "writeArtifact",
+    "deleteSession",
+    "selfTest",
+  ]);
+
   private inner: SessionStore;
   private breaches = 0;
   private readonly opTimeoutMs: number;
@@ -79,6 +93,7 @@ export class GuardedStore implements SessionStore {
     call: (s: SessionStore) => Promise<T>,
   ): Promise<T> {
     const s = this.inner;
+    const counted = GuardedStore.BREACH_METHODS.has(method);
     const attempt = call(s);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -89,25 +104,35 @@ export class GuardedStore implements SessionStore {
           (timer as { unref?: () => void }).unref?.();
         }),
       ]);
-      this.breaches = 0;
+      // Only a WRITE-class success on the CURRENT client resets the streak: a
+      // healthy read must not absolve a wedged write path, and a stale success
+      // from a discarded client must not vouch for the fresh one.
+      if (counted && this.inner === s) this.breaches = 0;
       return result;
     } catch (err) {
       if (err instanceof StoreDeadlineError) {
         // Detach the hung call: its settle must not become an unhandled
         // rejection, and its result must never be trusted after we gave up.
         attempt.catch(() => {});
-        this.breaches += 1;
+        const stale = this.inner !== s;
         this.logger?.error("store call exceeded deadline", {
           method,
           timeoutMs,
-          consecutive: this.breaches,
+          counted,
+          stale,
+          consecutive: counted && !stale ? this.breaches + 1 : this.breaches,
         });
-        if (this.breaches >= this.rebuildAfter && this.inner === s) {
-          this.inner = this.factory();
-          this.breaches = 0;
-          this.logger?.error("storage client rebuilt after consecutive deadline breaches", {
-            method,
-          });
+        // Breaches from calls in flight on a DISCARDED client must not charge
+        // the fresh one (they'd rebuild it right after recovery).
+        if (counted && !stale) {
+          this.breaches += 1;
+          if (this.breaches >= this.rebuildAfter) {
+            this.inner = this.factory();
+            this.breaches = 0;
+            this.logger?.error("storage client rebuilt after consecutive deadline breaches", {
+              method,
+            });
+          }
         }
       }
       throw err;
@@ -123,7 +148,12 @@ export class GuardedStore implements SessionStore {
     return this.guard("readChunkText", this.heavyOpTimeoutMs, (s) => s.readChunkText(key, chunkId));
   }
   appendChunkToCanonical(key: SessionKey, chunkId: string, opts?: AppendOptions): Promise<ComposeResult> {
-    return this.guard("appendChunkToCanonical", this.opTimeoutMs, (s) => s.appendChunkToCanonical(key, chunkId, opts));
+    // Heavy class: a compose is up to 8 sequential round trips (exists +
+    // combine + delete + stat, plus every-800th compaction), and the guard
+    // must never be the TIGHTEST abandonment on this call — an abandoned
+    // compose that lands late is the ".staging 404"/double-append window. The
+    // cloud tunnel's 30s still gates tunnel callers.
+    return this.guard("appendChunkToCanonical", this.heavyOpTimeoutMs, (s) => s.appendChunkToCanonical(key, chunkId, opts));
   }
   statCanonical(key: SessionKey): Promise<number | null> {
     return this.guard("statCanonical", this.opTimeoutMs, (s) => s.statCanonical(key));
@@ -144,7 +174,9 @@ export class GuardedStore implements SessionStore {
     return this.guard("readArtifactText", this.opTimeoutMs, (s) => s.readArtifactText(key, name));
   }
   listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
-    return this.guard("listSessionMetadata", this.heavyOpTimeoutMs, (s) => s.listSessionMetadata(userId));
+    // Scan class: one sequential metadata read per session — a few thousand
+    // sessions on a direct-gateway list legitimately exceeds the heavy budget.
+    return this.guard("listSessionMetadata", this.scanTimeoutMs, (s) => s.listSessionMetadata(userId));
   }
   listAllCanonicalKeys(): Promise<SessionKey[]> {
     return this.guard("listAllCanonicalKeys", this.scanTimeoutMs, (s) => s.listAllCanonicalKeys());
