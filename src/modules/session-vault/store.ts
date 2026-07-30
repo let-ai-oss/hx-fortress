@@ -4,12 +4,28 @@
 // host's own ADC / instance role. let.ai never sees either.
 
 import { GcsStore, type GcsStoreConfig } from "./store/gcs-store.js";
+import { GuardedStore, type GuardedStoreOptions } from "./store/guarded-store.js";
 import { S3Store } from "./store/s3-store.js";
 import { assertS3EndpointSafe } from "./store/endpoint-safety.js";
 import type { SessionStore } from "./store/types.js";
 import type { VaultCredentials } from "./credentials.js";
+import type { ScopedLogger } from "../../host/types.js";
 
-export function buildStore(c: VaultCredentials): SessionStore {
+/** Per-call deadline override for the guarded store (ms). */
+function deadlineEnvOverrides(): Pick<GuardedStoreOptions, "opTimeoutMs"> {
+  const n = Number(process.env.FORTRESS_STORE_OP_TIMEOUT_MS ?? "");
+  return Number.isFinite(n) && n > 0 ? { opTimeoutMs: n } : {};
+}
+
+/** The concrete backend, wrapped in GuardedStore: every call gets a hard
+ *  deadline and the SDK client is rebuilt after consecutive breaches — a hung
+ *  keep-alive pool wedged prod ingest for three hours on 2026-07-30. The
+ *  factory hands GuardedStore a way to rebuild the inner store fresh. */
+export function buildStore(c: VaultCredentials, logger?: ScopedLogger): SessionStore {
+  return new GuardedStore(() => buildInnerStore(c), { logger, ...deadlineEnvOverrides() });
+}
+
+function buildInnerStore(c: VaultCredentials): SessionStore {
   if (c.store === "gcs") {
     if (!c.projectId) {
       throw new Error("gcs storage requires a projectId in credentials.json");

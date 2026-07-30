@@ -57,7 +57,20 @@ export class GcsStore implements SessionStore {
   private _bucket: Bucket | null = null;
 
   constructor(cfg: GcsStoreConfig) {
-    const opts: StorageOptions = { projectId: cfg.projectId };
+    const opts: StorageOptions = {
+      projectId: cfg.projectId,
+      // Fail fast instead of hanging on a poisoned keep-alive socket (the
+      // 2026-07-30 incident): every request gets a transport timeout and
+      // bounded retries. GuardedStore's per-call deadline above this remains
+      // the hard ceiling; these knobs keep the SDK from parking forever.
+      timeout: 15_000,
+      retryOptions: {
+        autoRetry: true,
+        maxRetries: 3,
+        totalTimeout: 45,
+        maxRetryDelay: 10,
+      },
+    };
     if (cfg.keyFilename) {
       opts.keyFilename = cfg.keyFilename;
     } else if (cfg.credentials) {
