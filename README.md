@@ -107,6 +107,14 @@ re-`hello` with the saved credential instead of re-enrolling).
 | `FORTRESS_STORE_PROBE_INTERVAL_MS` | no | Write-path self-test cadence (default `60000`; `0` disables). A hung probe counts toward the storage-client rebuild. |
 | `FORTRESS_STORE_EXIT_ON_WEDGE` | no | `on`/`off`: force or forbid exiting for a supervisor restart when storage rebuilds prove futile. Default: auto-detect systemd/launchd/Railway; never exits from a terminal, never exits if the write path has not succeeded since boot. |
 
+Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rule new
+enrolls provision automatically; add it once so the minutely write-probe's
+noncurrent versions expire (scoped to `.session-vault/` — customer data is
+untouched): GCS — `gcloud storage buckets update gs://<bucket>
+--lifecycle-file=<json with the .session-vault/ noncurrent-delete rule>`;
+S3 — `aws s3api put-bucket-lifecycle-configuration --bucket <bucket>
+--lifecycle-configuration '{"Rules":[{"ID":"hx-session-vault-probe","Status":"Enabled","Filter":{"Prefix":".session-vault/"},"NoncurrentVersionExpiration":{"NoncurrentDays":1},"Expiration":{"ExpiredObjectDeleteMarker":true}}]}'`.
+
 `FORTRESS_ENROLL_TOKEN` + `FORTRESS_CLOUD_URL` are consumed only on the first
 boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key

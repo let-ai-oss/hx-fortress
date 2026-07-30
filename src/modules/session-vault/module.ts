@@ -31,6 +31,10 @@ export interface SessionVaultDeps {
   /** Push a realtime invalidation to the cloud after a tunnel-relayed ingest
    *  (MC-2415). Best-effort; omitted in tests. */
   notify?: (evt: HxIngestNotification) => void;
+  /** Stop the embedded Postgres before a wedge-escalation exit — launchd has
+   *  no cgroup kill, so a hard exit would orphan the daemonized postmaster and
+   *  the restarted fortress boots Postgres-less. Bounded by the caller. */
+  stopEmbeddedPostgres?: () => Promise<void>;
 }
 
 /** RPC methods that mutate the store — always log completion + duration. The
@@ -48,8 +52,12 @@ const SLOW_RPC_LOG_MS = 5_000;
 /** Write-path self-test cadence (ms); FORTRESS_STORE_PROBE_INTERVAL_MS
  *  overrides, 0 disables. */
 const PROBE_INTERVAL_MS = (() => {
-  const raw = Number(process.env.FORTRESS_STORE_PROBE_INTERVAL_MS ?? "60000");
-  return Number.isFinite(raw) && raw >= 0 ? raw : 60_000;
+  const raw = process.env.FORTRESS_STORE_PROBE_INTERVAL_MS;
+  // Set-but-EMPTY means "default", never 0: only an explicit "0" may disable
+  // the incident's core detection mechanism.
+  if (raw === undefined || raw.trim() === "") return 60_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 60_000;
 })();
 
 export default function createModule(deps: SessionVaultDeps = {}): SessionVaultModule {
@@ -72,7 +80,7 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       if (!creds) {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");
       }
-      store = buildStore(creds, context.logger);
+      store = buildStore(creds, context.logger, { beforeExit: deps.stopEmbeddedPostgres });
 
       const { fortressIdentity } = context;
       if (fortressIdentity) {

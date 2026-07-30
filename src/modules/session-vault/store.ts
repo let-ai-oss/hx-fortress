@@ -42,7 +42,9 @@ function deadlineEnvOverrides(): Pick<
  *  overrides both ways (`on|true|1` / `off|false|0`). Exported for tests. */
 export function supervisedRestartAvailable(
   env: Record<string, string | undefined> = process.env,
-  isTty: boolean = Boolean(process.stdout.isTTY),
+  // ANY attached terminal vetoes: a bare `> log &` keeps stderr on the tty, a
+  // supervised daemon has none of the three.
+  isTty: boolean = Boolean(process.stdout.isTTY || process.stderr.isTTY || process.stdin.isTTY),
 ): boolean {
   const override = (env.FORTRESS_STORE_EXIT_ON_WEDGE ?? "").toLowerCase();
   if (override === "on" || override === "true" || override === "1") return true;
@@ -55,7 +57,67 @@ export function supervisedRestartAvailable(
  *  deadline and the SDK client is rebuilt after consecutive breaches — a hung
  *  keep-alive pool wedged prod ingest for three hours on 2026-07-30. The
  *  factory hands GuardedStore a way to rebuild the inner store fresh. */
-export function buildStore(c: VaultCredentials, logger?: ScopedLogger): SessionStore {
+/** The effective heavy-op deadline (ms) — for callers outside GuardedStore
+ *  that need the same budget (the raw readCanonical fetch). */
+export function storeHeavyTimeoutMs(): number {
+  return deadlineEnvOverrides().heavyOpTimeoutMs ?? 120_000;
+}
+
+/** Escalation policy for a wedged-beyond-recovery write path, extracted so the
+ *  gate/branch/order is unit-testable. `beforeExit` (bounded) lets the host
+ *  stop the embedded Postgres first: launchd has no cgroup kill, so a hard
+ *  exit would orphan the daemonized postmaster and the restarted fortress
+ *  boots Postgres-less. Everything else stays a HARD exit — a graceful module
+ *  drain could hang on the very wedge being escaped. */
+export function createWedgeEscalation(opts: {
+  logger?: ScopedLogger;
+  beforeExit?: () => Promise<void>;
+  beforeExitBoundMs?: number;
+  exit?: (code: number) => void;
+  supervised?: () => boolean;
+}): (info: { hadCountedSuccess: boolean }) => void {
+  const exit = opts.exit ?? ((code: number): void => process.exit(code));
+  const supervised = opts.supervised ?? ((): boolean => supervisedRestartAvailable());
+  const boundMs = opts.beforeExitBoundMs ?? 5_000;
+  return ({ hadCountedSuccess }) => {
+    // A process whose write path NEVER worked proves the wedge is not pool
+    // state — bad credentials, a deleted bucket, a regional outage — and a
+    // restart is known-futile. Exiting anyway would crash-loop Railway into
+    // its restart cap and take DOWN the reads that survive a write wedge.
+    if (!hadCountedSuccess) {
+      opts.logger?.error(
+        "store write path has never succeeded since boot — a restart cannot cure this (credentials/bucket/outage); continuing degraded",
+      );
+      return;
+    }
+    if (!supervised()) {
+      opts.logger?.error(
+        "store write path wedged beyond in-process recovery — no supervisor detected, continuing degraded (set FORTRESS_STORE_EXIT_ON_WEDGE=on to opt into exit)",
+      );
+      return;
+    }
+    opts.logger?.error(
+      "store write path wedged beyond in-process recovery — exiting for supervisor restart",
+    );
+    void (async (): Promise<void> => {
+      if (opts.beforeExit) {
+        // Bounded: stopping the embedded Postgres is loopback pg_ctl (seconds)
+        // and must never be able to hold the exit hostage to the wedge.
+        await Promise.race([
+          opts.beforeExit().catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, boundMs)),
+        ]);
+      }
+      exit(1);
+    })();
+  };
+}
+
+export function buildStore(
+  c: VaultCredentials,
+  logger?: ScopedLogger,
+  hooks?: { beforeExit?: () => Promise<void> },
+): SessionStore {
   let lastInner: SessionStore | null = null;
   const factory = (): SessionStore => {
     // Rebuild-time hygiene: shed what THIS layer can actually reach — SDK and
@@ -78,27 +140,7 @@ export function buildStore(c: VaultCredentials, logger?: ScopedLogger): SessionS
   return new GuardedStore(factory, {
     logger,
     ...deadlineEnvOverrides(),
-    onWedgedBeyondRecovery: ({ hadCountedSuccess }) => {
-      // A process whose write path NEVER worked proves the wedge is not pool
-      // state — bad credentials, a deleted bucket, a regional outage — and a
-      // restart is known-futile. Exiting anyway would crash-loop Railway into
-      // its restart cap and take DOWN the reads that survive a write wedge.
-      if (!hadCountedSuccess) {
-        logger?.error(
-          "store write path has never succeeded since boot — a restart cannot cure this (credentials/bucket/outage); continuing degraded",
-        );
-        return;
-      }
-      if (supervisedRestartAvailable()) {
-        logger?.error(
-          "store write path wedged beyond in-process recovery — exiting for supervisor restart",
-        );
-        process.exit(1);
-      }
-      logger?.error(
-        "store write path wedged beyond in-process recovery — no supervisor detected, continuing degraded (set FORTRESS_STORE_EXIT_ON_WEDGE=on to opt into exit)",
-      );
-    },
+    onWedgedBeyondRecovery: createWedgeEscalation({ logger, beforeExit: hooks?.beforeExit }),
   });
 }
 

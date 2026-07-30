@@ -38,5 +38,8 @@ VOLUME ["/data"]
 EXPOSE 8787
 USER fortress
 # FORTRESS_PUBLIC_URL + storage config supplied at runtime (-e / compose).
+# When your orchestrator restarts crashed containers (compose `restart:`, k8s),
+# set FORTRESS_STORE_EXIT_ON_WEDGE=on so a wedged storage pool self-heals via
+# a supervised restart instead of running degraded.
 # TLS terminates at the customer ingress in front of this container.
 ENTRYPOINT ["hx-fortress", "host"]

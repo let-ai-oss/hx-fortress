@@ -15,6 +15,7 @@ import {
 import { listSessionsForUser } from "../../../query/list-sessions.js";
 import { maxTunnelResultBytes } from "./limits.js";
 import { stripListTitle } from "./session-metadata.js";
+import { storeHeavyTimeoutMs } from "../store.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -232,20 +233,28 @@ export async function handleVaultRpc(
       const { url } = await store.signCanonicalDownload(req.key);
       // Low · a thrown fetch error can embed the signed URL — swallow the original
       // and surface a URL-free reason so the signed URL never reaches logs/replies.
-      let res: Response;
+      let buf: Buffer;
+      let status = 0;
       try {
         // redirect:"error" — a validated signed URL must not 3xx-redirect into a
         // private/metadata address (SSRF): a redirect makes fetch throw, which we
         // map to the URL-free network reason below (fail-closed).
         // AbortSignal.timeout — this raw fetch bypasses the store and therefore
-        // GuardedStore's deadlines; without its own bound it is the one
-        // storage-dependent hang left on the RPC path (2026-07-30 class).
-        res = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(120_000) });
+        // GuardedStore's deadlines; the signal also bounds the BODY read, so a
+        // stall mid-transfer surfaces the same URL-free typed reason instead of
+        // a raw TimeoutError. Budget mirrors the store's heavy-op deadline.
+        const res = await fetch(url, {
+          redirect: "error",
+          signal: AbortSignal.timeout(storeHeavyTimeoutMs()),
+        });
+        status = res.status;
+        if (!res.ok) throw new Error("http_status");
+        buf = Buffer.from(await res.arrayBuffer());
       } catch {
-        throw new Error("canonical_fetch_failed:network");
+        throw new Error(
+          status >= 400 ? `canonical_fetch_failed:${status}` : "canonical_fetch_failed:network",
+        );
       }
-      if (!res.ok) throw new Error(`canonical_fetch_failed:${res.status}`);
-      const buf = Buffer.from(await res.arrayBuffer());
       // Belt-and-suspenders: enforce the tunnel cap on the actual bytes too (stat
       // can be null/racey), so the base64 result never overflows the frame.
       if (buf.byteLength > maxTunnelResultBytes()) throw new Error("canonical_too_large");

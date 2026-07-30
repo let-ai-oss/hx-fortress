@@ -3,6 +3,9 @@
 // world-readable.
 
 import { capture, type RunResult } from "./exec.js";
+import { writeFile, unlink } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 type Log = (m: string) => void;
 
@@ -81,6 +84,31 @@ export async function createGcsBucket(o: GcsBucketOpts, log: Log): Promise<boole
     `gs://${o.bucket}`,
     "--soft-delete-duration=7d",
   ]);
+  // The write-path probe overwrites one `.session-vault/` object every minute;
+  // on a VERSIONED bucket each cycle strands a noncurrent generation forever
+  // without a lifecycle rule. Scoped strictly to the probe prefix — customer
+  // data is subject to no expiry. Best-effort like the hardening steps above.
+  const lifecycle = JSON.stringify({
+    rule: [
+      {
+        action: { type: "Delete" },
+        condition: { matchesPrefix: [".session-vault/"], daysSinceNoncurrentTime: 1 },
+      },
+    ],
+  });
+  const lifecycleFile = path.join(os.tmpdir(), `hx-fortress-lifecycle-${Date.now()}.json`);
+  try {
+    await writeFile(lifecycleFile, lifecycle, "utf8");
+    await capture("gcloud", [
+      "storage",
+      "buckets",
+      "update",
+      `gs://${o.bucket}`,
+      `--lifecycle-file=${lifecycleFile}`,
+    ]);
+  } finally {
+    await unlink(lifecycleFile).catch(() => {});
+  }
   return true;
 }
 
@@ -130,6 +158,26 @@ export async function createS3Bucket(o: S3BucketOpts, log: Log): Promise<boolean
     o.bucket,
     "--versioning-configuration",
     "Status=Enabled",
+  ]);
+  // Probe-prefix lifecycle — see the GCS arm: expire noncurrent probe versions
+  // and their delete markers; customer data untouched.
+  await capture("aws", [
+    "s3api",
+    "put-bucket-lifecycle-configuration",
+    "--bucket",
+    o.bucket,
+    "--lifecycle-configuration",
+    JSON.stringify({
+      Rules: [
+        {
+          ID: "hx-session-vault-probe",
+          Status: "Enabled",
+          Filter: { Prefix: ".session-vault/" },
+          NoncurrentVersionExpiration: { NoncurrentDays: 1 },
+          Expiration: { ExpiredObjectDeleteMarker: true },
+        },
+      ],
+    }),
   ]);
   const encryption = o.kmsKey
     ? `{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"${o.kmsKey}"}}]}`
