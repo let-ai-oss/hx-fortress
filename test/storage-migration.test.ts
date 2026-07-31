@@ -74,7 +74,6 @@ import type { ServiceManager } from "../src/service";
 const NOW = Date.parse("2026-07-31T12:00:00.000Z");
 const LOGGER: ScopedLogger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 const dialect = new PgDialect();
-const render = (q: SQL): string => dialect.sqlToQuery(q).sql;
 
 function key(n: number): SessionKey {
   return { userId: "u1", family: "claude-code", sessionId: `s${n}` };
