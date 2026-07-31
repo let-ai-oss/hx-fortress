@@ -43,6 +43,7 @@ import { createHxDb, type HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
+import { FileStatusReader } from "../status-reader";
 import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
@@ -607,6 +608,23 @@ export async function runFortressHost(
   const commandExecutors = createCommandExecutors({
     logger: consoleLog,
     store: () => vaultModule.getStore(),
+    cmdCredsDir: paths.cmdCreds,
+    env: process.env,
+    db: () => (postgres.isReady() ? resolveHxDb() : null),
+    // The ONLY way a rotation reaches the running daemon. A module restart
+    // would answer tunnel RPCs with an error the cloud does not classify as
+    // retryable while it was down.
+    rebindStore: () => vaultModule.rebindStore(),
+    setCloudCredential: async (credential) => {
+      const current = await credentialStore.load();
+      if (!current) throw new Error("this fortress is not enrolled, so it holds no cloud credential");
+      const updated = { ...current, credential };
+      await credentialStore.save(updated);
+      registry.setFortressIdentity(updated);
+      return updated;
+    },
+    status: () => new FileStatusReader(paths.status).read().catch(() => null),
+    embeddingEndpoint: () => (embedConfig.enabled ? embedConfig.baseUrl : null),
     downloadBaseUrl: async () => {
       const loaded = await new FileConfigStore(paths).load().catch(() => null);
       if (!loaded?.cloud.url) return null;

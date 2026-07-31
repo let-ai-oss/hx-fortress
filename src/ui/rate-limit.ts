@@ -41,6 +41,11 @@ export const BUCKETS = {
   asset: { limit: 300, windowMs: 60_000 },
   /** Keyed remote-key (loopback peers only ever reach it). */
   instanceProbe: { limit: 30, windowMs: 60_000 },
+  /** Every write the console makes: service control and every command it asks
+   *  the daemon for. Keyed remote-key. Low by design — these are operator
+   *  gestures, and a rotation or an update is not something anyone does in a
+   *  loop. */
+  control: { limit: 30, windowMs: 60_000 },
   /** The shared budget for the read class's enumerated store operations. A read
    *  route that reaches the object store is still a read, but it is the one that
    *  can be made to cost money and latency from outside. */

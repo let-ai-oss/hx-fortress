@@ -279,6 +279,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // about whether anyone is still polling.
     heartbeatAt: async () => (await status.read().catch(() => null))?.host.writtenAt ?? null,
     offered: OFFERED_COMMAND_KINDS,
+    cmdCredsDir: paths.cmdCreds,
   });
 
   const ready = Promise.all([

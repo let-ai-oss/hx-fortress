@@ -9,6 +9,7 @@
 
 import { sql } from "drizzle-orm";
 
+import { mintCredentialRef, writeCredentialRef } from "../console/cmd-creds";
 import { COMMAND_REQUEST_TTL_MS } from "../console/commands";
 import { CONTAINER_SERVICE_REFUSAL, type ConsoleWritePort, type ServiceAction, type ServiceResult } from "./mutate-routes";
 import type { CommandParams } from "../console/command-params";
@@ -26,6 +27,8 @@ export interface ConsoleWritePortOptions {
   /** The heartbeat the poller check reads. */
   heartbeatAt: () => Promise<string | null>;
   offered: readonly ConsoleCommandKind[];
+  /** Where the 0600 single-use credential files live. */
+  cmdCredsDir: string;
 }
 
 export function createConsoleWritePort(options: ConsoleWritePortOptions): ConsoleWritePort {
@@ -82,6 +85,12 @@ export function createConsoleWritePort(options: ConsoleWritePortOptions): Consol
 
     offered(): readonly ConsoleCommandKind[] {
       return options.offered;
+    },
+
+    async mintCredential(payload: unknown): Promise<string> {
+      const ref = mintCredentialRef();
+      await writeCredentialRef(options.cmdCredsDir, ref, payload);
+      return ref;
     },
 
     async submit(

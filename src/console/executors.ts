@@ -11,11 +11,28 @@
 // the SECURITY DEFINER state machine, and every kind's parameters have already
 // been validated against the per-kind shape.
 
+import { consumeCredentialRef } from "./cmd-creds";
+import { runCheckup, summarizeCheckup, type CheckupDeps } from "./checkup";
+import { readCurrentEpisode } from "./ingest-control-db";
+import {
+  applyRotation,
+  describeRotation,
+  envManagedRefusal,
+  isRotationPayload,
+  migrationInProgressRefusal,
+} from "./rotation";
 import { consoleUpdateGate } from "../host/trust/verify";
+import {
+  readVaultCredentials,
+  updateVaultCredentials,
+} from "../modules/session-vault/credentials";
+import { buildDirectStore } from "../modules/session-vault/store";
 import { runFortressUpdate } from "../update";
 import type { CommandExecutor, CommandExecutors } from "./commands";
 import type { SessionStore } from "../modules/session-vault/store/types";
-import type { ScopedLogger } from "../host/types";
+import type { HostStatusSnapshot, ScopedLogger } from "../host/types";
+import type { HxDb } from "../host/postgres/db";
+import type { CloudCredential } from "../cloud/credentials";
 import type { ServiceManager } from "../service";
 
 export interface ExecutorDeps {
@@ -26,6 +43,18 @@ export interface ExecutorDeps {
   downloadBaseUrl: () => Promise<string | null>;
   /** The daemon's own unit — the swap target is read from it. */
   service: ServiceManager;
+  /** 0600 single-use credential files, by reference id. */
+  cmdCredsDir: string;
+  /** The process environment, for the env-managed refusal. */
+  env: Record<string, string | undefined>;
+  /** The fortress database, for the pause row and the checkup's probe. */
+  db: () => HxDb | null;
+  /** Swap the live store binding onto rotated credentials. */
+  rebindStore: () => Promise<void>;
+  /** Replace the fortress's own cloud credential. */
+  setCloudCredential: (credential: string) => Promise<CloudCredential>;
+  status: () => Promise<HostStatusSnapshot | null>;
+  embeddingEndpoint: () => string | null;
   /** Called once a new binary is in place. The restart it schedules must happen
    *  AFTER the outcome record is durable, so it is a signal rather than an act:
    *  a daemon that restarted itself here would die before the record it is
@@ -40,6 +69,28 @@ export interface ExecutorDeps {
 function notCarried(kind: string): CommandExecutor {
   return async () => {
     throw new Error(`this build does not run ${kind}`);
+  };
+}
+
+/** A pause is armed and unexpired — the state a storage migration holds the
+ *  write gate in. Refusing here, by name, keeps a gated self-test from being
+ *  reported as a broken credential. */
+async function assertNotMigrating(deps: ExecutorDeps): Promise<void> {
+  const db = deps.db();
+  if (!db) return;
+  const row = await readCurrentEpisode(db).catch(() => null);
+  if (!row || row.resumedAt !== null) return;
+  if (row.pausedUntil.getTime() <= Date.now()) return;
+  throw new Error(migrationInProgressRefusal(row.id));
+}
+
+function checkupDeps(deps: ExecutorDeps): CheckupDeps {
+  return {
+    service: deps.service,
+    status: deps.status,
+    db: deps.db,
+    store: deps.store,
+    embeddingEndpoint: deps.embeddingEndpoint,
   };
 }
 
@@ -81,9 +132,52 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
       return "storage write path healthy";
     },
 
-    rotate_credentials: notCarried("rotate_credentials"),
+    /**
+     * The daemon is the single writer of credentials.json, so a rotation is a
+     * request the console makes and this answers.
+     *
+     * Ordering, and why: the env check first (a rotation the next boot would
+     * discard must not be attempted at all), the migration check second (a
+     * paused fortress refuses the SELF-TEST, and reporting that as broken
+     * credentials sends an operator re-issuing keys mid-migration), then a
+     * self-test of the CANDIDATE before the file is touched, then the write,
+     * then the rebind — which proves the new binding before adopting it.
+     */
+    rotate_credentials: async (ctx) => {
+      if (!ctx.credentialRef) {
+        throw new Error("this rotation carries no credential reference");
+      }
+      const payload = await consumeCredentialRef<unknown>(deps.cmdCredsDir, ctx.credentialRef);
+      if (!payload || !isRotationPayload(payload)) {
+        throw new Error(
+          "the rotation material was already consumed, expired or unreadable — re-issue it",
+        );
+      }
+      if (payload.target !== "cloud" && deps.env.FORTRESS_STORAGE_BUCKET?.trim()) {
+        // The OpenAI key lives in the same file, so it is refused for the same
+        // reason: the next boot rebuilds that file from the environment.
+        throw new Error(envManagedRefusal(payload.target));
+      }
+      if (payload.target === "cloud") {
+        await deps.setCloudCredential(payload.credential);
+        return describeRotation(payload, null);
+      }
+      await assertNotMigrating(deps);
+      const current = await readVaultCredentials();
+      const candidate = applyRotation(current, payload);
+      // The candidate store carries no gate and no wedge escalation on purpose:
+      // this is a probe of credentials, not of the serving path, and it must
+      // not be able to exit the process.
+      await buildDirectStore(candidate).selfTest();
+      const written = await updateVaultCredentials((existing) => applyRotation(existing, payload));
+      await deps.rebindStore();
+      return describeRotation(payload, written.credentials);
+    },
     run_migration: notCarried("run_migration"),
-    run_checkup: notCarried("run_checkup"),
+    run_checkup: async () => {
+      await assertNotMigrating(deps);
+      return summarizeCheckup(await runCheckup(checkupDeps(deps)));
+    },
     run_audit: notCarried("run_audit"),
     witness_toggle: notCarried("witness_toggle"),
     acknowledge_finding: notCarried("acknowledge_finding"),

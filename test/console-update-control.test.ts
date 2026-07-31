@@ -350,6 +350,9 @@ function fakePort(options: { refusal?: string; heartbeat?: string | null } = {})
       return options.heartbeat === undefined ? new Date().toISOString() : options.heartbeat;
     },
     offered: () => OFFERED_COMMAND_KINDS,
+    async mintCredential() {
+      return "0".repeat(32);
+    },
     async submit(kind, _params, requestedBy) {
       this.submitted.push([kind, requestedBy]);
       return { id: "00000000-0000-4000-8000-000000000000" };

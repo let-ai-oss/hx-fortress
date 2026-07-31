@@ -31,14 +31,19 @@ export const MUTATE_PATHS = {
 } as const;
 
 export const MUTATE_ROUTES: readonly RouteSpec[] = [
-  { method: "POST", path: MUTATE_PATHS.service, cls: "mutate" },
-  { method: "POST", path: MUTATE_PATHS.commands, cls: "mutate" },
+  { method: "POST", path: MUTATE_PATHS.service, cls: "mutate", bucket: "control" },
+  { method: "POST", path: MUTATE_PATHS.commands, cls: "mutate", bucket: "control" },
 ];
 
 /** The kinds this console has a control for. Later work adds its own kind here
  *  alongside the control that submits it; a kind with no control is refused by
  *  name rather than queued for an executor nothing drives. */
-export const OFFERED_COMMAND_KINDS: readonly ConsoleCommandKind[] = ["update_apply", "self_test"];
+export const OFFERED_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
+  "update_apply",
+  "self_test",
+  "rotate_credentials",
+  "run_checkup",
+];
 
 export const SERVICE_ACTIONS = ["start", "stop", "restart"] as const;
 export type ServiceAction = (typeof SERVICE_ACTIONS)[number];
@@ -74,6 +79,10 @@ export interface ConsoleWritePort {
     params: CommandParams,
     requestedBy: string,
   ): Promise<{ id: string }>;
+  /** Write a secret to its own 0600 single-use file and return the reference
+   *  the row will carry. The secret itself never reaches the row, the trail or
+   *  a log line. */
+  mintCredential(payload: unknown): Promise<string>;
   /** The kinds this console offers a control for. A kind outside it is refused
    *  by name rather than queued for an executor nothing drives. */
   offered(): readonly ConsoleCommandKind[];
@@ -138,7 +147,18 @@ export async function handleMutateRoute(
   if (path === MUTATE_PATHS.commands) {
     const body = await readBody(req);
     const kind = body?.kind;
-    const checked = validateCommandParams(kind, body?.params ?? {});
+    // The secret takes a channel of its own: it is written to a 0600 file and
+    // the row carries only its reference, so a command row is never a place a
+    // credential can be read from — by an operator, by an auditor, or by anyone
+    // holding SELECT on the table.
+    const params: Record<string, unknown> = { ...((body?.params as Record<string, unknown>) ?? {}) };
+    if (body?.secret !== undefined) {
+      if (!body.secret || typeof body.secret !== "object" || Array.isArray(body.secret)) {
+        return refusal("the rotation material must be an object");
+      }
+      params.credentialRef = await ctx.port.mintCredential(body.secret);
+    }
+    const checked = validateCommandParams(kind, params);
     if (!checked.ok) return refusal(checked.reason);
     if (!ctx.port.offered().includes(checked.kind)) {
       return refusal(`this console has no control for ${checked.kind}`, 404);

@@ -104,6 +104,14 @@ export default function Ops(): React.ReactElement {
         }}
       />
 
+      <CheckupPanel
+        container={container}
+        daemon={status.data?.daemon ?? null}
+        onSubmitted={() => commands.reload()}
+      />
+
+      <RotationPanel daemon={status.data?.daemon ?? null} onSubmitted={() => commands.reload()} />
+
       <Panel title="Version">
         <Loaded resource={version}>
           {(remote) => (
@@ -423,5 +431,185 @@ function UpdateRow(props: {
       />
       <ResultLine state={result} />
     </>
+  );
+}
+
+/** The composite health probe. Six checks, run where the handles are, reported
+ *  with the evidence each one saw. */
+function CheckupPanel(props: {
+  container: boolean;
+  daemon: string | null;
+  onSubmitted: () => void;
+}): React.ReactElement {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [busy, setBusy] = React.useState(false);
+  const reason = props.daemon !== "running" ? NO_POLLER_REFUSAL : undefined;
+
+  return (
+    <Panel
+      title="Checkup"
+      sub="Six probes, run by the daemon: its service, its own status file, Postgres, a real write to the bucket, the embedding endpoint, and the tunnel."
+    >
+      {dialog}
+      <div className="facts wide">
+        <FactRow
+          k="Run it"
+          v="Six probes"
+          vs={`One of them WRITES a probe object to the bucket and deletes it. ${COMMAND_REQUEST_NOTE}`}
+          action={
+            <MutationControl
+              label="Run checkup"
+              small
+              disabled={busy || reason !== undefined}
+              {...(reason ? { reason } : {})}
+              onClick={() => {
+                void (async () => {
+                  const ok = await ask({
+                    title: "Run the checkup?",
+                    body: "The daemon probes its own service, Postgres, the object store (a real write and delete), the embedding endpoint and the tunnel.",
+                    confirmLabel: "Run it",
+                  });
+                  if (!ok) return;
+                  setBusy(true);
+                  try {
+                    await api.submitCommand("run_checkup");
+                    showResult("Asked the daemon to run it. Each probe's verdict appears under Commands.");
+                  } catch (error) {
+                    showResult(error instanceof Error ? error.message : String(error), true);
+                  } finally {
+                    setBusy(false);
+                    props.onSubmitted();
+                  }
+                })();
+              }}
+            />
+          }
+        />
+      </div>
+      <ResultLine state={result} />
+    </Panel>
+  );
+}
+
+const ROTATION_TARGETS = [
+  {
+    key: "storage",
+    label: "Storage credentials",
+    hint: "The whole storage block, as JSON: store, bucket, region, and the inline key.",
+    placeholder: '{"store":"s3","bucket":"…","region":"…","s3":{"accessKeyId":"…","secretAccessKey":"…"}}',
+  },
+  { key: "openai", label: "Embedding key", hint: "The API key the embed worker signs with.", placeholder: "" },
+  {
+    key: "cloud",
+    label: "Cloud credential",
+    hint: "The vlc_ value from the workbench. The tunnel reconnects with it.",
+    placeholder: "vlc_…",
+  },
+] as const;
+
+/**
+ * Rotating a credential from the browser.
+ *
+ * What is typed here never reaches the command row: it is written to a 0600
+ * single-use file the daemon unlinks as it reads. Nothing is echoed back, and
+ * the field is cleared the moment it is handed over — the console holds no
+ * credential, before or after.
+ */
+function RotationPanel(props: { daemon: string | null; onSubmitted: () => void }): React.ReactElement {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [target, setTarget] = React.useState<(typeof ROTATION_TARGETS)[number]["key"]>("storage");
+  const [material, setMaterial] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const chosen = ROTATION_TARGETS.find((t) => t.key === target) ?? ROTATION_TARGETS[0];
+  const reason = props.daemon !== "running" ? NO_POLLER_REFUSAL : undefined;
+
+  const rotate = async (): Promise<void> => {
+    let secret: Record<string, unknown>;
+    if (target === "storage") {
+      try {
+        secret = { target, credentials: JSON.parse(material) as unknown };
+      } catch {
+        showResult("that is not valid JSON — paste the storage block exactly as the wizard wrote it", true);
+        return;
+      }
+    } else if (target === "openai") {
+      secret = { target, apiKey: material.trim() };
+    } else {
+      secret = { target, credential: material.trim() };
+    }
+    const ok = await ask({
+      title: `Rotate the ${chosen.label.toLowerCase()}?`,
+      body: "The daemon proves the new credential works before it writes it, and rebinds the running store onto it. A credential that does not work is refused and nothing changes.",
+      confirmLabel: "Rotate",
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.submitCommandWithSecret("rotate_credentials", secret);
+      // Cleared immediately: this console keeps nothing.
+      setMaterial("");
+      showResult("Handed it to the daemon. Its answer appears under Commands.");
+    } catch (error) {
+      showResult(error instanceof Error ? error.message : String(error), true);
+    } finally {
+      setBusy(false);
+      props.onSubmitted();
+    }
+  };
+
+  return (
+    <Panel
+      title="Credentials"
+      sub="The daemon owns these files and is the only writer. What you paste here goes to a single-use file it deletes as it reads; it never reaches the command row or the audit trail."
+    >
+      {dialog}
+      <div className="facts wide">
+        <FactRow
+          k="What to rotate"
+          v={
+            <select
+              className="rotatein"
+              value={target}
+              onChange={(e) => setTarget(e.target.value as typeof target)}
+            >
+              {ROTATION_TARGETS.map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          }
+          vs={chosen.hint}
+        />
+        <FactRow
+          k="New value"
+          v={
+            <input
+              className="rotatein"
+              type="password"
+              autoComplete="off"
+              placeholder={chosen.placeholder}
+              value={material}
+              onChange={(e) => setMaterial(e.target.value)}
+            />
+          }
+          vs={COMMAND_REQUEST_NOTE}
+          action={
+            <MutationControl
+              label="Rotate"
+              small
+              danger
+              disabled={busy || material.trim().length === 0 || reason !== undefined}
+              {...(reason ? { reason } : {})}
+              onClick={() => void rotate()}
+            />
+          }
+        />
+      </div>
+      <ResultLine state={result} />
+    </Panel>
   );
 }

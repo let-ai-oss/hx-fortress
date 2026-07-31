@@ -438,6 +438,13 @@ export const api = {
       method: "POST",
       body: { kind, params },
     }),
+  /** A command that carries material the row must never hold. The secret goes
+   *  to a 0600 single-use file on the fortress; the row gets its reference. */
+  submitCommandWithSecret: (kind: string, secret: Record<string, unknown>) =>
+    getJson<{ id: string; kind: string; status: string }>(API.commands, {
+      method: "POST",
+      body: { kind, params: {}, secret },
+    }),
   sessions: (query: Record<string, string>) =>
     getJson<SessionsPage>(`${API.sessions}?${new URLSearchParams(query).toString()}`),
   people: () => getJson<{ people: PersonRow[] }>(API.people),

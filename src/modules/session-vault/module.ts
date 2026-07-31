@@ -4,7 +4,7 @@
 
 import { handleVaultRpc, type VaultAuthz, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
-import { readVaultCredentials } from "./credentials.js";
+import { readVaultCredentials, type VaultCredentials } from "./credentials.js";
 import { buildStore, type StorePauseHooks } from "./store.js";
 import { isIngestPaused } from "../../console/pause-gate.js";
 import type { HxDb } from "../../host/postgres/db.js";
@@ -20,6 +20,22 @@ import type {
  *  gateway can presign against the same store the tunnel RPCs already use. */
 export interface SessionVaultModule extends Module {
   getStore(): SessionStore | null;
+  /**
+   * Re-read credentials.json and swap the live store binding.
+   *
+   * The ONLY way a rotation reaches the running daemon. Stopping and restarting
+   * the module instead would answer every tunnel vault RPC with "Module not
+   * running: session_vault" for the duration — an error class the cloud does not
+   * classify as retryable, so purge jobs would consume attempts and dead-letter
+   * — and a throwing init() would leave the module dead until a daemon restart
+   * while the HTTP gateway kept ingesting on the old key.
+   *
+   * The new store is PROVEN before it is bound. A failure keeps the old one,
+   * leaves the module running, and fails the rotation that asked for it: a
+   * rotation reported as done over a store that cannot write is the outcome this
+   * ordering exists to prevent.
+   */
+  rebindStore(): Promise<void>;
 }
 
 export interface SessionVaultDeps {
@@ -67,6 +83,22 @@ const PROBE_INTERVAL_MS = (() => {
 export default function createModule(deps: SessionVaultDeps = {}): SessionVaultModule {
   let store: SessionStore | null = null;
   let logger: ScopedLogger | null = null;
+
+  /**
+   * The one factory both init() and rebindStore() go through.
+   *
+   * buildStore is what INSTALLS the pause gate, the per-call deadlines and the
+   * poisoned-pool rebuild, and all three are per-instance wrappers. A rebind
+   * that constructed a backend directly would return a bare store, and every
+   * ingest route, artifact write, deleteSession and self-test would bypass
+   * ingest_control from that moment on.
+   */
+  const bindStore = (creds: VaultCredentials): SessionStore =>
+    buildStore(creds, logger ?? undefined, {
+      ...(deps.stopEmbeddedPostgres ? { beforeExit: deps.stopEmbeddedPostgres } : {}),
+      ...(deps.pause ? { pause: deps.pause } : {}),
+    });
+
   let probeTimer: ReturnType<typeof setInterval> | null = null;
   let probeBusy = false;
   let probeFailing = false;
@@ -81,16 +113,31 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       return store;
     },
 
+    async rebindStore(): Promise<void> {
+      const creds = await readVaultCredentials();
+      if (!creds) {
+        throw new Error("session-vault: no credentials.json to rebind to");
+      }
+      const next = bindStore(creds);
+      // Proven against the real bucket before anything points at it. The gate,
+      // the deadlines and the rebuild policy all ride on this object, so a
+      // candidate that cannot write must never become the binding.
+      await next.selfTest();
+      store = next;
+      logger?.info("store rebound onto rotated credentials", {
+        kind: creds.store,
+        bucket: creds.bucket,
+        version: creds.version ?? 0,
+      });
+    },
+
     async init(context: ModuleContext): Promise<void> {
       logger = context.logger;
       const creds = await readVaultCredentials();
       if (!creds) {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");
       }
-      store = buildStore(creds, context.logger, {
-        beforeExit: deps.stopEmbeddedPostgres,
-        pause: deps.pause,
-      });
+      store = bindStore(creds);
 
       const { fortressIdentity } = context;
       if (fortressIdentity) {
