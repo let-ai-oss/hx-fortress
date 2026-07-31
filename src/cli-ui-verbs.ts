@@ -18,6 +18,7 @@ import os from "node:os";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { CliAudit, cliAuditAct } from "./cli-audit";
 import { fortressPaths } from "./host/paths";
 import { readPgJson } from "./host/postgres/pg-json";
 import { generateRoleSql } from "./host/postgres/print-role-sql";
@@ -77,6 +78,7 @@ export interface UiVerbDeps {
 
 interface Ctx {
   write: (line: string) => void;
+  audit: CliAudit;
   env: Record<string, string | undefined>;
   paths: ReturnType<typeof fortressPaths>;
   usersFile: string;
@@ -103,6 +105,11 @@ function makeCtx(args: readonly string[], deps: UiVerbDeps): { ctx: Ctx; rest: s
   const usersFile = path.join(paths.uiRoot, "users.json");
   const ctx: Ctx = {
     write: deps.writeLine,
+    audit: new CliAudit({
+      dir: paths.auditSpool,
+      ...(deps.now ? { now: deps.now } : {}),
+      onWarn: (message) => deps.writeLine(`warning: the audit record was incomplete - ${message}`),
+    }),
     env: deps.env ?? process.env,
     paths,
     usersFile,
@@ -125,22 +132,30 @@ export async function runUiVerb(args: readonly string[], deps: UiVerbDeps): Prom
     await forceUnlock(ctx.paths.uiConfig);
     await forceUnlock(ctx.usersFile);
   }
-  switch (rest[0]) {
-    case "config":
-      return await configVerb(rest.slice(1), ctx);
-    case "user":
-      return await userVerb(rest.slice(1), ctx);
-    case "sso":
-      return await ssoVerb(rest.slice(1), ctx);
-    case "enable":
-      return await enableVerb(ctx);
-    case "disable":
-      return await disableVerb(ctx);
-    case "marker":
-      return await markerVerb(rest.slice(1), ctx);
-    default:
-      throw new Error(`unknown ui subcommand '${rest[0] ?? ""}'`);
-  }
+  const dispatch = async (): Promise<number> => {
+    switch (rest[0]) {
+      case "config":
+        return await configVerb(rest.slice(1), ctx);
+      case "user":
+        return await userVerb(rest.slice(1), ctx);
+      case "sso":
+        return await ssoVerb(rest.slice(1), ctx);
+      case "enable":
+        return await enableVerb(ctx);
+      case "disable":
+        return await disableVerb(ctx);
+      case "marker":
+        return await markerVerb(rest.slice(1), ctx);
+      default:
+        throw new Error(`unknown ui subcommand '${rest[0] ?? ""}'`);
+    }
+  };
+  // The record is decided HERE rather than inside each verb, so a verb added
+  // later is audited by default - the same rule the route classes follow, for
+  // the same reason. The two reading verbs are the only ones that opt out.
+  const act = cliAuditAct(rest);
+  if (!act) return await dispatch();
+  return await ctx.audit.run(act.action, act.params, dispatch);
 }
 
 // -- config ------------------------------------------------------------------

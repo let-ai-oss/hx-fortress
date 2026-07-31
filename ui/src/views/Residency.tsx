@@ -5,6 +5,7 @@ import { FactRow, Loaded, Panel, Stat } from "../components";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
+import { VerifyResidencyPanel } from "./Verify";
 
 const POSTURE_COPY: Record<string, string> = {
   fresh: "Answered by let.ai, recently.",
@@ -100,6 +101,14 @@ export default function Residency(): React.ReactElement {
           )}
         </Loaded>
       </Panel>
+
+      {page.data?.rows[0] ? (
+        <VerifyResidencyPanel
+          family={page.data.rows[0].family}
+          sessionId={page.data.rows[0].sessionId}
+          sub="A spot check against the most recent session here. Every session's own page carries the same control."
+        />
+      ) : null}
 
       <Panel
         title="Why provenance decides what can be proven"

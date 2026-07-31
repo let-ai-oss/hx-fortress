@@ -46,6 +46,9 @@ export interface AuditRow {
   action: string;
   params: unknown;
   kind: string;
+  /** The file of the intent an outcome answers. Rotation may split a pair, so
+   *  the seq alone does not identify one. */
+  refFileId: string | null;
   refSeq: number | null;
   outcome: string | null;
   error: string | null;
@@ -63,6 +66,7 @@ const AUDIT_PROJECTION = sql`
   a.action AS "action",
   a.params AS "params",
   a.kind AS "kind",
+  a.ref_file_id AS "refFileId",
   a.ref_seq AS "refSeq",
   a.outcome AS "outcome",
   a.error AS "error",
@@ -188,4 +192,76 @@ export function drainedOutcomesQuery(commandIds: readonly string[]): SQL {
   return sql`SELECT a.session_ref AS "sessionRef", a.action AS "action", a.kind AS "kind", a.params AS "params"
     FROM hx.admin_audit a
     WHERE a.kind = 'outcome' AND a.session_ref IN (${ids})`;
+}
+
+// ── The drain ───────────────────────────────────────────────────────────────
+
+/** One spool record, in the shape the table takes it. */
+export interface DrainableRecord {
+  fileId: string;
+  seq: number;
+  ts: string;
+  origin: string;
+  actor: string | null;
+  sessionRef: string | null;
+  tier: string | null;
+  action: string;
+  params: Record<string, unknown> | null;
+  kind: string;
+  refFileId: string | null;
+  refSeq: number | null;
+  outcome: string | null;
+  error: string | null;
+}
+
+/**
+ * The INSERT, idempotent on (spool_file_id, seq).
+ *
+ * ON CONFLICT DO NOTHING is what makes re-draining safe — a file is read again
+ * at every boot until the retention floor lets it go, and a crash mid-drain
+ * leaves half a file in the table. It is also why nothing may be re-appended
+ * under a key that was already written: the second version would be silently
+ * discarded, and the trail would keep the first.
+ */
+export function drainInsertQuery(records: readonly DrainableRecord[]): SQL {
+  // Every column is BOUND, including the null ones: a row whose nulls were
+  // inlined would carry a different number of placeholders from its neighbours,
+  // and the statement's shape would then depend on its contents.
+  const values = records.map(
+    (r) => sql`(${r.fileId}, ${r.seq}::bigint, ${r.ts}::timestamptz, ${r.origin}, ${r.actor},
+      ${r.sessionRef}, ${r.tier}, ${r.action},
+      ${r.params === null ? null : JSON.stringify(r.params)}::jsonb,
+      ${r.kind}, ${r.refFileId}, ${r.refSeq}::bigint, ${r.outcome}, ${r.error})`,
+  );
+  return sql`INSERT INTO hx.admin_audit
+      (spool_file_id, seq, ts, origin, actor, session_ref, tier, action, params, kind,
+       ref_file_id, ref_seq, outcome, error)
+    VALUES ${sql.join(values, sql`, `)}
+    ON CONFLICT (spool_file_id, seq) DO NOTHING`;
+}
+
+/** What is already drained from one file, for the payload comparison. Scoped to
+ *  the file rather than the whole table: the comparison runs on every drain, and
+ *  a full-table read would grow with the trail. */
+export function drainedFileQuery(fileId: string): SQL {
+  return sql`SELECT a.seq AS "seq", a.ts AS "ts", a.origin AS "origin", a.actor AS "actor",
+      a.session_ref AS "sessionRef", a.tier AS "tier", a.action AS "action", a.params AS "params",
+      a.kind AS "kind", a.ref_file_id AS "refFileId", a.ref_seq AS "refSeq",
+      a.outcome AS "outcome", a.error AS "error"
+    FROM hx.admin_audit a WHERE a.spool_file_id = ${fileId}`;
+}
+
+/** Command ids that already carry a raised integrity record. The drain raises
+ *  DISPUTED once per command; a console polling its own command list must never
+ *  be able to grow that. */
+export function disputedCommandIdsQuery(commandIds: readonly string[]): SQL {
+  if (commandIds.length === 0) {
+    return sql`SELECT NULL::text AS "sessionRef" WHERE false`;
+  }
+  const ids = sql.join(
+    commandIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  return sql`SELECT DISTINCT a.session_ref AS "sessionRef" FROM hx.admin_audit a
+    WHERE a.action = ${"console.command.disputed"} AND a.session_ref IN (${ids})`;
 }

@@ -225,13 +225,14 @@ export async function runUiCommand(
     paths,
     runtime,
     boundPort: port,
+    onWarn: (message) => write(`warning: ${message}`),
     // Under an orchestrator there is no unit to start and no binary to swap,
     // and the console says so rather than offering verbs the container hides.
     serviceManager: container.container ? "container" : getServiceManager({ platform: deps.platform }).name,
     env,
   });
   await mount.ready;
-  const ctx: UiServerCtx = { assets, port, runtime, read: mount };
+  const ctx: UiServerCtx = { assets, port, runtime, read: mount, audit: mount.audit };
   let started: { readonly port?: number | null };
   try {
     started = (deps.serve ?? startUiServer)(
@@ -250,6 +251,11 @@ export async function runUiCommand(
   }
 
   runtime.startSweepTimer();
+  // Boot is a drain trigger of its own: whatever a CLI invocation or the daemon
+  // spooled while no console was running belongs in the table now, not at the
+  // first tick 30 seconds from here.
+  mount.drain.start();
+  void mount.drain.run();
 
   const boundPort = started.port ?? port;
   const url = printedUrl({

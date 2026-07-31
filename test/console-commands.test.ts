@@ -287,7 +287,7 @@ describe("the poll pass", () => {
     const gateway = fakeGateway([row({ id: "a" })]);
     const seen: string[] = [];
     const ran: string[] = [];
-    await pollCommands({ ...deps(gateway, ran), onTransition: (r) => seen.push(r.transition) });
+    await pollCommands({ ...deps(gateway, ran), onTransition: (r) => void seen.push(r.transition) });
     expect(seen).toEqual(["claimed", "done"]);
   });
 });

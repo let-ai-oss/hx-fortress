@@ -11,6 +11,7 @@ import {
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
+import { VerifyResidencyPanel } from "./Verify";
 
 const PAGE = "50";
 
@@ -260,6 +261,8 @@ export function SessionDetail(): React.ReactElement {
               />
             </div>
           </Panel>
+
+          <VerifyResidencyPanel family={row.family} sessionId={row.sessionId} />
 
           <Panel title="Content boundary">
             <p className="saidby" style={{ maxWidth: 760 }}>

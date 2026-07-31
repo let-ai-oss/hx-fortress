@@ -77,3 +77,12 @@ export function ssoRequiresEnablement(container: boolean): string {
     ? "the console is not enabled — set FORTRESS_UI_ENABLE=1 on the service and redeploy, then run this again"
     : "the console is not enabled — run `hx-fortress ui --install-service` first, then run this again";
 }
+
+/** Stated on the audit panel. Failed public sign-ins are the one thing this
+ *  system collapses, and the open window is the only thing a crash can cost — a
+ *  console that implied otherwise would be claiming a completeness no
+ *  write-ahead spool can give. */
+export const OPEN_WINDOW_COPY =
+  "Failed sign-ins are collapsed into one record per account, source and 5-minute window, " +
+  "written when the window closes. A console that stops mid-window loses that window and " +
+  "nothing else.";

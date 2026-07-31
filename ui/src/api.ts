@@ -38,6 +38,7 @@ export const API = {
   commands: "/ui/api/commands",
   audit: "/ui/api/audit",
   spool: "/ui/api/spool",
+  verify: "/ui/api/sessions/verify",
   posture: "/ui/api/posture",
   events: EVENTS_PATH,
   report: "/ui/api/report",
@@ -350,11 +351,39 @@ export interface AuditRow {
   action: string;
   params: unknown;
   kind: string;
+  refFileId: string | null;
   refSeq: number | null;
   outcome: string | null;
   error: string | null;
   spoolFileId: string;
   seq: number;
+}
+
+/** A record as it sits in the spool, before any drain. The audit panel renders
+ *  these when Postgres is down: the trail is still being written, and a panel
+ *  that showed nothing would say the opposite. */
+export interface SpoolRecord {
+  fileId: string;
+  seq: number;
+  ts: string;
+  origin: string;
+  actor: string | null;
+  sessionRef: string | null;
+  action: string;
+  kind: string;
+  outcome: string | null;
+  error: string | null;
+}
+
+export type VerifyVerdict = "healthy" | "missing" | "mismatch" | "orphan" | "witness-unavailable";
+
+export interface VerifyResult {
+  family: string;
+  sessionId: string;
+  verdict: VerifyVerdict;
+  headline: string;
+  checks: { name: string; state: "passed" | "failed" | "not-checked"; detail: string }[];
+  proof: string[];
 }
 
 export interface SignedIn {
@@ -411,6 +440,18 @@ export const api = {
       `${API.audit}?${new URLSearchParams(query).toString()}`,
     ),
   report: () => getJson<Record<string, unknown>>(API.report),
+  spool: (limit = 100) => getJson<{ records: SpoolRecord[] }>(`${API.spool}?limit=${limit}`),
+  verify: (family: string, session: string) =>
+    getJson<VerifyResult>(
+      `${API.verify}?${new URLSearchParams({ family, session }).toString()}`,
+    ),
+  /** Acknowledging a copied proof is a read-AUDITED act: the copy left the box,
+   *  and the trail records which one. */
+  proofCopyAck: (query: Record<string, string>) =>
+    getJson<{ acknowledgedAt: string; actor: string }>(
+      `${API.proofCopyAck}?${new URLSearchParams(query).toString()}`,
+      { method: "POST" },
+    ),
 };
 
 /**

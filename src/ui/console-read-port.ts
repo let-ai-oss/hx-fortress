@@ -13,6 +13,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { readSpool } from "../console/audit-spool";
+import { redactedMessage } from "./redact";
 import type { MetricsSnapshot } from "../console/metrics";
 import {
   postureFreshness,
@@ -51,6 +52,7 @@ import {
 } from "../query/console/inventory";
 import {
   consolePageLimit,
+  consoleSessionByKeyQuery,
   consoleSessionTotalsQuery,
   consoleSessionsQuery,
   encodeConsoleCursor,
@@ -76,6 +78,7 @@ import type {
   PostureView,
 } from "./read-routes";
 import type { ReportPayload } from "./report";
+import { verifySessionResidency, type VerifyResult } from "./residency-verify";
 import { fetchRemoteFortressVersion, type RemoteVersion } from "./version-check";
 import { FORTRESS_VERSION } from "../version";
 
@@ -103,6 +106,17 @@ export interface ConsoleReadPortDeps {
   egress: () => Promise<EgressInputs>;
   /** The vault store, when one is configured. Bucket facts degrade without it. */
   store: () => SessionStore | null;
+  /** Size of one session's canonical object, or null when there is none.
+   *  Rejecting (or absent) means the store could not be asked, which the verdict
+   *  reports as unchecked rather than as absence — the two are different facts,
+   *  and only one of them is an incident. */
+  canonicalBytes?: (key: {
+    /** The store's key is the user's EXTERNAL id, which is why the row has to be
+     *  found before the bucket can be asked anything at all. */
+    userId: string;
+    family: string;
+    sessionId: string;
+  }) => Promise<number | null>;
   bucket: () => { provider: string; name: string; region: string | null } | null;
   streams: EventStreamRegistry;
   /** What an opened stream carries. */
@@ -329,6 +343,42 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
       return found.length > AUDIT_EXPORT_MAX
         ? { rows: [], truncated: true }
         : { rows: found, truncated: false };
+    },
+
+    async verifySession(key): Promise<VerifyResult> {
+      const [row] = await query<ConsoleSessionRow>(() =>
+        consoleSessionByKeyQuery(deps.universe, key),
+      );
+      const ask = deps.canonicalBytes;
+      let canonical: { bytes: number | null } | null = null;
+      let unavailable = "this console holds no handle to the object store";
+      if (!row) {
+        // The object path is keyed on the person's external id, which only the
+        // row carries. Without it there is no prefix to stat, and guessing one
+        // would turn "we could not look" into "it is not there".
+        unavailable = "there is no metadata row here to resolve the object's prefix from";
+      } else if (ask) {
+        try {
+          canonical = { bytes: await ask({ ...key, userId: row.userExternalId }) };
+        } catch (err) {
+          unavailable = redactedMessage(err);
+        }
+      }
+      return verifySessionResidency({
+        family: key.family,
+        sessionId: key.sessionId,
+        row: row
+          ? {
+              bytesUploaded: row.bytesUploaded ?? null,
+              ingestChannel: row.ingestChannel,
+              lastActivityAt: row.lastActivityAt,
+            }
+          : null,
+        ...(canonical ? { canonicalBytes: canonical.bytes } : { storeUnavailable: unavailable }),
+        // Staging chunks are composed and removed by the ingest path; nothing in
+        // the store interface lists one session's leftovers without a
+        // whole-bucket scan, so this console does not claim to have looked.
+      });
     },
 
     async spoolTail(limit) {

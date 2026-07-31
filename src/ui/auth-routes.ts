@@ -11,6 +11,8 @@
 // And a token appears in exactly one place — the JSON body of the response that
 // minted it. Never a URL, never a redirect, never a log line.
 
+import { AUDIT_ACTIONS } from "../console/audit-actions";
+import type { ConsoleAudit } from "./audit-writer";
 import {
   LOCKOUT_COPY,
   SIGN_IN_FAILURE_COPY,
@@ -54,6 +56,12 @@ export interface AuthRouteContext {
   /** The socket peer, already resolved to a rate-limit key by the gate. */
   remoteKey: string;
   remoteAddr: string;
+  /** The spool. These four are the only routes that answer before a session
+   *  exists, and they are the only public ones that reach it - the shell, the
+   *  hashed assets, /healthz and the instance probe carry no principal and no
+   *  intent, and recording them would let an unauthenticated flood grow a table
+   *  nothing deletes. */
+  audit?: ConsoleAudit;
 }
 
 /** Null when the path is not an authentication route — the caller falls through
@@ -79,6 +87,13 @@ export async function handleAuthRoute(
       remoteAddr: ctx.remoteAddr,
     });
     if (!result.ok) {
+      // A refusal by a rate bucket or by the global ceiling appends NOTHING: it
+      // is a counter, and an attempt the box refused must not be able to make it
+      // write to disk. A genuine failure joins its (login, source, window) and
+      // becomes one record when that window closes.
+      if (result.status === 401) {
+        ctx.audit?.noteFailure(AUDIT_ACTIONS.signInFailed, { login, remoteKey: ctx.remoteKey });
+      }
       return json(
         {
           error: result.status === 429 ? LOCKOUT_COPY : SIGN_IN_FAILURE_COPY,
@@ -88,6 +103,12 @@ export async function handleAuthRoute(
         retryAfter(result.retryAfterMs),
       );
     }
+    await ctx.audit?.signIn({
+      login: result.session.userLogin,
+      role: result.session.role,
+      remoteKey: ctx.remoteKey,
+      workbenchSub: result.session.workbenchSub,
+    });
     return json({
       token: result.token,
       login: result.session.userLogin,
@@ -107,6 +128,11 @@ export async function handleAuthRoute(
     if (!check.ok) return json({ error: "sign in to continue" }, 401);
     if (req.method === "DELETE") {
       runtime.sessions.revoke(check.session.id);
+      await ctx.audit?.signOut({
+        login: check.session.userLogin,
+        role: check.session.role,
+        sessionRef: check.session.id,
+      });
       return json({ signedOut: true });
     }
     return json({
@@ -125,6 +151,11 @@ export async function handleAuthRoute(
     const user = token
       ? users.users.find((u) => !u.deletedAt && !u.disabledAt && liveSetupToken(u, token, now))
       : undefined;
+    if (user) {
+      await ctx.audit?.setupOpened({ login: user.login, remoteKey: ctx.remoteKey });
+    } else {
+      ctx.audit?.noteFailure(AUDIT_ACTIONS.setupFailed, { remoteKey: ctx.remoteKey });
+    }
     // The marker renders to a token-bearing arrival only. On a plain sign-in the
     // console still says nothing about which fortress this is.
     return json(
@@ -141,13 +172,20 @@ export async function handleAuthRoute(
     const password = typeof body.password === "string" ? body.password : "";
     const policy = checkPasswordPolicy(password);
     if (policy) return json({ error: policy }, 400);
+
     try {
       // A GET must never reach here: a link-unfurling chat client would burn
       // every setup URL it previews, and the person it was sent to would find a
       // dead link and no way to tell why.
       const user = await runtime.completeSetup(token, password, ctx.remoteKey);
+      await ctx.audit?.setupCompleted({
+        login: user.login,
+        role: user.role,
+        remoteKey: ctx.remoteKey,
+      });
       return json({ completed: true, login: user.login, role: user.role });
     } catch (err) {
+      ctx.audit?.noteFailure(AUDIT_ACTIONS.setupFailed, { remoteKey: ctx.remoteKey });
       return json({ error: err instanceof Error ? err.message : "this setup link is no longer valid" }, 400);
     }
   }

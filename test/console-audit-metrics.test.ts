@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { AuditSpool, corroboratedCommandIds, readSpool } from "../src/console/audit-spool";
+import { AuditSpool, readSpool } from "../src/console/audit-spool";
+import { parseCommandOutcomes } from "../src/ui/corroboration";
 import { MetricsRegistry, writeMetrics } from "../src/console/metrics";
 import {
   drainParkedArtifacts,
@@ -46,7 +47,10 @@ describe("the audit spool", () => {
   });
 
   test("daemon-produced records are marked system origin", async () => {
-    const spool = new AuditSpool({ dir: path.join(root, "audit"), fileId: "f1" });
+    // The origin follows the WRITER rather than a field each caller remembers to
+    // set: a record whose origin says "console" for work the daemon did is a
+    // record that names the wrong actor.
+    const spool = new AuditSpool({ dir: path.join(root, "audit"), fileId: "f1", writer: "daemon" });
     const intent = await spool.intent("run_checkup");
     // The daemon role holds NO admin_audit INSERT, so these reach Postgres
     // only through the drain.
@@ -64,13 +68,29 @@ describe("the audit spool", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  test("corroboration is keyed on the command the daemon actually finished", async () => {
+  test("an intent alone corroborates nothing - only a matching outcome does", async () => {
+    // There is no id-only matcher any more, deliberately: under D7 the daemon
+    // writes its outcome record even when its complete_command call was refused
+    // because the row was already terminal, so "an outcome record exists for
+    // this id" would render an attacker's payload as corroborated success. The
+    // one predicate compares status AND payload digest.
     const dir = path.join(root, "audit");
     const spool = new AuditSpool({ dir, fileId: "f1" });
-    const intent = await spool.intent("update_apply", { sessionRef: "cmd-9" });
-    expect(corroboratedCommandIds(await readSpool(dir)).has("cmd-9")).toBe(false);
+    const intent = await spool.intent("console.command.outcome", { sessionRef: "cmd-9" });
+    const parse = async (): Promise<unknown[]> =>
+      parseCommandOutcomes(
+        (await readSpool(dir)).map((r) => ({
+          action: r.action,
+          kind: r.kind,
+          sessionRef: r.sessionRef,
+          params: r.params,
+        })),
+      );
+    expect(await parse()).toEqual([]);
     await spool.outcome(intent, "done");
-    expect(corroboratedCommandIds(await readSpool(dir)).has("cmd-9")).toBe(true);
+    // Still nothing: an outcome with no digest in its params is not a comparable
+    // record, which is what keeps a pre-digest build from corroborating anything.
+    expect(await parse()).toEqual([]);
   });
 });
 

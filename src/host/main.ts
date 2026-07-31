@@ -55,6 +55,8 @@ import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 import { drainParkedArtifacts, parkArtifact } from "../console/artifact-replay";
 import { createCommandGateway } from "../console/command-gateway";
 import { runBootFence } from "../console/commands";
+import { DaemonAudit } from "../console/daemon-audit";
+import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
 import { sweepCmdCreds } from "../console/cmd-creds";
 import { effectivePause, PauseState } from "../console/ingest-control";
 import { readCurrentEpisode } from "../console/ingest-control-db";
@@ -523,6 +525,21 @@ export async function runFortressHost(
   // REOPEN the gate under a migration that armed the pause and then lost its
   // database.
   const consoleLog = bus.scopeFor("console");
+  // The daemon's spool writer. Its general records are gated on the EFFECTIVE
+  // enablement predicate, read live so `ui enable` lands without a restart;
+  // command transitions ignore that gate entirely, because a command row
+  // existing already implies a console and a rotation performed while the
+  // console was down must still be corroborable when it comes back.
+  const uiConfigReader = new LiveUiConfig(paths.uiConfig);
+  const daemonAudit = new DaemonAudit({
+    dir: paths.auditSpool,
+    consoleEnabled: async () => effectiveUiEnabled(await uiConfigReader.read(), process.env),
+    onError: (error) =>
+      consoleLog.warn("an audit record could not be spooled", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+  });
+
   const refreshPause = async (): Promise<void> => {
     const db = resolveHxDb();
     if (!db || !postgres.isReady()) return;
@@ -562,6 +579,9 @@ export async function runFortressHost(
             replayed: result.replayed,
             failed: result.failed,
           });
+          await daemonAudit.record("system.artifact_replay", {
+            params: { engine: "artifact replay", count: result.replayed },
+          });
         }
       }
     }
@@ -584,11 +604,15 @@ export async function runFortressHost(
     const db = resolveHxDb();
     if (!db || !postgres.isReady()) return;
     try {
-      await runBootFence({
-        gateway: createCommandGateway(db),
-        inFlightPath: paths.commandsInFlight,
-        claimedBy: `${process.pid}:${randomUUID()}`,
-        logger: consoleLog,
+      await daemonAudit.run("system.command_fence", { engine: "command fence" }, async () => {
+        const fence = await runBootFence({
+          gateway: createCommandGateway(db),
+          inFlightPath: paths.commandsInFlight,
+          claimedBy: `${process.pid}:${randomUUID()}`,
+          logger: consoleLog,
+          onTransition: daemonAudit.onTransition,
+        });
+        return fence;
       });
     } catch (err) {
       consoleLog.error("console command boot fence failed", {

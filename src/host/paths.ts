@@ -74,8 +74,12 @@ export function fortressPaths(root = defaultFortressRoot()) {
     pauseAnchor: path.join(runtime, "pause-anchor.json"),
     /** 0600 single-use credential files referenced by command params. */
     cmdCreds: path.join(runtime, "cmd-creds"),
-    /** Append-only audit spool, drained into Postgres as hx_ui. */
-    auditSpool: path.join(runtime, "audit-spool"),
+    /** Append-only audit spool, drained into Postgres as hx_ui. It sits under
+     *  the console's own directory rather than the daemon's: the ui server, the
+     *  daemon and every CLI invocation write here, and the drain, the rotation
+     *  and the retention floor are all the console's. Same 0700 rule either way
+     *  - one owning user, no group, no second uid. */
+    auditSpool: path.join(ui, "spool"),
     postgresRoot: postgres,
     postgresCache: path.join(postgres, "cache"),
     postgresSocket: path.join(postgres, "socket"),

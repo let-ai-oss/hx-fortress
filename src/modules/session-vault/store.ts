@@ -169,6 +169,18 @@ export function buildStore(
     : guarded;
 }
 
+/**
+ * The backend alone: no retry/rebuild guard, no wedge escalation, no pause gate.
+ *
+ * The console uses this for the enumerated read-only operations of its read
+ * class. It must NOT take the guarded store: that one escalates a wedged bucket
+ * by exiting the process under a supervisor, and the console is the surface an
+ * operator opens BECAUSE something is wedged. Callers here bound their own calls.
+ */
+export function buildDirectStore(c: VaultCredentials): SessionStore {
+  return buildInnerStore(c);
+}
+
 function buildInnerStore(c: VaultCredentials): SessionStore {
   if (c.store === "gcs") {
     if (!c.projectId) {

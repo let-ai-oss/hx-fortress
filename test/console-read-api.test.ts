@@ -48,6 +48,7 @@ import { EventStreamRegistry, EVENTS_PER_SESSION_CAP } from "../src/ui/events";
 import { Glob } from "bun";
 import { AUDIT_RETENTION_LINE, logRetentionLine, readIdentityFacts } from "../src/ui/identity";
 import { renderPdf } from "../src/ui/pdf";
+import { verifySessionResidency } from "../src/ui/residency-verify";
 import { redactCredentials, redactValue, REDACTED } from "../src/ui/redact";
 import { reportLines, REPORT_TITLE } from "../src/ui/report";
 import {
@@ -239,6 +240,8 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
     audit: async () => ({ rows: [] }),
     auditExport: async () => ({ rows: [], truncated: false }),
     spoolTail: async () => [],
+    verifySession: async (key) =>
+      verifySessionResidency({ ...key, row: null, storeUnavailable: "no store in this test" }),
     posture: async () => ({
       state: "unavailable",
       asOf: null,
@@ -317,8 +320,11 @@ describe("effect classes", () => {
       },
     };
     for (const path of Object.values(READ_PATHS)) {
+      // The verify route names one session; without it there is nothing to
+      // verify, and the refusal is the answer.
+      const query = path === READ_PATHS.verify ? "?family=claude-cli&session=s1" : "";
       const res = await handleReadRoute(
-        new Request(`http://console.local${path}`),
+        new Request(`http://console.local${path}${query}`),
         ctxFor(port, { exports: [] }, exploding),
       );
       expect([path, res?.status]).toEqual([path, path === READ_PATHS.events ? 429 : 200]);

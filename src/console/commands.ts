@@ -75,8 +75,10 @@ export interface BootFenceDeps {
   logger?: ScopedLogger;
   clock?: () => Date;
   /** Called for every transition the daemon actually performs, so the console
-   *  can render an outcome as CORROBORATED rather than merely reported. */
-  onTransition?: (record: TransitionRecord) => void;
+   *  can render an outcome as CORROBORATED rather than merely reported. AWAITED:
+   *  the claim record has to reach disk before the work it authorizes starts,
+   *  and the outcome record before the poll moves on. */
+  onTransition?: (record: TransitionRecord) => void | Promise<void>;
 }
 
 /** The fence needs no executors — it only closes rows out. Keeping the two
@@ -90,7 +92,17 @@ export interface TransitionRecord {
   id: string;
   kind: string;
   transition: "claimed" | "done" | "failed" | "rejected";
+  /** Exactly what the daemon reported to the routine — the payload the console
+   *  digests off the row and compares against. */
+  outcome?: string | null;
+  error?: string | null;
+  /** The reason a rejection carried, which the routine writes into `error`. */
   reason?: string;
+  /** FALSE when the routine refused the transition because the row was already
+   *  terminal. The record is written anyway: somebody else having driven the row
+   *  terminal is the tamper evidence, and a daemon that stayed silent about it
+   *  would leave the console nothing to dispute with. */
+  accepted: boolean;
   at: string;
 }
 
@@ -132,20 +144,21 @@ export async function runBootFence(deps: BootFenceDeps): Promise<{
       if (row.credentialRef) {
         // The credential file is unlinked as it is read, so a crash after that
         // read leaves nothing to run with. Terminal, audited, never re-driven.
-        if (await deps.gateway.complete(row.id, "failed", null, FAIL_CREDENTIAL_CONSUMED)) {
-          failed.push(row.id);
-          record(deps, row, "failed", FAIL_CREDENTIAL_CONSUMED);
-        }
+        const accepted = await deps.gateway.complete(row.id, "failed", null, FAIL_CREDENTIAL_CONSUMED);
+        if (accepted) failed.push(row.id);
+        await record(deps, row, "failed", { accepted, error: FAIL_CREDENTIAL_CONSUMED });
         await removeInFlight(deps.inFlightPath, row.id);
         continue;
       }
       redriven.push(row.id);
       continue;
     }
-    if (await deps.gateway.reject(row.id, REJECT_BOOT_FENCE)) {
-      rejected.push(row.id);
-      record(deps, row, "rejected", REJECT_BOOT_FENCE);
-    }
+    const accepted = await deps.gateway.reject(row.id, REJECT_BOOT_FENCE);
+    if (accepted) rejected.push(row.id);
+    // Written whether or not the routine accepted it. A refusal means the row
+    // was already terminal when this daemon reached it, and the console can only
+    // tell that from a fabrication if the daemon says what it tried to do.
+    await record(deps, row, "rejected", { accepted, reason: REJECT_BOOT_FENCE });
     await removeInFlight(deps.inFlightPath, row.id);
   }
   if (rejected.length > 0 || failed.length > 0 || redriven.length > 0) {
@@ -158,17 +171,24 @@ export async function runBootFence(deps: BootFenceDeps): Promise<{
   return { redriven, rejected, failed };
 }
 
-function record(
+interface TransitionFields {
+  accepted: boolean;
+  reason?: string;
+  outcome?: string | null;
+  error?: string | null;
+}
+
+async function record(
   deps: BootFenceDeps,
   row: CommandRow,
   transition: TransitionRecord["transition"],
-  reason?: string,
-): void {
-  deps.onTransition?.({
+  fields: TransitionFields,
+): Promise<void> {
+  await deps.onTransition?.({
     id: row.id,
     kind: row.kind,
     transition,
-    ...(reason ? { reason } : {}),
+    ...fields,
     at: (deps.clock ?? ((): Date => new Date()))().toISOString(),
   });
 }
@@ -195,26 +215,27 @@ export async function pollCommands(
     // A future requested_at is also refused by claim itself; rejecting here as
     // well means the row does not sit in the queue until that time arrives.
     if (row.requestedAt.getTime() > now.getTime()) {
-      if (await deps.gateway.reject(row.id, REJECT_DEADLINE)) {
-        record(deps, row, "rejected", REJECT_DEADLINE);
-        handled += 1;
-      }
+      const accepted = await deps.gateway.reject(row.id, REJECT_DEADLINE);
+      await record(deps, row, "rejected", { accepted, reason: REJECT_DEADLINE });
+      if (accepted) handled += 1;
       continue;
     }
     const deadline = row.deadlineAt ?? new Date(row.requestedAt.getTime() + COMMAND_REQUEST_TTL_MS);
     if (deadline.getTime() <= now.getTime()) {
-      if (await deps.gateway.reject(row.id, REJECT_DEADLINE)) {
-        record(deps, row, "rejected", REJECT_DEADLINE);
-        handled += 1;
-      }
+      const accepted = await deps.gateway.reject(row.id, REJECT_DEADLINE);
+      await record(deps, row, "rejected", { accepted, reason: REJECT_DEADLINE });
+      if (accepted) handled += 1;
       continue;
     }
     const checked = validateCommandParams(row.kind, row.params);
     if (!checked.ok) {
-      if (await deps.gateway.reject(row.id, `${REJECT_INVALID_PARAMS}: ${checked.reason}`)) {
-        record(deps, row, "rejected", checked.reason);
-        handled += 1;
-      }
+      // The recorded reason is the WHOLE string the routine wrote into the row.
+      // A record carrying only the tail would digest differently from the row it
+      // describes, and every invalid-params rejection would read as disputed.
+      const why = `${REJECT_INVALID_PARAMS}: ${checked.reason}`;
+      const accepted = await deps.gateway.reject(row.id, why);
+      await record(deps, row, "rejected", { accepted, reason: why });
+      if (accepted) handled += 1;
       continue;
     }
     // The file entry is written BEFORE execution: a crash one instruction later
@@ -225,22 +246,22 @@ export async function pollCommands(
       await removeInFlight(deps.inFlightPath, row.id);
       continue;
     }
-    record(deps, row, "claimed");
+    // The claim record is fsynced BEFORE the executor runs: an intent that never
+    // reached disk describes work the console can never corroborate.
+    await record(deps, row, "claimed", { accepted: true });
     try {
       const outcome = await deps.executors[checked.kind]({
         id: row.id,
         params: checked.params,
         credentialRef: row.credentialRef,
       });
-      if (await deps.gateway.complete(row.id, "done", outcome, null)) {
-        record(deps, row, "done");
-      }
+      const accepted = await deps.gateway.complete(row.id, "done", outcome, null);
+      await record(deps, row, "done", { accepted, outcome });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       deps.logger?.error("console command failed", { id: row.id, kind: row.kind, error: message });
-      if (await deps.gateway.complete(row.id, "failed", null, message)) {
-        record(deps, row, "failed", message);
-      }
+      const accepted = await deps.gateway.complete(row.id, "failed", null, message);
+      await record(deps, row, "failed", { accepted, error: message });
     } finally {
       await removeInFlight(deps.inFlightPath, row.id);
     }

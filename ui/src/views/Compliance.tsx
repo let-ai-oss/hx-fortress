@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 
 import { API, api, downloadFromServer, type DataPathRow } from "../api";
+import { AuditTrailPanel } from "./AuditTrail";
 import { FactRow, Loaded, Panel, ResultLine, useResultLine } from "../components";
 import { RETENTION_LABELS } from "../copy";
 import { useResource } from "../hooks";
@@ -140,6 +141,8 @@ export default function Compliance(): React.ReactElement {
           </>
         ) : null}
       </Panel>
+
+      <AuditTrailPanel active={active} />
     </section>
   );
 }

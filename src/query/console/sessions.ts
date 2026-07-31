@@ -189,3 +189,16 @@ export interface ConsoleSessionTotals {
   gateway: number;
   unknownProvenance: number;
 }
+
+/** One session, by the two things its storage key is made of. Same projection
+ *  as the list, so the detail page and the verify dialog read one shape. */
+export function consoleSessionByKeyQuery(
+  universe: ConsoleUniverse,
+  key: { family: string; sessionId: string },
+): SQL {
+  return sql`SELECT ${PROJECTION} ${FROM}
+    WHERE ${consoleUniversePredicate(universe)}
+      AND s.family = ${key.family}
+      AND s.session_id = ${key.sessionId}
+    LIMIT 1`;
+}

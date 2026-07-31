@@ -32,6 +32,7 @@ import {
 import { EVENTS_PATH, type EventStreamRegistry, type OpenStreamVerdict } from "./events";
 import { redactValue } from "./redact";
 import { renderPdf } from "./pdf";
+import type { VerifyResult } from "./residency-verify";
 import { reportLines, REPORT_TITLE, type ReportPayload } from "./report";
 import type { RouteSpec } from "./routes";
 import type { DataPathRow } from "./egress";
@@ -67,6 +68,10 @@ export const READ_PATHS = {
   commands: "/ui/api/commands",
   audit: "/ui/api/audit",
   spool: "/ui/api/spool",
+  /** One session's residency proof. A read: it asks Postgres and the object
+   *  store what is there and writes nothing. The ACKNOWLEDGEMENT of a copied
+   *  proof is the audited half, and it is a route of its own. */
+  verify: "/ui/api/sessions/verify",
   posture: "/ui/api/posture",
   events: EVENTS_PATH,
 } as const;
@@ -91,7 +96,14 @@ export const READ_AUDITED_ROUTE_IDS: readonly string[] = [
 ];
 
 export const READ_ROUTES: readonly RouteSpec[] = [
-  ...Object.values(READ_PATHS).map((path) => ({ method: "GET" as const, path, cls: "read" as const })),
+  ...Object.values(READ_PATHS).map((path) => ({
+    method: "GET" as const,
+    path,
+    cls: "read" as const,
+    // Only the route that reaches the object store draws from a budget: the
+    // others answer from this host alone.
+    ...(path === READ_PATHS.verify ? { bucket: "storeOp" as const } : {}),
+  })),
   { method: "GET", path: READ_AUDITED_PATHS.report, cls: "read-audited" },
   { method: "GET", path: READ_AUDITED_PATHS.reportPdf, cls: "read-audited" },
   { method: "GET", path: READ_AUDITED_PATHS.logsExport, cls: "read-audited" },
@@ -187,6 +199,7 @@ export interface ConsoleReadPort {
   audit(range: ExportRange & { limit?: number; cursor?: string }): Promise<{ rows: AuditRow[]; nextCursor?: string }>;
   auditExport(range: ExportRange): Promise<{ rows: AuditRow[]; truncated: boolean }>;
   spoolTail(limit: number): Promise<unknown[]>;
+  verifySession(key: { family: string; sessionId: string }): Promise<VerifyResult>;
   posture(): Promise<PostureView>;
   logsExport(range: ExportRange & { lines?: number }): Promise<string>;
   report(): Promise<ReportPayload>;
@@ -324,6 +337,12 @@ export async function handleReadRoute(
       }
       case READ_PATHS.spool:
         return json({ records: await port.spoolTail(positiveInt(url.searchParams.get("limit"), 100, 500)) });
+      case READ_PATHS.verify: {
+        const family = url.searchParams.get("family");
+        const sessionId = url.searchParams.get("session");
+        if (!family || !sessionId) return refusal("family and session are both required");
+        return json(await port.verifySession({ family, sessionId }));
+      }
       case READ_PATHS.posture:
         return json(await port.posture());
       case READ_PATHS.events: {
@@ -432,12 +451,27 @@ export async function handleReadRoute(
       what: "proof-copy ack",
       actor: ctx.actor,
       sessionRef: ctx.sessionId,
-      params: { ...parsed.range, acknowledgedAt },
+      // A residency proof is about ONE session, so the record names it. Without
+      // that the trail could say a proof was copied but not of what, which is
+      // the same gap that makes an unparameterized export record useless.
+      params: { ...parsed.range, ...proofSubject(url.searchParams), acknowledgedAt },
     });
     return json({ acknowledgedAt, actor: ctx.actor });
   }
 
   return null;
+}
+
+/** The session a copied proof was about, when the caller named one. Bounded and
+ *  copied verbatim - these are recorded, and a recorded field is not a place to
+ *  put an unbounded string. */
+function proofSubject(query: URLSearchParams): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of ["family", "session", "verdict"] as const) {
+    const value = query.get(key);
+    if (value !== null && value.length > 0 && value.length <= 200) out[key] = value;
+  }
+  return out;
 }
 
 /** Attach the corroboration verdict and its copy. Computed here, never stored:

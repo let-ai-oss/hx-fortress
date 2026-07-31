@@ -25,6 +25,7 @@
 
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
+import type { ConsoleAudit } from "./audit-writer";
 import { handleAuthRoute } from "./auth-routes";
 import { handleReadRoute, type ConsoleExportAudit, type ConsoleReadPort } from "./read-routes";
 import { normalizeAddress } from "./remote-key";
@@ -42,6 +43,9 @@ export interface UiServerCtx {
    *  which case those paths answer 404 to a signed-in caller and 401 to
    *  everyone else - never the app shell. */
   read?: { port: ConsoleReadPort; audit: ConsoleExportAudit };
+  /** The spool writer. Absent in the asset-only unit tests, where nothing
+   *  authenticates and so nothing is recorded. */
+  audit?: ConsoleAudit;
 }
 
 // script-src carries exact hashes of any inline script in the shell instead of
@@ -261,6 +265,7 @@ export function startUiServer(
       runtime,
       remoteKey: verdict.remoteKey,
       remoteAddr: peer ?? "",
+      ...(ctx.audit ? { audit: ctx.audit } : {}),
     });
     if (authenticated) return finish(authenticated, "no-store", csp, hsts);
 

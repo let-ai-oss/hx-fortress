@@ -23,8 +23,13 @@
 import { readFile } from "node:fs/promises";
 
 import { FileCredentialStore, type CloudCredential } from "../cloud/credentials";
-import { readVaultCredentials } from "../modules/session-vault/credentials";
+import { redactedMessage } from "./redact";
+import { readVaultCredentials, type VaultCredentials } from "../modules/session-vault/credentials";
+import { buildDirectStore } from "../modules/session-vault/store";
+import type { SessionStore } from "../modules/session-vault/store/types";
 import { AuditSpool } from "../console/audit-spool";
+import { AuditDrain } from "./audit-drain";
+import { ConsoleAudit } from "./audit-writer";
 import { parseFortressConfig } from "../host/config";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
@@ -38,8 +43,12 @@ import { createConsoleReadPort } from "./console-read-port";
 import type { UiConfig } from "./config";
 import type { EgressInputs } from "./egress";
 import { createLogEventProducer } from "./log-events";
-import type { ConsoleExportAudit, ConsoleReadPort } from "./read-routes";
+import type { ConsoleReadPort } from "./read-routes";
 import type { UiRuntime } from "./runtime";
+
+/** How long one read-class store operation may take before it is a failure the
+ *  page reports. */
+const STORE_OP_TIMEOUT_MS = 10_000;
 
 export interface ConsoleMountOptions {
   paths: ReturnType<typeof fortressPaths>;
@@ -50,43 +59,24 @@ export interface ConsoleMountOptions {
    *  or the orchestrator that supervises this container. */
   serviceManager: string;
   env?: Record<string, string | undefined>;
+  /** Where a spool or drain failure is reported. Neither ever throws at a
+   *  request: a console that refused to serve because it could not record would
+   *  take the fortress's only diagnosis surface down with it. */
+  onWarn?: (message: string) => void;
 }
 
 export interface ConsoleMount {
   port: ConsoleReadPort;
-  audit: ConsoleExportAudit;
+  /** The console's own spool writer: exports, sign-ins, and the two records the
+   *  drain raises about the trail itself. */
+  audit: ConsoleAudit;
+  /** Spool into Postgres at boot, at the first recovery, and on a timer. */
+  drain: AuditDrain;
   /** Resolves once the facts that are read from disk are in hand. Awaited before
    *  the console binds, so the FIRST page a browser gets is answered with the
    *  same truth as the tenth — an enrolled fortress must never render "not
    *  enrolled" for one poll because a file read had not finished. */
   ready: Promise<void>;
-}
-
-/**
- * The export record.
- *
- * It is a PAIR, and the intent half is fsynced before the read runs. A record
- * written only on success would be missing for exactly the copies that matter —
- * the ones that failed halfway, after bytes had already been read.
- */
-function exportAudit(spoolDir: string): ConsoleExportAudit {
-  const spool = new AuditSpool({ dir: spoolDir });
-  return {
-    async recordExport(entry) {
-      await spool.append({
-        actor: entry.actor,
-        sessionRef: entry.sessionRef,
-        tier: null,
-        action: `console.export.${entry.what.replaceAll(" ", "_")}`,
-        params: entry.params,
-        kind: "intent",
-        refSeq: null,
-        outcome: null,
-        error: null,
-        origin: "console",
-      });
-    },
-  };
 }
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -100,6 +90,17 @@ async function readJson<T>(file: string): Promise<T | null> {
 export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
   const { paths, runtime } = options;
   const env = options.env ?? process.env;
+  // This process's own spool file. An open collapsed failure window is closed
+  // before the file is retired, so its record lands in the file that covers the
+  // window rather than the next one.
+  const spool: AuditSpool = new AuditSpool({
+    dir: paths.auditSpool,
+    writer: "ui",
+    beforeRotate: (): Promise<void> => audit.flushFailures(true).then(() => undefined),
+  });
+  const audit: ConsoleAudit = new ConsoleAudit(spool, {
+    onError: (error) => options.onWarn?.(redactedMessage(error)),
+  });
   const status = new FileStatusReader(paths.status);
   const service = getServiceManager();
   const credentialStore = new FileCredentialStore(paths.credentials);
@@ -107,6 +108,13 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
   let handle: { db: HxDb; dsn: string } | null = null;
   let databaseState: ConsoleDbState = { kind: "not-configured" };
   let resolving: Promise<void> | null = null;
+  const drain = new AuditDrain({
+    dir: paths.auditSpool,
+    db: () => handle?.db ?? null,
+    audit,
+    currentFileId: () => spool.currentFileId,
+    onWarn: (message, fields) => options.onWarn?.(`${message}: ${JSON.stringify(fields)}`),
+  });
 
   /** Resolve coordinates and open a handle, at most once at a time. A failure
    *  leaves the classified state behind and lets the next call try again. */
@@ -131,8 +139,13 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       // A handle is not a connection: prove it before a page renders as though
       // the database answered.
       await db.execute("SELECT 1" as never);
+      const recovered = handle === null;
       handle = { db, dsn: state.dsn };
       databaseState = state;
+      // FIRST RECOVERY is its own drain trigger: everything spooled while
+      // Postgres was down belongs in the table as soon as it comes back, not up
+      // to 30 seconds later.
+      if (recovered) void drain.run();
     } catch (err) {
       handle = null;
       databaseState = classifyConnectError(err);
@@ -151,10 +164,36 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
    *  holds. Mutated in place so the predicate follows an enrollment that
    *  completes while the console is already serving. */
   const universe = { orgExternalId: "" };
+  let vaultCredentials: VaultCredentials | null = null;
+  let directStore: SessionStore | null = null;
   let vaultBucket: { provider: string; name: string; region: string | null } | null = null;
   let downloadBase: string | null = null;
 
   const bucket = (): { provider: string; name: string; region: string | null } | null => vaultBucket;
+
+  /** One object's size, for the per-session residency proof. Bounded here rather
+   *  than by the store: a bucket that stops answering must cost this request a
+   *  named failure, never the console's availability. */
+  const canonicalBytes = async (key: {
+    family: string;
+    sessionId: string;
+    userId: string;
+  }): Promise<number | null> => {
+    if (!vaultCredentials) throw new Error("this fortress has no object-store credential");
+    directStore ??= buildDirectStore(vaultCredentials);
+    const store = directStore;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        store.statCanonical(key),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("the object store did not answer in time")), STORE_OP_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
 
   const cloudUrl = async (): Promise<string | null> => {
     const raw = await readJson<unknown>(paths.config);
@@ -212,6 +251,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // bucket-write-capable credential the daemon holds, for facts it can report
     // honestly as unreadable instead.
     store: () => null,
+    canonicalBytes,
     bucket,
     streams: runtime.streams,
     producer: createLogEventProducer({ logPath: paths.log, env }),
@@ -231,6 +271,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     readVaultCredentials()
       .then((creds) => {
         if (creds) {
+          vaultCredentials = creds;
           vaultBucket = { provider: creds.store, name: creds.bucket, region: creds.region ?? null };
         }
       })
@@ -242,7 +283,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }),
   ]).then(() => undefined);
 
-  return { port, audit: exportAudit(paths.auditSpool), ready };
+  return { port, audit, drain, ready };
 }
 
 function hostOf(dsn: string): string {

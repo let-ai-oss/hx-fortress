@@ -41,6 +41,10 @@ export const BUCKETS = {
   asset: { limit: 300, windowMs: 60_000 },
   /** Keyed remote-key (loopback peers only ever reach it). */
   instanceProbe: { limit: 30, windowMs: 60_000 },
+  /** The shared budget for the read class's enumerated store operations. A read
+   *  route that reaches the object store is still a read, but it is the one that
+   *  can be made to cost money and latency from outside. */
+  storeOp: { limit: 60, windowMs: 60_000 },
 } as const satisfies Record<string, BucketPolicy>;
 
 export type BucketName = keyof typeof BUCKETS;

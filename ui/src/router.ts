@@ -110,7 +110,7 @@ const SEGMENT_VIEW: Record<string, ViewName> = {
 export const BOOTSTRAP_PATH = "/sso/bootstrap";
 
 const ANCHORS: Partial<Record<ViewName, readonly string[]>> = {
-  compliance: ["paths", "retention"],
+  compliance: ["paths", "retention", "trail"],
   ops: ["commands", "cli"],
 };
 
