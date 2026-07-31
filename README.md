@@ -655,3 +655,6 @@ bun run lint
 ```
 
 Use `bun run check` to run all repository checks in the same order as CI.
+
+Cutting a release — and the order the three repositories have to ship in —
+is [RELEASING.md](RELEASING.md).
