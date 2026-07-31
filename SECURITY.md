@@ -169,6 +169,61 @@ answer who in the organization is covered, and suppressing them would be
 theatre against an operator who has root on the box. The boundary is who gets
 an account.
 
+## The daemon runtime plane
+
+Everything the console asks the daemon to do is a row in `hx.console_commands`,
+and the two processes reach that table with different authority.
+
+The console's role, `hx_ui`, is the only one that may `INSERT` there. The
+daemon's role, `hx_app_rw`, is the one every cloud-reachable path runs as — the
+tunnel, the gateway, each ingest entry point — and it holds no `INSERT`, no
+`UPDATE` and no `DELETE` on that table at all. The same revoke covers
+`hx.admin_audit`, `hx.audit_acks`, `hx.audit_settings` and `hx.ingest_control`.
+An adversary who reaches that role over the network therefore cannot ask this
+host to update itself, rotate a credential, move its storage or acknowledge a
+residency finding: the row that would carry the request is one it cannot write.
+
+The daemon still has to move rows it did not mint — claim one, finish it, reject
+it — and it does that through five `SECURITY DEFINER` routines:
+
+| Routine | What it may do |
+| --- | --- |
+| `hx.claim_command` | `requested` → `running`, or re-drive a row this daemon already had in flight |
+| `hx.complete_command` | `running` → `done` or `failed`, and nothing else |
+| `hx.reject_command` | non-terminal → `rejected` |
+| `hx.acknowledge_finding` | write one residency acknowledgement |
+| `hx.set_cloud_witness` | flip the cloud-witness setting |
+
+Each enforces a one-way state machine — a terminal row is final, and no argument
+shape moves it back — and none can change a row's `kind`, its parameters or its
+requested time. `EXECUTE` is revoked from `PUBLIC` in the same transaction that
+creates each routine, and granted to `hx_app_rw` alone.
+
+They are owned by `hx_cmd_owner`, a `NOLOGIN` role created for this and nothing
+else, and deliberately not the cluster superuser: a `SECURITY DEFINER` body runs
+with its owner's rights, so a superuser-owned routine would turn a defect in a
+body into control of the cluster, and the caller here is the one principal this
+fence exists to constrain. Each routine pins
+`search_path = pg_catalog, pg_temp` and schema-qualifies every reference,
+because an unqualified name in such a body otherwise resolves through the
+*caller's* search path. `hx_cmd_owner` holds `SELECT, UPDATE` on the command
+queue and `SELECT, INSERT, UPDATE` on the two audit tables — no `INSERT` on the
+queue, so minting stays with the console — and it is a member of nothing and has
+no members.
+
+The role, the routines, the ownership, the `PUBLIC` revoke and the grants are
+re-applied on every boot rather than written once by a migration. A migration
+runs before the role it would grant to exists, aborts an upgrade on an external
+Postgres whose operator role cannot take ownership, and — the journal being
+keyed by name — could never correct a routine it had already recorded. The same
+boot drops stale overloads: `CREATE OR REPLACE` is keyed on the argument types,
+so a changed signature would leave the previous routine alive, still owned and
+still granted, still enforcing the previous state machine. Every property in
+this section is asserted against the live catalog on the second boot.
+
+All of it is embedded-Postgres only; see **Console containment is
+EMBEDDED-Postgres only** below.
+
 ## Rate limiting, lockout, and the load ceilings
 
 - Sign-in counters are keyed on `(login, remote-key)`. A lockout is never
@@ -215,15 +270,19 @@ Exactly two routes, and one acknowledgement:
 
 - `POST /ui/api/service` — start, stop or restart the daemon's unit.
 - `POST /ui/api/commands` — mint one row in the command queue, whose `kind` must
-  be one of the seven the console offers a control for.
+  be one of the eight the console offers a control for.
 - `POST /ui/api/report/proof-copy` — record that a residency proof was copied.
 
 There is no configuration-write endpoint under any spelling, no account
-management, and no way to hand the console a credential. Configuration, account
-lifecycle, SSO advertisement and credential replacement are terminal verbs, and
-the command plane refuses a configuration key as a parameter. The storage
-migration is in the command plane but is deliberately **not** offered to the
-browser.
+management, and no way to change what this console itself is configured with.
+Configuration, account lifecycle and SSO advertisement are terminal verbs, and
+the command plane refuses a configuration key as a parameter.
+
+A credential a command needs — the storage migration's target keys, a rotation's
+replacement — never travels in the row. The request body carries it once, the
+console writes it to a single-use `0600` file, and the row carries a 32-hex
+reference the daemon reads and unlinks in one step. The row is durable and
+readable by everything holding `SELECT`; the secret it points at is neither.
 
 ## Where the audit trail lives
 
