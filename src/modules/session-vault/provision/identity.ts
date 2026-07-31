@@ -2,7 +2,7 @@
 // own gcloud/aws. The minted credential is returned for inlining into
 // credentials.json; it never leaves the host.
 
-import { readFile, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { capture } from "./exec.js";
@@ -51,29 +51,36 @@ export async function createGcsServiceAccount(
     return null;
   }
 
-  // gcloud writes the key to a file (never stdout); read it, inline it, delete it.
-  const tmp = path.join(os.tmpdir(), `hx-session-vault-key-${Date.now()}.json`);
-  const key = await capture("gcloud", [
-    "iam",
-    "service-accounts",
-    "keys",
-    "create",
-    tmp,
-    `--iam-account=${email}`,
-    `--project=${o.project}`,
-  ]);
-  if (!key.ok) {
-    log(`Key creation failed: ${key.stderr}`);
-    return null;
-  }
+  // gcloud writes the key to a file (never stdout). It goes in a PRIVATE
+  // (0700, unpredictable) mkdtemp directory, never a predictable shared-/tmp
+  // name: the file briefly holds a LIVE service-account key, so a predictable
+  // path is a symlink target for gcloud's write, a read race for any local
+  // user, and a content-swap source for what gets inlined into
+  // credentials.json (same js/insecure-temporary-file class as the
+  // lifecycle-file fix; the 0700 directory shields the key regardless of the
+  // mode gcloud gives the file).
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-key-"));
+  const tmp = path.join(tmpDir, "sa-key.json");
   try {
-    const json = JSON.parse(await readFile(tmp, "utf8")) as GcsServiceAccountKey;
-    await unlink(tmp).catch(() => {});
-    return json;
+    const key = await capture("gcloud", [
+      "iam",
+      "service-accounts",
+      "keys",
+      "create",
+      tmp,
+      `--iam-account=${email}`,
+      `--project=${o.project}`,
+    ]);
+    if (!key.ok) {
+      log(`Key creation failed: ${key.stderr}`);
+      return null;
+    }
+    return JSON.parse(await readFile(tmp, "utf8")) as GcsServiceAccountKey;
   } catch (e) {
-    await unlink(tmp).catch(() => {});
     log(`Could not read minted key: ${String(e)}`);
     return null;
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
