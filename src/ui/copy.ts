@@ -38,6 +38,13 @@ export const SIGN_IN_RECOVERY_COPY =
  *  anyone who asks. */
 export const SIGN_IN_FAILURE_COPY = "That login and password did not match.";
 
+/** What a readonly account is told when it reaches a mutating route, and what
+ *  its disabled controls say in the browser. One string, because a button whose
+ *  tooltip disagrees with the server's refusal teaches the reader to distrust
+ *  both. */
+export const READONLY_REFUSAL_COPY =
+  "this account is read-only; ask an administrator for an operator login";
+
 /** Shown while a lockout delay is in force. Says nothing about whether the login
  *  exists, so it cannot be used to enumerate accounts either. */
 export const LOCKOUT_COPY =

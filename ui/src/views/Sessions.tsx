@@ -1,98 +1,282 @@
-import React from "react";
+import React, { useState } from "react";
+
+import { api, type SessionRow } from "../api";
+import { Empty, FactRow, Loaded, Panel, SearchBox, Stat } from "../components";
+import {
+  DISCLOSURE_BOUNDARY,
+  DISCLOSURE_SESSIONS_LEDE,
+  DISCLOSURE_STAT_LABEL,
+  DISCLOSURE_STAT_DETAIL,
+} from "../disclosure";
+import * as fmt from "../format";
+import { useResource } from "../hooks";
 import { useApp } from "../state";
-import { MenuPill, SearchBox } from "../components";
-import { sessionListHtml, SES_GLBL, sdLedeHtml, sdFactsHtml, sdActivityHtml, sdWhereHtml, objectPath } from "../render";
-import { SESSIONS, fmtInt, fmtMB, TOTAL_SESSIONS, TOTAL_KB, N_WITH_SESSIONS, N_REPOS } from "../data";
 
-export function Sessions() {
+const PAGE = "50";
+
+export function Sessions(): React.ReactElement {
   const app = useApp();
-  const sesGroup = app.route.sesGroup;
-  const sesQuery = app.route.sesQuery;
-  const setSesGroup = (g: string) => app.navigate({ sesGroup: g });
-  // Typing replaces rather than stacks history — one Back leaves the search.
-  const setSesQuery = (q: string) => app.navigate({ sesQuery: q }, { replace: true });
+  const active = app.view === "sessions";
+  const query = app.route.query;
+  const [cursor, setCursor] = useState<string | null>(null);
 
-  const onList = (e: React.MouseEvent) => {
-    const pl = (e.target as HTMLElement).closest(".personlink") as HTMLElement | null;
-    if (pl) { e.stopPropagation(); app.openPerson(pl.dataset.person!); return; }
-    const line = (e.target as HTMLElement).closest("[data-ses]") as HTMLElement | null;
-    if (line) app.openSession(SESSIONS[Number(line.dataset.ses)]);
+  const page = useResource(
+    () => api.sessions({ limit: PAGE, ...(query ? { search: query } : {}), ...(cursor ? { cursor } : {}) }),
+    [query, cursor],
+    { pollMs: 20_000, active },
+  );
+
+  const setQuery = (value: string): void => {
+    setCursor(null);
+    app.navigate({ query: value }, { replace: true });
   };
 
+  const totals = page.data?.totals ?? null;
+
   return (
-    <section className={app.view === "sessions" ? "view active" : "view"} id="view-sessions">
+    <section className={active ? "view active" : "view"}>
       <div className="kicker">Operate</div>
-      <h1>Sessions — Metadata Explorer</h1>
-      <p className="lede">Every session this fortress holds: who, which repo, how big, and exactly where it rests. Titles, counts and locations are metadata — transcript content never appears in this console.</p>
+      <h1>Sessions</h1>
+      <p className="lede">{DISCLOSURE_SESSIONS_LEDE}</p>
 
       <div className="stats">
-        <div className="stat"><span className="lbl">Total sessions</span><div className="big" id="sesTotal">{fmtInt(TOTAL_SESSIONS)}</div><div className="sub" id="sesTotalSub">{fmtMB(TOTAL_KB)} in the bucket</div></div>
-        <div className="stat"><span className="lbl">People</span><div className="big" id="sesPeople">{N_WITH_SESSIONS}</div><div className="sub">with at least one session here</div></div>
-        <div className="stat"><span className="lbl">Repos</span><div className="big" id="sesRepos">{N_REPOS}</div><div className="sub">across 7 projects</div></div>
-        <div className="stat"><span className="lbl">Newest</span><div className="big">12s</div><div className="sub">ago · “Fix S3 routing gates”</div></div>
+        <Stat
+          label="Total sessions"
+          value={fmt.int(totals?.sessions)}
+          sub={
+            <>
+              {fmt.bytes(totals?.bytes)} ·{" "}
+              <span className="dashy">
+                {DISCLOSURE_STAT_LABEL}
+                <div className="pop">
+                  <b>What this console holds</b>
+                  <div style={{ marginTop: 6 }}>{DISCLOSURE_STAT_DETAIL}</div>
+                </div>
+              </span>
+            </>
+          }
+        />
+        <Stat label="People" value={fmt.int(totals?.people)} sub="with at least one session here" />
+        <Stat
+          label="Relayed by let.ai"
+          value={fmt.int(totals?.tunnel)}
+          sub={totals ? `${fmt.int(totals.gateway)} arrived directly at the gateway` : undefined}
+        />
+        <Stat
+          label="Unknown provenance"
+          value={fmt.int(totals?.unknownProvenance)}
+          sub="recovered by the reconciler, or written before the channel was stamped"
+        />
       </div>
 
       <div className="toolbar">
-        <MenuPill pillId="sesGroupPill" menuId="sesGroupMenu" valueId="sesGroupVal"
-          label="Group by" value={(SES_GLBL as any)[sesGroup]} selKey={sesGroup} dataAttr="data-g"
-          items={[
-            { key: "team", label: "Team" },
-            { key: "person", label: "Person" },
-            { key: "project", label: "Project" },
-            { key: "repo", label: "Git repo" },
-            { key: "none", label: "Newest first" },
-          ]}
-          onPick={setSesGroup} />
-        <SearchBox id="sesSearch" placeholder="Search titles, people, teams, repos, projects, session ids…"
-          value={sesQuery} onInput={setSesQuery} />
+        <SearchBox
+          placeholder="Search titles, working directories, branches, repos, session ids…"
+          value={query}
+          onInput={setQuery}
+        />
       </div>
 
-      <div id="sessionList" onClick={onList} dangerouslySetInnerHTML={{ __html: sessionListHtml(sesQuery, sesGroup) }} />
+      {page.data && page.data.foreign.sessions > 0 ? (
+        <div className="banner info">
+          <span className="badge">i</span>
+          <span className="btxt">{page.data.foreign.label}</span>
+        </div>
+      ) : null}
+
+      <Loaded
+        resource={page}
+        emptyWhen={(data) => data.rows.length === 0}
+        empty={
+          <Empty>
+            {query
+              ? `Nothing on this fortress matches “${query}”.`
+              : "No sessions have reached this fortress yet."}
+          </Empty>
+        }
+      >
+        {(data) => (
+          <>
+            <div className="rowlist">
+              {data.rows.map((row) => (
+                <SessionLine key={row.id} row={row} onOpen={() => openSession(app, row)} />
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
+              {cursor ? (
+                <button className="btn ghost" onClick={() => setCursor(null)}>
+                  Back to the newest
+                </button>
+              ) : null}
+              {data.nextCursor ? (
+                <button
+                  className="btn ghost"
+                  onClick={() => {
+                    setCursor(data.nextCursor as string);
+                    window.scrollTo(0, 0);
+                  }}
+                >
+                  Older →
+                </button>
+              ) : null}
+            </div>
+          </>
+        )}
+      </Loaded>
     </section>
   );
 }
 
-export function SessionDetail() {
-  const app = useApp();
-  const s = app.currentSession;
-  const onFacts = (e: React.MouseEvent) => {
-    const pl = (e.target as HTMLElement).closest(".personlink") as HTMLElement | null;
-    if (pl) app.openPerson(pl.dataset.person!);
-  };
+function openSession(app: ReturnType<typeof useApp>, row: SessionRow): void {
+  app.navigate({ view: "session-detail", family: row.family, sid: row.sessionId });
+  window.scrollTo(0, 0);
+}
+
+function TitleSource({ row }: { row: SessionRow }): React.ReactElement | null {
+  const chip = fmt.titleSourceChip(row.titleSource, row.title);
+  if (!chip) return null;
+  return <span className={chip.derived ? "tsrc derived" : "tsrc"}>{chip.label}</span>;
+}
+
+function SessionLine({ row, onOpen }: { row: SessionRow; onOpen: () => void }): React.ReactElement {
   return (
-    <section className={app.view === "session-detail" ? "view active" : "view"} id="view-session-detail">
-      <div className="kicker"><a href="#" onClick={e => { e.preventDefault(); app.goto("sessions"); }}>← Sessions</a></div>
-      <h1 id="sdTitle">{s ? `“${s.title}”` : "Session"}</h1>
-      <p className="lede" id="sdLede" dangerouslySetInnerHTML={{ __html: s ? sdLedeHtml(s) : "" }} />
-
-      <div className="grid2">
-        <div className="panel">
-          <h2>Session</h2>
-          <div className="facts" id="sdFacts" onClick={onFacts} dangerouslySetInnerHTML={{ __html: s ? sdFactsHtml(s) : "" }} />
-        </div>
-        <div className="panel">
-          <h2>Activity</h2>
-          <div className="facts" id="sdActivity" dangerouslySetInnerHTML={{ __html: s ? sdActivityHtml(s) : "" }} />
+    <div className="row linkrow" onClick={onOpen}>
+      <span className="dot"></span>
+      <div className="who">
+        <b>{row.title ?? "untitled"}</b> <TitleSource row={row} />
+        <div className="sub">
+          {row.userDisplayName ?? row.userExternalId} · {row.family}
+          {row.repoSlug ? ` · ${row.repoSlug}` : ""}
+          {row.gitBranch ? ` · ${row.gitBranch}` : ""}
         </div>
       </div>
+      <div className="m">{fmt.bytes(row.bytesUploaded)}</div>
+      <div className="m">{fmt.ago(row.lastActivityAt)}</div>
+    </div>
+  );
+}
 
-      <div className="panel">
-        <h2>Where It Rests</h2>
-        <div className="h2sub">The two systems that hold this session, and the one that holds only pointers.</div>
-        <div className="facts wide" id="sdWhere" dangerouslySetInnerHTML={{ __html: s ? sdWhereHtml(s) : "" }} />
-        <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
-          <button className="btn" id="sdVerifyBtn" onClick={() => s && app.verifySession(s)}>Verify residency</button>
-        </div>
-      </div>
+export function SessionDetail(): React.ReactElement {
+  const app = useApp();
+  const active = app.view === "session-detail";
+  const family = app.route.family ?? "";
+  const sid = app.route.sid ?? "";
 
-      <div className="panel">
-        <h2>Content Boundary</h2>
-        <p style={{ fontSize: 15, color: "var(--text-muted)", maxWidth: 700, margin: "2px 0 0" }}>
-          This console will never display this session's transcript — no text, no excerpts, no previews. The transcript rests as{" "}
-          <span className="mono" id="sdBoundaryPath">{s ? objectPath(s) : "log.jsonl"}</span> in the organization's bucket, readable only through tools the organization authorizes.
-          What you see here is the metadata row the fortress mirrors into its own Postgres.
-        </p>
+  const found = useResource(
+    () => api.sessions({ limit: "20", family, search: sid }),
+    [family, sid],
+    { active: active && sid !== "" },
+  );
+  const row = found.data?.rows.find((r) => r.sessionId === sid) ?? null;
+
+  return (
+    <section className={active ? "view active" : "view"}>
+      <div className="kicker">
+        <a
+          href="/sessions"
+          onClick={(e) => {
+            e.preventDefault();
+            app.goto("sessions");
+          }}
+        >
+          ← Sessions
+        </a>
       </div>
+      <h1>{row?.title ?? (found.loading ? "Session" : "That session is not on this fortress")}</h1>
+      <p className="lede">
+        {row
+          ? `${row.userDisplayName ?? row.userExternalId} · ${row.family} · last active ${fmt.ago(row.lastActivityAt)}`
+          : found.error ?? "It may belong to another organization, or it may have been deleted here."}
+      </p>
+
+      {row ? (
+        <>
+          <div className="grid2">
+            <Panel title="Session">
+              <div className="facts">
+                <FactRow
+                  k="Title"
+                  v={
+                    <>
+                      {row.title ?? "untitled"} <TitleSource row={row} />
+                    </>
+                  }
+                  vs={
+                    fmt.derivedFromContent(row.titleSource, row.title)
+                      ? "derived from the conversation, so it is not plain metadata"
+                      : "supplied by the client"
+                  }
+                />
+                <FactRow k="Session id" v={<span className="mono">{row.sessionId}</span>} vs={row.family} />
+                <FactRow
+                  k="Person"
+                  v={row.userDisplayName ?? row.userExternalId}
+                  vs={<span className="mono">{row.userExternalId}</span>}
+                />
+                <FactRow k="Device" v={row.deviceName ?? "—"} />
+                <FactRow
+                  k="Repository"
+                  v={<span className="mono">{row.repoSlug ?? "—"}</span>}
+                  vs={row.gitBranch ? `branch ${row.gitBranch}` : undefined}
+                />
+                <FactRow k="Working directory" v={<span className="mono">{row.cwd ?? "—"}</span>} />
+              </div>
+            </Panel>
+
+            <Panel title="Activity">
+              <div className="facts">
+                <FactRow k="First event" v={fmt.when(row.firstEventAt)} vs={fmt.ago(row.firstEventAt)} />
+                <FactRow k="Last activity" v={fmt.when(row.lastActivityAt)} vs={fmt.ago(row.lastActivityAt)} />
+                <FactRow
+                  k="Counts"
+                  v={`${fmt.int(row.eventCount)} events`}
+                  vs={`${fmt.int(row.userTextCount)} prompts · ${fmt.int(row.assistantCount)} replies · ${fmt.int(row.toolCallCount)} tool calls`}
+                />
+                <FactRow
+                  k="Tokens"
+                  v={`${fmt.tokens(row.inputTokens)} in · ${fmt.tokens(row.outputTokens)} out`}
+                  vs={row.estCostUsd === null ? "no cost estimate recorded" : `estimated ${fmt.usd(row.estCostUsd)}`}
+                />
+                <FactRow
+                  k="Uploaded"
+                  v={fmt.bytes(row.bytesUploaded)}
+                  vs={`${fmt.plural(row.chunkCount, "chunk")} appended`}
+                />
+              </div>
+            </Panel>
+          </div>
+
+          <Panel title="Where it rests">
+            <div className="facts wide">
+              <FactRow
+                k="Transcript object"
+                v={<span className="mono">{row.sourcePath ?? "not recorded"}</span>}
+                vs="in the organization's own bucket, under the organization's own keys"
+              />
+              <FactRow
+                k="How it arrived"
+                v={row.ingestChannel ?? "unknown"}
+                vs={ingestChannelCopy(row.ingestChannel)}
+              />
+            </div>
+          </Panel>
+
+          <Panel title="Content boundary">
+            <p className="saidby" style={{ maxWidth: 760 }}>
+              {DISCLOSURE_BOUNDARY}
+            </p>
+          </Panel>
+        </>
+      ) : null}
     </section>
   );
+}
+
+function ingestChannelCopy(channel: string | null): string {
+  if (channel === "tunnel") return "relayed by let.ai over the outbound tunnel this fortress dials";
+  if (channel === "gateway") return "posted directly to this fortress's gateway, never touching let.ai";
+  if (channel === "reconciled") {
+    return "recovered by the reconciler, which cannot know how the bytes first arrived";
+  }
+  return "written before this fortress stamped a channel, so the route it took is not recorded";
 }

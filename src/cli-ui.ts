@@ -27,11 +27,13 @@ import {
   resolveUiBind,
 } from "./ui/bind";
 import { LiveUiConfig, UiConfigColdStartError } from "./ui/config";
+import { createConsoleMount } from "./ui/console-mount";
 import { detectContainer } from "./ui/container";
 import { PEOPLE_VISIBILITY_DISCLOSURE } from "./ui/copy";
 import { acquireInstanceLock, portCollisionMessage, probeOccupant } from "./ui/instance";
 import { UiRuntime } from "./ui/runtime";
 import { startUiServer, type UiServerCtx } from "./ui/server";
+import { getServiceManager } from "./service";
 
 type WriteLine = (line: string) => void;
 
@@ -213,7 +215,23 @@ export async function runUiCommand(
   });
   await runtime.restoreLockouts();
 
-  const ctx: UiServerCtx = { assets, port, runtime };
+  // The read surface is mounted BEFORE the bind, so a page never reaches a
+  // console whose API answers 404. Nothing in the mount throws on a broken
+  // fortress: every panel behind it degrades into a named state instead.
+  // The read surface is mounted BEFORE the bind, so a page never reaches a
+  // console whose API answers 404. Nothing in the mount throws on a broken
+  // fortress: every panel behind it degrades into a named state instead.
+  const mount = createConsoleMount({
+    paths,
+    runtime,
+    boundPort: port,
+    // Under an orchestrator there is no unit to start and no binary to swap,
+    // and the console says so rather than offering verbs the container hides.
+    serviceManager: container.container ? "container" : getServiceManager({ platform: deps.platform }).name,
+    env,
+  });
+  await mount.ready;
+  const ctx: UiServerCtx = { assets, port, runtime, read: mount };
   let started: { readonly port?: number | null };
   try {
     started = (deps.serve ?? startUiServer)(

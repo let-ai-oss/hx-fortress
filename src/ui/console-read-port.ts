@@ -97,6 +97,8 @@ export interface ConsoleReadPortDeps {
   /** The daemon's published snapshot, or null. */
   status: () => Promise<HostStatusSnapshot | null>;
   service: () => Promise<{ loaded: boolean; pid: number | null }>;
+  /** The name of the lifecycle owner, as the CLI resolved it. */
+  serviceManager: () => string;
   credentials: () => Promise<CloudCredential | null>;
   egress: () => Promise<EgressInputs>;
   /** The vault store, when one is configured. Bucket facts degrade without it. */
@@ -204,6 +206,8 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
       const view: ConsoleStatusView = {
         daemon: state,
         copy: DAEMON_STATE_COPY[state],
+        version: FORTRESS_VERSION,
+        serviceManager: deps.serviceManager(),
         pid: snapshot?.host.pid ?? null,
         writtenAt: snapshot?.host.writtenAt ?? null,
         rootMatch: await compareRoots(deps.paths.root, snapshot?.host.root),

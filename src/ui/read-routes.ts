@@ -105,6 +105,15 @@ export interface ConsoleStatusView {
   daemon: DaemonState;
   /** The copy for that state, so a page never invents its own. */
   copy: string;
+  /** The version of the binary SERVING this console. The console cannot read it
+   *  from anywhere else without generating a report, and a page that has to
+   *  produce an audited artifact to print a version number would record an
+   *  export every time somebody looked at it. */
+  version: string;
+  /** Which lifecycle owns this fortress: a host service manager, or a container
+   *  orchestrator. The console says different things about service and update
+   *  under each, and guessing wrong promises verb families a container hides. */
+  serviceManager: string;
   pid: number | null;
   writtenAt: string | null;
   /** Root identity comparison between the console and the daemon. */

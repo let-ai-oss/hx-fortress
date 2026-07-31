@@ -1,226 +1,235 @@
 // Pretty URLs — the path is the single source of truth for what the console
-// shows. No query strings, no hashes: every stateful surface is a real,
-// bookmarkable, semantically-named location. Dialogs included: a dialog is a
-// thing you can be looking at, so it gets an address like everything else.
+// shows. Every stateful surface is a real, bookmarkable, semantically-named
+// location, and a cold load of any of them lands where the link says because the
+// server hands the shell to every non-asset path.
 //
-//   /                                     Overview
-//   /sessions                             metadata explorer
-//   /sessions/by/person                   …grouped
-//   /sessions/search/routing+gates        …searched
-//   /sessions/claude-cli/59e3ccf5-8f8b    one session (its storage key)
-//   /sessions/claude-cli/59e3ccf5-8f8b/verify        …its residency proof
-//   /residency/verify/claude-cli/59e3ccf5-8f8b       the same proof, from the audit
-//   /people/erik                          one person
-//   /adoption/by/coverage/not-installed   grouped + one cohort
-//   /residency/gates · /residency/incident
-//   /compliance/egress · /postgres/failed-boot · /ops/keys
-//   /logs/session_vault/errors/7d         source · level · range, any order
-//   …/shortcuts                           the keyboard map, over any page
+//   /                              Overview
+//   /sessions                      the session list
+//   /sessions/search/routing+gates …searched
+//   /sessions/claude-cli/59e3ccf5  one session (its storage key)
+//   /people · /people/erik         who is sending, and one of them
+//   /residency · /compliance       the two compliance lenses
+//   /postgres · /storage · /embeddings   setup and health
+//   /ops · /logs                   system
+//   /setup                         set a password from a one-time link
+//   /sso/bootstrap                 the workbench hand-off
 //
-// Vocabularies are disjoint per segment position, so nothing is ambiguous and
-// defaults are simply omitted — the shortest URL that says what you mean.
+// THE FRAGMENT EXCEPTION. Three tokens arrive in location.hash and nowhere else:
+// the setup token (#t=), the SSO entry token (#e=) and the bootstrap grant
+// (#g=). A fragment is never sent to the server, so it cannot appear in a
+// request line, an access log, a proxy log or a Referer header — which is the
+// whole reason those three do not ride the path or the query. This module is the
+// only place that reads them, and it CLEARS the fragment as it reads: a token
+// left in the address bar is one a screenshot, a bookmark or a shared URL
+// carries away.
 
 export type ViewName =
-  | "overview" | "sessions" | "session-detail" | "adoption" | "person-detail"
-  | "residency" | "compliance" | "postgres" | "blob" | "embeddings" | "ops" | "logs";
+  | "overview"
+  | "sessions"
+  | "session-detail"
+  | "people"
+  | "person-detail"
+  | "residency"
+  | "compliance"
+  | "postgres"
+  | "storage"
+  | "embeddings"
+  | "ops"
+  | "logs"
+  | "setup"
+  | "sso-bootstrap";
 
 export interface Route {
   view: ViewName;
-  /** sessions explorer */
-  sesGroup: string;            // team | person | project | repo | none
-  sesQuery: string;
-  family?: string;             // session detail: storage family…
-  sid?: string;                // …and session id
-  /** adoption */
-  adGroup: string;             // team | group | coverage | status
-  adQuery: string;
-  adFilter: string | null;     // noclient | quiet | stale | partial | outdated
+  /** session list */
+  query: string;
+  family?: string;
+  sid?: string;
+  /** one person, by their external id */
   personId?: string;
-  /** teachable states */
-  incident: boolean;
-  pgPreview: boolean;
   /** panel the page should scroll to and flash */
-  anchor?: string;             // gates | keys | egress | retention | audit
+  anchor?: string;
   /** logs */
-  logSrc: string;              // all | host | session_vault | embed-worker | postgres | gateway
-  logLevel: string;            // all | warn | error
-  logRange: string;            // 1h | 24h | 7d | boot
-  /** blob storage: which editor is open, and which migration run is shown */
-  stEdit?: "credentials" | "target";
-  runId?: string;
-  /** dialogs — overlays on the page beneath, so they nest under its path */
-  verify: boolean;
-  verifyFamily?: string;
-  verifySid?: string;
+  logModule: string;
+  logLevel: string;
+  /** the keyboard map, over any page */
   shortcuts: boolean;
 }
 
 export const DEFAULT_ROUTE: Route = {
   view: "overview",
-  sesGroup: "team", sesQuery: "",
-  adGroup: "team", adQuery: "", adFilter: null,
-  incident: false, pgPreview: false,
-  logSrc: "all", logLevel: "all", logRange: "24h",
-  verify: false, shortcuts: false,
+  query: "",
+  logModule: "all",
+  logLevel: "all",
+  shortcuts: false,
 };
 
-// ── vocabularies ────────────────────────────────────────
-const VIEW_SEGMENT: Record<string, string> = {
-  sessions: "sessions", adoption: "adoption", residency: "residency",
-  compliance: "compliance", postgres: "postgres", blob: "storage",
-  embeddings: "embeddings", ops: "ops", logs: "logs",
+/** The views a signed-in console navigates between, in nav order. Setup and the
+ *  bootstrap hand-off are deliberately absent: they are arrival screens, not
+ *  places, and neither has a nav entry or a shortcut. */
+export const NAV_VIEWS: readonly ViewName[] = [
+  "overview",
+  "sessions",
+  "people",
+  "residency",
+  "compliance",
+  "postgres",
+  "storage",
+  "embeddings",
+  "ops",
+  "logs",
+];
+
+const VIEW_SEGMENT: Partial<Record<ViewName, string>> = {
+  sessions: "sessions",
+  people: "people",
+  residency: "residency",
+  compliance: "compliance",
+  postgres: "postgres",
+  storage: "storage",
+  embeddings: "embeddings",
+  ops: "ops",
+  logs: "logs",
+  setup: "setup",
 };
 const SEGMENT_VIEW: Record<string, ViewName> = {
-  sessions: "sessions", adoption: "adoption", residency: "residency",
-  compliance: "compliance", postgres: "postgres", storage: "blob",
-  embeddings: "embeddings", ops: "ops", logs: "logs",
+  sessions: "sessions",
+  people: "people",
+  residency: "residency",
+  compliance: "compliance",
+  postgres: "postgres",
+  storage: "storage",
+  embeddings: "embeddings",
+  ops: "ops",
+  logs: "logs",
+  setup: "setup",
 };
 
-const SES_GROUP_URL: Record<string, string> = { team: "team", person: "person", project: "project", repo: "repo", none: "newest" };
-const SES_GROUP_KEY: Record<string, string> = { team: "team", person: "person", project: "project", repo: "repo", newest: "none" };
+/** The pinned path of the workbench hand-off. Served by the index handler like
+ *  every other view, so it costs no server route. */
+export const BOOTSTRAP_PATH = "/sso/bootstrap";
 
-const AD_GROUPS = ["team", "group", "coverage", "status"];
-const AD_FILTER_URL: Record<string, string> = { noclient: "not-installed", quiet: "quiet", stale: "gone-quiet", partial: "partial", outdated: "outdated" };
-const AD_FILTER_KEY: Record<string, string> = { "not-installed": "noclient", quiet: "quiet", "gone-quiet": "stale", partial: "partial", outdated: "outdated" };
-
-const ANCHORS: Record<string, string[]> = {
-  residency: ["gates"], compliance: ["egress", "retention", "audit"], ops: ["keys"],
+const ANCHORS: Partial<Record<ViewName, readonly string[]>> = {
+  compliance: ["paths", "retention"],
+  ops: ["commands", "cli"],
 };
 
-const LOG_SOURCES = ["host", "session_vault", "embed-worker", "postgres", "gateway"];
-const LOG_LEVEL_URL: Record<string, string> = { warn: "warnings", error: "errors" };
+const LOG_LEVELS: Record<string, string> = { warn: "warnings", error: "errors" };
 const LOG_LEVEL_KEY: Record<string, string> = { warnings: "warn", errors: "error" };
-const LOG_RANGES = ["1h", "24h", "7d", "boot"];
 
 // Search terms ride in the path: spaces become "+", everything else is
 // percent-encoded, so "a+b" and "a b" stay distinguishable both ways.
-const encodeQ = (q: string) => encodeURIComponent(q).replace(/%20/g, "+");
-const decodeQ = (s: string) => decodeURIComponent(s.replace(/\+/g, " "));
+const encodeQ = (q: string): string => encodeURIComponent(q).replace(/%20/g, "+");
+const decodeQ = (s: string): string => decodeURIComponent(s.replace(/\+/g, " "));
 
-// ── parse ───────────────────────────────────────────────
+// ── the fragment exception ───────────────────────────────────────────────────
+
+export type FragmentKey = "t" | "e" | "g";
+
+/** Read one of the three fragment-carried tokens WITHOUT clearing it. Used to
+ *  decide which arrival screen to render before anything is consumed. */
+export function peekFragmentToken(key: FragmentKey, hash = window.location.hash): string | null {
+  const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!raw.startsWith(`${key}=`)) return null;
+  const value = raw.slice(key.length + 1);
+  return value.length > 0 ? value : null;
+}
+
+/** Read it and clear the address bar in the same breath. The token stays in
+ *  memory for as long as the screen that consumes it lives, and nowhere else. */
+export function takeFragmentToken(key: FragmentKey): string | null {
+  const value = peekFragmentToken(key);
+  if (value !== null) clearFragment();
+  return value;
+}
+
+export function clearFragment(): void {
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${window.location.pathname}${window.location.search}`,
+  );
+}
+
+// ── parse ────────────────────────────────────────────────────────────────────
+
 export function parsePath(pathname: string): Route {
-  let raw = pathname.split("/").filter(Boolean).map(s => s);
-  const r: Route = { ...DEFAULT_ROUTE };
+  const raw = pathname.split("/").filter(Boolean);
+  const route: Route = { ...DEFAULT_ROUTE };
+
+  if (pathname.replace(/\/+$/, "") === BOOTSTRAP_PATH) {
+    return { ...route, view: "sso-bootstrap" };
+  }
 
   // The keyboard map overlays any page, so it is always the last segment.
-  if (raw[raw.length - 1] === "shortcuts") { r.shortcuts = true; raw = raw.slice(0, -1); }
-  if (!raw.length) return r;
+  const segments = raw[raw.length - 1] === "shortcuts" ? raw.slice(0, -1) : raw;
+  route.shortcuts = segments.length !== raw.length;
+  if (segments.length === 0) return route;
 
-  const head = raw[0];
-  const rest = raw.slice(1);
-
-  // A person is a first-class entity, not a sub-view of adoption.
-  if (head === "people") {
-    if (!rest[0]) return r;
-    return { ...r, view: "person-detail", personId: decodeQ(rest[0]) };
-  }
-
+  const head = segments[0] as string;
+  const rest = segments.slice(1);
   const view = SEGMENT_VIEW[head];
-  if (!view) return { ...r, shortcuts: r.shortcuts };   // unknown path → Overview
-  r.view = view;
+  if (!view) return route; // an unknown path is the Overview, rewritten once
+  route.view = view;
+
+  if (view === "people") {
+    if (rest[0]) {
+      route.view = "person-detail";
+      route.personId = decodeQ(rest[0] as string);
+    }
+    return route;
+  }
 
   if (view === "sessions") {
-    let i = 0;
-    while (i < rest.length) {
-      const seg = rest[i];
-      if (seg === "by" && rest[i + 1]) { r.sesGroup = SES_GROUP_KEY[rest[i + 1]] ?? r.sesGroup; i += 2; }
-      else if (seg === "search" && rest[i + 1]) { r.sesQuery = decodeQ(rest[i + 1]); i += 2; }
-      else if (seg === "verify") { r.verify = true; i += 1; }
-      else if (rest[i + 1]) {              // family + id → a single session
-        r.view = "session-detail"; r.family = seg; r.sid = decodeQ(rest[i + 1]); i += 2;
-      } else i += 1;
+    if (rest[0] === "search" && rest[1]) {
+      route.query = decodeQ(rest[1] as string);
+    } else if (rest[0] && rest[1]) {
+      route.view = "session-detail";
+      route.family = decodeQ(rest[0] as string);
+      route.sid = decodeQ(rest[1] as string);
     }
-    // On a session's own page the proof is about that session — no need to
-    // repeat the key in the path.
-    if (r.verify && r.view === "session-detail") { r.verifyFamily = r.family; r.verifySid = r.sid; }
-    else if (r.verify) r.verify = false;
-    return r;
-  }
-
-  if (view === "adoption") {
-    let i = 0;
-    while (i < rest.length) {
-      const seg = rest[i];
-      if (seg === "by" && rest[i + 1]) { r.adGroup = AD_GROUPS.includes(rest[i + 1]) ? rest[i + 1] : r.adGroup; i += 2; }
-      else if (seg === "search" && rest[i + 1]) { r.adQuery = decodeQ(rest[i + 1]); i += 2; }
-      else { if (AD_FILTER_KEY[seg]) r.adFilter = AD_FILTER_KEY[seg]; i += 1; }
-    }
-    return r;
+    return route;
   }
 
   if (view === "logs") {
-    for (const seg of rest) {
-      if (LOG_SOURCES.includes(seg)) r.logSrc = seg;
-      else if (LOG_LEVEL_KEY[seg]) r.logLevel = LOG_LEVEL_KEY[seg];
-      else if (LOG_RANGES.includes(seg)) r.logRange = seg;
+    for (const segment of rest) {
+      if (LOG_LEVEL_KEY[segment]) route.logLevel = LOG_LEVEL_KEY[segment] as string;
+      else route.logModule = segment;
     }
-    return r;
+    return route;
   }
 
-  if (view === "postgres") {
-    if (rest[0] === "failed-boot") r.pgPreview = true;
-    return r;
-  }
-
-  if (view === "blob") {
-    if (rest[0] === "credentials" || rest[0] === "target") r.stEdit = rest[0];
-    else if (rest[0] === "runs" && rest[1]) r.runId = rest[1];
-    return r;
-  }
-
-  let i = 0;
-  while (i < rest.length) {
-    const seg = rest[i];
-    if (view === "residency" && seg === "incident") { r.incident = true; i += 1; }
-    // Verifying from the audit names the session, because the page beneath
-    // isn't about one.
-    else if (seg === "verify" && rest[i + 1] && rest[i + 2]) {
-      r.verify = true; r.verifyFamily = rest[i + 1]; r.verifySid = decodeQ(rest[i + 2]); i += 3;
-    }
-    else { if ((ANCHORS[view] ?? []).includes(seg)) r.anchor = seg; i += 1; }
-  }
-  return r;
+  const allowed = ANCHORS[view] ?? [];
+  if (rest[0] && allowed.includes(rest[0] as string)) route.anchor = rest[0];
+  return route;
 }
 
-// ── format ──────────────────────────────────────────────
-export function formatPath(r: Route): string {
-  const tail = r.shortcuts ? ["shortcuts"] : [];
-  const done = (parts: string[]) => "/" + [...parts, ...tail].join("/");
+// ── format ───────────────────────────────────────────────────────────────────
 
-  if (r.view === "person-detail") return r.personId ? done(["people", encodeQ(r.personId)]) : done(["adoption"]);
+export function formatPath(route: Route): string {
+  const tail = route.shortcuts ? ["shortcuts"] : [];
+  const done = (parts: readonly string[]): string => `/${[...parts, ...tail].join("/")}`;
 
-  if (r.view === "session-detail") {
-    if (!r.family || !r.sid) return done(["sessions"]);
-    const parts = ["sessions", r.family, encodeQ(r.sid)];
-    if (r.verify) parts.push("verify");
-    return done(parts);
+  if (route.view === "sso-bootstrap") return BOOTSTRAP_PATH;
+  if (route.view === "person-detail") {
+    return route.personId ? done(["people", encodeQ(route.personId)]) : done(["people"]);
+  }
+  if (route.view === "session-detail") {
+    return route.family && route.sid
+      ? done(["sessions", encodeQ(route.family), encodeQ(route.sid)])
+      : done(["sessions"]);
   }
 
-  const head = VIEW_SEGMENT[r.view];
+  const head = VIEW_SEGMENT[route.view];
   if (!head) return done([]);
-  const parts = [head];
-
-  if (r.view === "sessions") {
-    if (r.sesGroup !== "team") parts.push("by", SES_GROUP_URL[r.sesGroup] ?? r.sesGroup);
-    if (r.sesQuery.trim()) parts.push("search", encodeQ(r.sesQuery.trim()));
-  } else if (r.view === "adoption") {
-    if (r.adGroup !== "team") parts.push("by", r.adGroup);
-    if (r.adFilter) parts.push(AD_FILTER_URL[r.adFilter]);
-    if (r.adQuery.trim()) parts.push("search", encodeQ(r.adQuery.trim()));
-  } else if (r.view === "logs") {
-    if (r.logSrc !== "all") parts.push(r.logSrc);
-    if (r.logLevel !== "all") parts.push(LOG_LEVEL_URL[r.logLevel]);
-    if (r.logRange !== "24h") parts.push(r.logRange);
-  } else if (r.view === "postgres") {
-    if (r.pgPreview) parts.push("failed-boot");
-  } else if (r.view === "blob") {
-    if (r.stEdit) parts.push(r.stEdit);
-    else if (r.runId) parts.push("runs", r.runId);
-  } else {
-    if (r.view === "residency" && r.incident) parts.push("incident");
-    if (r.anchor && (ANCHORS[r.view] ?? []).includes(r.anchor)) parts.push(r.anchor);
-    if (r.verify && r.verifyFamily && r.verifySid) parts.push("verify", r.verifyFamily, encodeQ(r.verifySid));
+  const parts: string[] = [head];
+  if (route.view === "sessions" && route.query.trim()) {
+    parts.push("search", encodeQ(route.query.trim()));
+  } else if (route.view === "logs") {
+    if (route.logModule !== "all") parts.push(route.logModule);
+    if (route.logLevel !== "all") parts.push(LOG_LEVELS[route.logLevel] as string);
+  } else if (route.anchor && (ANCHORS[route.view] ?? []).includes(route.anchor)) {
+    parts.push(route.anchor);
   }
-
   return done(parts);
 }

@@ -209,6 +209,8 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
     status: async () => ({
       daemon: "running",
       copy: "running",
+      version: "0.0.0-test",
+      serviceManager: "systemd (user)",
       pid: 42,
       writtenAt: "2026-07-01T00:00:00.000Z",
       rootMatch: "same",
@@ -460,6 +462,8 @@ describe("degraded states", () => {
       status: async () => ({
         daemon: "running",
         copy: "running",
+        version: "0.0.0-test",
+        serviceManager: "systemd (user)",
         pid: 1,
         writtenAt: null,
         rootMatch: "same",
@@ -479,6 +483,8 @@ describe("staleness and the pre-heartbeat state", () => {
       status: async () => ({
         daemon: "pre-heartbeat",
         copy: "pre-heartbeat daemon - restart to finish the upgrade",
+        version: "0.0.0-test",
+        serviceManager: "systemd (user)",
         pid: 7,
         writtenAt: null,
         rootMatch: "unknown",
@@ -502,6 +508,8 @@ describe("staleness and the pre-heartbeat state", () => {
         status: async () => ({
           daemon: state,
           copy,
+          version: "0.0.0-test",
+          serviceManager: "systemd (user)",
           pid: null,
           writtenAt: null,
           rootMatch: "unknown",
@@ -669,6 +677,18 @@ describe("credentials never leave", () => {
     expect(redactCredentials("password = 'hunter22'")).toContain(REDACTED);
   });
 
+  test("an instant survives redaction as an instant", () => {
+    // The driver hands timestamptz back as a Date. Rebuilt from its enumerable
+    // properties it becomes `{}`, and every "last activity" on every page reads
+    // as unknown — which is what happened until the SPA rendered one.
+    const at = new Date("2026-07-01T12:00:00.000Z");
+    const body = redactValue({ lastActivityAt: at, rows: [{ ts: at }] });
+    expect(JSON.parse(JSON.stringify(body))).toEqual({
+      lastActivityAt: "2026-07-01T12:00:00.000Z",
+      rows: [{ ts: "2026-07-01T12:00:00.000Z" }],
+    });
+  });
+
   test("redaction reaches nested response values", () => {
     const out = redactValue({ a: [{ dsn: "postgres://u:pw@h/db" }] });
     expect(JSON.stringify(out)).not.toContain("pw@h");
@@ -702,7 +722,11 @@ describe("credentials never leave", () => {
 describe("the report PDF", () => {
   test("is rendered on the server and survives a hostile title", () => {
     const bytes = renderPdf(REPORT_TITLE, [
+      // Every shape a session title can carry that breaks a naive writer: the
+      // string syntax itself, and the control bytes a client can put in a title
+      // simply by pasting one.
       "Session title: ) evil \\ (unbalanced",
+      "control bytes: \u0000\u0007\n\r\u001b[31m and a \u00e9",
       "a".repeat(400),
     ]);
     const text = Buffer.from(bytes).toString("latin1");
@@ -710,6 +734,17 @@ describe("the report PDF", () => {
     expect(text.trimEnd().endsWith("%%EOF")).toBe(true);
     expect(text).toContain("\\) evil \\\\ \\(unbalanced");
     expect(text).toContain("/Type /Catalog");
+    // Nothing outside printable ASCII survives into the content stream, so a
+    // byte in a title can never terminate a PDF object or move the cursor.
+    expect(text).toContain("control bytes: ?????[31m and a ?");
+    const stream = text.slice(text.indexOf("stream"), text.indexOf("endstream"));
+    // Checked by code point rather than by a regex: a pattern that has to CARRY
+    // the control characters to look for them is itself the thing being banned.
+    const control = [...stream].some((ch) => {
+      const code = ch.charCodeAt(0);
+      return code < 0x20 && code !== 0x0a && code !== 0x0d && code !== 0x09;
+    });
+    expect(control).toBe(false);
   });
 
   test("the endpoint serves it as a download", async () => {

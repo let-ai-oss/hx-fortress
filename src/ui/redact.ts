@@ -34,11 +34,21 @@ export function redactCredentials(value: string): string {
     .replace(PG_PASSWORD_FIELD, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`);
 }
 
-/** Redact recursively through a response body. Keys are left alone - the SHAPE
- *  of a payload is not a secret and hiding it makes a diagnosis impossible. */
+/**
+ * Redact recursively through a response body. Keys are left alone - the SHAPE of
+ * a payload is not a secret and hiding it makes a diagnosis impossible.
+ *
+ * A value whose data lives somewhere other than its own enumerable properties is
+ * passed through UNTOUCHED. A Date is the one that matters: the driver hands
+ * timestamptz columns back as Date objects, and rebuilding one from
+ * Object.entries produces `{}` - so every instant in every response would arrive
+ * at the browser as an empty object, and every "last activity" on every page
+ * would read as unknown. There is no credential shape inside a Date to look for.
+ */
 export function redactValue<T>(value: T): T {
   if (typeof value === "string") return redactCredentials(value) as unknown as T;
   if (Array.isArray(value)) return value.map((v) => redactValue(v)) as unknown as T;
+  if (value instanceof Date) return value;
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {

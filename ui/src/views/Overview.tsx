@@ -1,143 +1,267 @@
-import React, { useRef, useState } from "react";
+import React from "react";
+
+import { api, type GrowthRow } from "../api";
+import { Empty, FactRow, Loaded, Panel, Stat } from "../components";
+import { DISCLOSURE_LEDE_TAIL, DISCLOSURE_STAT_DETAIL, DISCLOSURE_STAT_LABEL } from "../disclosure";
+import * as fmt from "../format";
+import { useResource } from "../hooks";
 import { useApp } from "../state";
-import { attentionHtml, ATTENTION, growthTip } from "../render";
-import { GROWTH, fmtInt, fmtMB, TOTAL_SESSIONS, TOTAL_KB, N_ROSTER } from "../data";
 
-// Health tiles — content matches the prototype's paintService() exactly.
-const TILES: [string, string, string, string][] = [
-  ["tilePg", "postgres", "Ready", "embedded 18.4.0 · 12 migrations"],
-  ["tileBlob", "blob", "Healthy", "s3 · verified 184 ms · 06:00"],
-  ["tileTunnel", "ops", "Connected", "outbound only · beat 4s ago"],
-  ["tileEmbed", "embeddings", "Indexing", "402k vectors · backlog 214"],
-  ["tileIngest", "sessions", "Flowing", "last commit 12s ago · 0 errors"],
-];
-const TILE_HEADS: Record<string, string> = {
-  tilePg: "Postgres", tileBlob: "Blob storage", tileTunnel: "Relay tunnel",
-  tileEmbed: "Embeddings", tileIngest: "Ingest",
-};
-
-export default function Overview() {
+export default function Overview(): React.ReactElement {
   const app = useApp();
-  const total = fmtInt(TOTAL_SESSIONS);
-  const barsRef = useRef<HTMLDivElement>(null);
-  const [tip, setTip] = useState<{ text: string; left: number; show: boolean }>({ text: "", left: 0, show: false });
+  const active = app.view === "overview";
 
-  const onAttention = (e: React.MouseEvent) => {
-    const b = (e.target as HTMLElement).closest("[data-att]") as HTMLElement | null;
-    if (!b) return;
-    const a = ATTENTION[Number(b.dataset.att)].act as any;
-    if (a.person) { app.openPerson(a.person); return; }
-    if (a.adfilter) { app.setAdFilter(a.adfilter); app.goto("adoption"); return; }
-    app.goto(a.goto, a.then);
-  };
+  const status = useResource(() => api.status(), [], { pollMs: 10_000, active });
+  const page = useResource(() => api.sessions({ limit: "1" }), [], { pollMs: 15_000, active });
+  const facts = useResource(() => api.facts(), [], { pollMs: 30_000, active });
+  const growth = useResource(() => api.growth(30), [], { pollMs: 60_000, active });
+  const metrics = useResource(() => api.metrics(), [], { pollMs: 15_000, active });
 
-  const onBarsOver = (e: React.MouseEvent) => {
-    const t = e.target as HTMLElement;
-    if (t.tagName === "I") {
-      const r = t.getBoundingClientRect(), pr = barsRef.current!.getBoundingClientRect();
-      setTip({ text: t.dataset.tip || "", left: r.left - pr.left + r.width / 2, show: true });
-    }
-  };
+  const totals = page.data?.totals ?? null;
 
   return (
-    <section className={app.view === "overview" ? "view active" : "view"} id="view-overview">
+    <section className={active ? "view active" : "view"}>
       <div className="kicker">This fortress</div>
       <h1>Operational truth, at a glance</h1>
-      <p className="lede">Orange Corp | HX Fortress, serving <span id="ovPeopleLede">{N_ROSTER}</span> people. <code className="hx">hx-fortress</code> holds session metadata in its own Postgres and transcripts in the organization's bucket — this console shows the metadata, never the content.</p>
+      <p className="lede">
+        What this host actually holds, read from its own database and its own runtime files —{" "}
+        {DISCLOSURE_LEDE_TAIL}.
+      </p>
 
-      <div className="tiles" id="healthTiles">
-        {TILES.map(([id, dest, state, sub]) => (
-          <div key={id}
-            className={"tile" + (app.svcRunning ? "" : " off")}
-            id={id}
-            onClick={() => app.goto(dest as any)}>
-            <div className="thead"><span className="tdot"></span> {TILE_HEADS[id]}</div>
-            <div className="tstate">{app.svcRunning ? state : "Stopped"}</div>
-            <div className="tsub">{app.svcRunning ? sub : "service stopped"}</div>
-          </div>
-        ))}
+      <div className="tiles">
+        <Tile
+          head="Fortress daemon"
+          state={status.data?.copy ?? null}
+          sub={
+            status.data?.writtenAt
+              ? `status written ${fmt.ago(status.data.writtenAt)}`
+              : status.data
+                ? "no heartbeat in its status file"
+                : null
+          }
+          tone={
+            status.data?.daemon === "running"
+              ? "ok"
+              : status.data?.daemon === "stale" || status.data?.daemon === "failed"
+                ? "bad"
+                : "off"
+          }
+          onClick={() => app.goto("ops")}
+        />
+        <Tile
+          head="Metadata database"
+          state={
+            status.data
+              ? status.data.database.kind === "ready"
+                ? status.data.database.mode === "external"
+                  ? "External"
+                  : "Embedded"
+                : status.data.database.kind.split("-").join(" ")
+              : null
+          }
+          sub={facts.data?.postgres ? `${fmt.bytes(facts.data.postgres.databaseBytes)} on disk` : null}
+          tone={status.data?.database.kind === "ready" ? "ok" : "bad"}
+          onClick={() => app.goto("postgres")}
+        />
+        <Tile
+          head="Object storage"
+          state={facts.data?.storage.bucket ? facts.data.storage.provider ?? "Configured" : null}
+          sub={facts.data?.storage.bucket ?? null}
+          tone={facts.data?.storage.bucket ? "ok" : "off"}
+          onClick={() => app.goto("storage")}
+        />
+        <Tile
+          head="Embeddings"
+          state={facts.data?.embeddings ? `${fmt.int(facts.data.embeddings.embedded)} vectors` : null}
+          sub={
+            facts.data?.embeddings
+              ? facts.data.embeddings.newestAt
+                ? `newest ${fmt.ago(facts.data.embeddings.newestAt)}`
+                : "nothing has been embedded on this host yet"
+              : null
+          }
+          tone={facts.data?.embeddings?.embedded ? "ok" : "off"}
+          onClick={() => app.goto("embeddings")}
+        />
       </div>
 
       <div className="stats">
-        <div className="stat">
-          <span className="lbl">Sessions on this fortress</span>
-          <div className="big statlink" onClick={() => app.goto("sessions")}><span id="ovSessions">{total}</span><div className="pop">Open the metadata explorer →</div></div>
-          <div className="sub"><span id="ovBytes">{fmtMB(TOTAL_KB)}</span> · <span className="dashy">metadata only<div className="pop">
-            <b>What this console holds</b>
-            <div style={{ marginTop: 6 }}>Titles, people, repos, sizes, timestamps and storage locations — mirrored into the fortress Postgres. Transcript content rests in the bucket and is never displayed here.</div>
-          </div></span></div>
-        </div>
-        <div className="stat">
-          <span className="lbl">Residency</span>
-          <div className="big statlink" onClick={() => app.goto("residency")}><span id="ovResidency">Verified</span><div className="pop">Open the residency audit →</div></div>
-          <div className="sub" id="ovResidencySub">{total} of {total} on-fortress · audited 02:00</div>
-        </div>
-        <div className="stat">
-          <span className="lbl">Ingested today</span>
-          <div className="big statlink" id="ovTodayBig" onClick={() => app.goto("sessions")}>132<div className="pop">See today's sessions →</div></div>
-          <div className="sub">sessions · 21.4 MB · <span className="dashy">41 people active<div className="pop">
-            <b>Active in the last 24 hours</b>
-            <div style={{ marginTop: 6 }}>41 of 42 rostered people had at least one session commit mirrored to this fortress. The quiet one: Lena Kraus — <code className="hx">hx</code> not installed.</div>
-          </div></span></div>
-        </div>
-        <div className="stat">
-          <span className="lbl">RPC health</span>
-          <div className="big"><span className="hovinfo">38 ms<div className="pop">
-            <b>Vault RPC latency, p95 over the last hour.</b>
-            <div style={{ marginTop: 6 }}>Measured across <span className="mono">ingestCommit</span>, <span className="mono">listSessions</span> and the blob RPCs arriving over the tunnel. p50 is 14 ms. 0 errors in the last 24 h.</div>
-          </div></span></div>
-          <div className="sub">p95 · 3,412 calls today · 0 errors</div>
-        </div>
+        <Stat
+          label="Sessions on this fortress"
+          value={fmt.int(totals?.sessions)}
+          sub={
+            <>
+              {fmt.bytes(totals?.bytes)} ·{" "}
+              <span className="dashy">
+                {DISCLOSURE_STAT_LABEL}
+                <div className="pop">
+                  <b>What this console holds</b>
+                  <div style={{ marginTop: 6 }}>{DISCLOSURE_STAT_DETAIL}</div>
+                </div>
+              </span>
+            </>
+          }
+          onClick={() => app.goto("sessions")}
+        />
+        <Stat
+          label="People sending here"
+          value={fmt.int(totals?.people)}
+          sub="with at least one session on this host"
+          onClick={() => app.goto("people")}
+        />
+        <Stat
+          label="Relayed by let.ai"
+          value={fmt.int(totals?.tunnel)}
+          sub={
+            totals
+              ? `${fmt.int(totals.gateway)} direct to the gateway · ${fmt.int(totals.unknownProvenance)} unknown`
+              : undefined
+          }
+          onClick={() => app.goto("residency")}
+        />
+        <Stat
+          label="Tombstoned"
+          value={fmt.int(facts.data?.postgres?.tombstones)}
+          sub="sessions deleted here, remembered so they cannot come back"
+        />
       </div>
 
-      <div className="sechead">Needs Attention</div>
-      <div className="panel" id="attentionPanel" style={{ paddingTop: 8, paddingBottom: 8 }}>
-        <div className="rowlist" id="attentionList" onClick={onAttention} dangerouslySetInnerHTML={{ __html: attentionHtml() }} />
-      </div>
+      {page.data && page.data.foreign.sessions > 0 ? (
+        <div className="banner info">
+          <span className="badge">i</span>
+          <span className="btxt">{page.data.foreign.label}</span>
+        </div>
+      ) : null}
 
       <div className="grid2">
-        <div className="panel">
-          <h2>Where Sessions Land</h2>
-          <div className="h2sub">Destination inventory for sessions attributed to orange-corp — the number that catches silent misrouting.</div>
-          <div className="facts">
-            <div className="frw"><span className="k">This fortress</span><span><span className="v" id="destFortress">{total} sessions</span><div className="vs okv">every attributed session — routing verified nightly</div></span></div>
-            <div className="frw"><span className="k">HX Fortress relay</span><span><span className="v">0 sessions</span><div className="vs">the relay holds routing pointers, never transcript bytes</div></span></div>
-            <div className="frw"><span className="k">Unattributed</span><span><span className="v" id="destUnattributed">1 repo</span><div className="vs warnv"><span className="mono">orange-corp/rind</span> is unclaimed — its sessions route to personal spaces</div></span><button className="btn ghost sm" onClick={() => app.goto("residency", "gates")}>Review</button></div>
-          </div>
-        </div>
-        <div className="panel">
-          <h2>Right Now</h2>
-          <div className="facts">
-            <div className="frw"><span className="k">Throughput</span><span><span className="v">0.4 sessions/min</span><div className="vs">1.1 MB/min into the bucket</div></span></div>
-            <div className="frw"><span className="k">Embed backlog</span><span><span className="v" id="rnBacklog">214 turns</span><div className="vs">draining · ~6 min at current rate</div></span></div>
-            <div className="frw"><span className="k">Last ingest</span><span><span className="v">12s ago</span><div className="vs"><span className="mono">ingestCommit</span> · Squeeze · 184 KB</div></span></div>
-            <div className="frw"><span className="k">Storage self-test</span><span><span className="v">Passed</span><div className="vs">06:00 today · write + read-back in 184 ms</div></span></div>
-            <div className="frw"><span className="k">Uptime</span><span><span className="v">12d 7h</span><div className="vs">service since Jul 9, 09:02 · <code className="hx">hx-fortress</code> <span className="mono" id="rnVer">v{app.ver}</span></div></span></div>
-          </div>
-        </div>
+        <Panel title="Newest session">
+          <Loaded
+            resource={page}
+            emptyWhen={(data) => data.rows.length === 0}
+            empty={<Empty>No sessions have reached this fortress yet.</Empty>}
+          >
+            {(data) => {
+              const row = data.rows[0];
+              if (!row) return null;
+              return (
+                <div className="facts">
+                  <FactRow
+                    k="Title"
+                    v={row.title ?? "untitled"}
+                    vs={`${row.userDisplayName ?? row.userExternalId} · ${row.family}`}
+                  />
+                  <FactRow
+                    k="Last activity"
+                    v={fmt.ago(row.lastActivityAt)}
+                    vs={fmt.when(row.lastActivityAt)}
+                  />
+                  <FactRow
+                    k="Size"
+                    v={fmt.bytes(row.bytesUploaded)}
+                    vs={`${fmt.int(row.eventCount)} events · ${fmt.int(row.chunkCount)} chunks`}
+                  />
+                  <FactRow
+                    k="Where"
+                    v={<span className="mono">{row.repoSlug ?? row.cwd ?? "—"}</span>}
+                    vs={row.gitBranch ? `branch ${row.gitBranch}` : undefined}
+                  />
+                </div>
+              );
+            }}
+          </Loaded>
+        </Panel>
+
+        <Panel title="Right now" sub="Counters the daemon publishes on its own clock.">
+          <Loaded resource={metrics}>
+            {(data) =>
+              data.metrics === null ? (
+                <Empty>{data.reason ?? "the daemon has published no metrics"}</Empty>
+              ) : (
+                <div className="facts">
+                  <FactRow
+                    k="Published"
+                    v={fmt.ago(data.metrics.writtenAt)}
+                    vs={fmt.when(data.metrics.writtenAt)}
+                  />
+                  {Object.entries({ ...data.metrics.gauges, ...data.metrics.counters })
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .slice(0, 8)
+                    .map(([name, value]) => (
+                      <FactRow key={name} k={<span className="mono">{name}</span>} v={fmt.int(value)} />
+                    ))}
+                </div>
+              )
+            }
+          </Loaded>
+        </Panel>
       </div>
 
-      <div className="panel">
-        <h2>Storage Growth</h2>
-        <div className="h2sub">Bucket bytes added per day, last 30 days — hover any bar for the exact numbers.</div>
-        <div className="chart">
-          <div className="yaxis"><span>40 MB</span><span>20 MB</span><span>0</span></div>
-          <div className="plot">
-            <div className="gridl" style={{ top: 0 }}></div>
-            <div className="gridl" style={{ top: "50%" }}></div>
-            <div className="bars" id="growthBars" ref={barsRef} onMouseOver={onBarsOver} onMouseLeave={() => setTip(t => ({ ...t, show: false }))}>
-              <div className="tip" id="growthTip" style={{ display: tip.show ? "block" : "none", left: tip.left }}>{tip.text}</div>
-              {GROWTH.map((mb, i) => (
-                <i key={i}
-                  className={mb >= 25 ? "hot" : undefined}
-                  style={{ height: Math.max(3, (mb / 40) * 100) + "%" }}
-                  data-tip={growthTip(i)} />
-              ))}
-            </div>
-            <div className="axis"><span>Jun 22</span><span>Jun 29</span><span>Jul 6</span><span>Jul 13</span><span>today</span></div>
-          </div>
+      <Panel
+        title="Sessions landing here"
+        sub="Sessions and bytes per day, bucketed on last activity in UTC — the last 30 days."
+      >
+        <Loaded
+          resource={growth}
+          emptyWhen={(data) => data.days.length === 0}
+          empty={<Empty>No session has been active in the last 30 days.</Empty>}
+        >
+          {(data) => <GrowthChart rows={data.days} />}
+        </Loaded>
+      </Panel>
+    </section>
+  );
+}
+
+function Tile(props: {
+  head: string;
+  state: string | null;
+  sub: string | null;
+  tone: "ok" | "bad" | "off";
+  onClick: () => void;
+}): React.ReactElement {
+  return (
+    <div
+      className={`tile${props.tone === "bad" ? " bad" : props.tone === "off" ? " off" : ""}`}
+      onClick={props.onClick}
+    >
+      <div className="thead">
+        <span className="tdot"></span> {props.head}
+      </div>
+      <div className="tstate">{props.state ?? "unknown"}</div>
+      <div className="tsub">{props.sub ?? "no answer from this fortress yet"}</div>
+    </div>
+  );
+}
+
+/** Bars scaled to the tallest day in the window. There is no fixed axis maximum:
+ *  a hard-coded ceiling either flattens a busy fortress or exaggerates a quiet
+ *  one, and both misread as a trend. */
+function GrowthChart({ rows }: { rows: GrowthRow[] }): React.ReactElement {
+  const peak = Math.max(...rows.map((r) => Number(r.bytes)), 1);
+  return (
+    <div className="chart">
+      <div className="yaxis">
+        <span>{fmt.bytes(peak)}</span>
+        <span>{fmt.bytes(peak / 2)}</span>
+        <span>0</span>
+      </div>
+      <div className="plot">
+        <div className="gridl" style={{ top: 0 }}></div>
+        <div className="gridl" style={{ top: "50%" }}></div>
+        <div className="bars">
+          {rows.map((row) => (
+            <i
+              key={row.day}
+              style={{ height: `${Math.max(3, (Number(row.bytes) / peak) * 100)}%` }}
+              title={`${row.day} · ${fmt.plural(row.sessions, "session")} · ${fmt.bytes(row.bytes)}`}
+            />
+          ))}
+        </div>
+        <div className="axis">
+          <span>{rows[0]?.day ?? ""}</span>
+          <span>{rows[rows.length - 1]?.day ?? ""}</span>
         </div>
       </div>
-    </section>
+    </div>
   );
 }

@@ -19,6 +19,7 @@
 // answered exactly like one to a path that does. Otherwise the difference between
 // the two is a map of the console's surface, drawn by anyone who can reach it.
 
+import { READONLY_REFUSAL_COPY } from "./copy";
 import type { BucketName } from "./rate-limit";
 import type { UiRole } from "./users";
 
@@ -154,7 +155,7 @@ export function gate(input: GateInput): GateDecision {
     return {
       allow: false,
       status: 403,
-      reason: "this account is read-only; ask an administrator for an operator login",
+      reason: READONLY_REFUSAL_COPY,
     };
   }
   return { allow: true, cls };
