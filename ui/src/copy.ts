@@ -62,3 +62,21 @@ export const RETENTION_LABELS = {
   logs: "Fortress logs",
   auditTrail: "Audit trail",
 } as const;
+
+/**
+ * The two things an adoption page can say when it has no roster, which are NOT
+ * the same thing.
+ *
+ * A fortress that has never received a sync knows nothing about the
+ * organization's size; one that received a sync reporting nobody knows the
+ * organization has no active members. Rendering both as "no people" would show
+ * an unconfigured tunnel as an empty company.
+ */
+export const ROSTER_ABSENT_COPY =
+  "let.ai has not sent this fortress a roster yet, so there is no list of people to compare against. " +
+  "Everything below is what this host has observed for itself; a coverage figure would need a " +
+  "denominator this fortress does not have.";
+
+export const ROSTER_EMPTY_COPY =
+  "let.ai reports no active members for this organization. Anyone sending to this fortress appears " +
+  "below as unclaimed.";

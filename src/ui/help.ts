@@ -64,6 +64,16 @@ export const CLI_HELP: readonly HelpSection[] = [
     ],
   },
   {
+    name: "roster",
+    blurb: "The people let.ai reports for this organization, and how long departures are kept.",
+    entries: [
+      {
+        usage: "hx-fortress roster purge-inactive [--days <n>]",
+        summary: "remove directory rows for members who left more than the retention ago",
+      },
+    ],
+  },
+  {
     name: "console users",
     blurb: "Who may sign in. No password is ever typed here.",
     entries: [

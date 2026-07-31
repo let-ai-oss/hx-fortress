@@ -30,7 +30,8 @@ import type { SessionStore } from "../modules/session-vault/store/types";
 import { AuditSpool } from "../console/audit-spool";
 import { AuditDrain } from "./audit-drain";
 import { ConsoleAudit } from "./audit-writer";
-import { parseFortressConfig } from "../host/config";
+import { parseFortressConfig, rosterInactivePurgeDays } from "../host/config";
+import type { FortressConfig } from "../host/types";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
 import { readPgJson } from "../host/postgres/pg-json";
@@ -200,11 +201,13 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }
   };
 
-  const cloudUrl = async (): Promise<string | null> => {
+  /** The daemon's own config.json, when it parses. The console reads it rather
+   *  than keeping a second copy of settings the daemon owns. */
+  const daemonConfig = async (): Promise<FortressConfig | null> => {
     const raw = await readJson<unknown>(paths.config);
     if (!raw) return null;
     try {
-      return parseFortressConfig(raw).cloud.url;
+      return parseFortressConfig(raw);
     } catch {
       return null;
     }
@@ -213,7 +216,8 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
   const egress = async (): Promise<EgressInputs> => {
     const config: UiConfig = await runtime.readConfig();
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
-    const cloud = await cloudUrl();
+    const fortress = await daemonConfig();
+    const cloud = fortress?.cloud.url ?? null;
     const postgres: EgressInputs["postgres"] =
       pgJson === null
         ? { mode: "unknown" }
@@ -233,6 +237,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       downloadBase: cloud ? downloadBaseFromCloudUrl(cloud) : null,
       postgresBinariesUrl: env.FORTRESS_PG_BINARIES_URL ?? DEFAULT_PG_BINARIES_URL,
       bucket: bucket(),
+      rosterRetentionDays: rosterInactivePurgeDays(fortress),
       // The console never holds the embedding key, so the row is present only
       // when the daemon's own configuration names an endpoint.
       embeddingEndpoint: env.FORTRESS_OPENAI_BASE_URL ?? null,
@@ -300,7 +305,8 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       .catch(() => {
         // No vault credentials is a state the storage panel already renders.
       }),
-    cloudUrl().then((url) => {
+    daemonConfig().then((config) => {
+      const url = config?.cloud.url ?? null;
       downloadBase = url ? downloadBaseFromCloudUrl(url) : null;
     }),
   ]).then(() => undefined);

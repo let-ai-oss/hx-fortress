@@ -310,6 +310,7 @@ describe("the door is in the inventory", () => {
       bucket: null,
       embeddingEndpoint: null,
       ssoAdvertised: true,
+    rosterRetentionDays: 90,
     });
     const door = rows.find((r) => r.id === "sso-door");
     expect(door?.direction).toBe("in");

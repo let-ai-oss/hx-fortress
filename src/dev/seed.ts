@@ -27,6 +27,7 @@ import {
   hxSessions,
   hxUsers,
 } from "../host/postgres/schema";
+import { replaceRoster } from "../console/roster";
 import { buildSeedCorpus, seedInventory, seedUuid, type SeedBucket, type SeedCorpus } from "./corpus";
 
 /** The narrowest thing that can hold a seeded object. Any store, any emulator,
@@ -41,6 +42,10 @@ export interface SeedApplyResult {
   sessions: number;
   tombstones: number;
   objects: number;
+  /** Members written to hx.roster, through the SAME replace the tunnel uses —
+   *  never a hand-written INSERT, so the seeded world is one a real sync could
+   *  have produced. */
+  rosterMembers: number;
 }
 
 /**
@@ -183,6 +188,8 @@ export async function applySeedRows(db: HxDb, corpus: SeedCorpus = buildSeedCorp
     await db.insert(hxDeletedSessions).values(corpus.tombstones).onConflictDoNothing();
   }
 
+  const roster = await replaceRoster(db, corpus.roster);
+
   const inventory = seedInventory(corpus);
   return {
     users: inventory.users,
@@ -190,6 +197,7 @@ export async function applySeedRows(db: HxDb, corpus: SeedCorpus = buildSeedCorp
     sessions: inventory.sessions,
     tombstones: inventory.tombstones,
     objects: 0,
+    rosterMembers: roster.received,
   };
 }
 
@@ -233,8 +241,9 @@ export interface MaterializedSeed {
 
 /**
  * Write the whole corpus to disk: the objects per bucket, the rosterSync PAYLOAD
- * (replayed by the roster task — hx.roster does not exist yet, and inventing a
- * table here would be a schema nobody agreed to), the row manifest, and the
+ * (the wire frame itself, for a harness that wants to replay it over a fake hub
+ * rather than write rows — applySeedRows already applies it), the row manifest,
+ * and the
  * inventory the acceptance reads.
  */
 export async function materializeSeed(

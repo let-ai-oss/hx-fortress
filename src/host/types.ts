@@ -19,6 +19,12 @@ export interface FortressPostgresConfig {
   pgvectorUrl?: string;
 }
 
+export interface FortressRosterConfig {
+  /** How long a departed member's roster row is kept before the daily sweep
+   *  removes it. The workbench tells members the same number. */
+  inactivePurgeDays: number;
+}
+
 export interface FortressConfig {
   schemaVersion: 1;
   cloud: {
@@ -31,6 +37,7 @@ export interface FortressConfig {
     enabled: string[];
   };
   postgres?: FortressPostgresConfig;
+  roster?: FortressRosterConfig;
 }
 
 export interface ConfigStore {

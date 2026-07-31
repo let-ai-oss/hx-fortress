@@ -219,6 +219,15 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
     }),
     sessions: async () => ({ rows: [], totals, foreign }),
     people: async () => [],
+    adoption: async () => ({
+      sync: null,
+      counts: { rostered: 0, installed: 0, syncComplete: 0, sending: 0, active: 0, formerMembers: 0, unrostered: 0 },
+      stages: [],
+      roster: [],
+      unrostered: [],
+      teams: [],
+      attention: [],
+    }),
     devices: async () => [],
     growth: async () => [],
     facts: async () => ({
@@ -539,6 +548,7 @@ function externalEgress(): EgressInputs {
     bucket: { provider: "gcs", name: "orange-hx", region: "eu-north-1" },
     embeddingEndpoint: "https://api.openai.com/v1",
     ssoAdvertised: true,
+    rosterRetentionDays: 90,
   };
 }
 

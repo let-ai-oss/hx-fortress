@@ -31,7 +31,7 @@ const NAV_GROUPS: readonly { label: string; views: readonly ViewName[] }[] = [
 const NAV_LABEL: Record<string, string> = {
   overview: "Overview",
   sessions: "Sessions",
-  people: "People",
+  people: "Adoption",
   residency: "Residency",
   compliance: "Posture & Audit",
   postgres: "Postgres",

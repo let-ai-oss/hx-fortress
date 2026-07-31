@@ -51,6 +51,7 @@ import type {
 import type { ConsoleSessionRow, ConsoleSessionTotals } from "../query/console/sessions";
 import type { ForeignOrgSummary } from "../query/console/universe";
 import type { ConsoleDbState } from "./console-db";
+import type { AdoptionView } from "./console-read-port";
 
 // -- Paths --------------------------------------------------------------------
 
@@ -58,6 +59,7 @@ export const READ_PATHS = {
   status: "/ui/api/status",
   sessions: "/ui/api/sessions",
   people: "/ui/api/people",
+  adoption: "/ui/api/adoption",
   devices: "/ui/api/devices",
   growth: "/ui/api/growth",
   facts: "/ui/api/facts",
@@ -188,6 +190,8 @@ export interface ConsoleReadPort {
     foreign: ForeignOrgSummary;
   }>;
   people(): Promise<ConsolePersonRow[]>;
+  /** The roster, the funnel and everyone sending here the roster does not know. */
+  adoption(): Promise<AdoptionView>;
   devices(): Promise<ConsoleDeviceRow[]>;
   growth(days: number): Promise<ConsoleGrowthRow[]>;
   facts(): Promise<ConsoleFactsView>;
@@ -301,6 +305,8 @@ export async function handleReadRoute(
       }
       case READ_PATHS.people:
         return json({ people: await port.people() });
+      case READ_PATHS.adoption:
+        return json(await port.adoption());
       case READ_PATHS.devices:
         return json({ devices: await port.devices() });
       case READ_PATHS.growth:

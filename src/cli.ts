@@ -8,6 +8,7 @@ import {
 } from "./cli-lifecycle";
 import { CliAudit } from "./cli-audit";
 import { runAuditVerb } from "./cli-audit-verbs";
+import { runRosterVerb } from "./cli-roster";
 import { AUDIT_ACTIONS } from "./console/audit-actions";
 import { ensureUiUnit } from "./cli-ui-service";
 import {
@@ -56,6 +57,7 @@ interface CliDependencies {
   restartUiUnit?: (options: { platform?: string; uid?: number }) => void;
   ensureUiUnit?: typeof ensureUiUnit;
   runAuditVerb?: typeof runAuditVerb;
+  runRosterVerb?: typeof runRosterVerb;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
@@ -298,6 +300,11 @@ export async function runCli(
       }
       case "audit":
         return await (dependencies.runAuditVerb ?? runAuditVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
+      case "roster":
+        return await (dependencies.runRosterVerb ?? runRosterVerb)(args.slice(1), {
           writeLine,
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });

@@ -51,8 +51,10 @@ export function isConsoleCommandKind(value: unknown): value is ConsoleCommandKin
   return typeof value === "string" && KIND_SET.has(value);
 }
 
-/** The five relations this task creates. The privilege matrix is asserted over
- *  exactly these; a table added by a later migration joins the list there. */
+/** Every relation the console plane owns. The privilege matrix is asserted over
+ *  exactly these, and each one a later migration adds joins the list here: the
+ *  cloud-served read roles are REVOKEd from all of them, so a table left off is
+ *  a table 0005's default privileges quietly hand to hx_readonly. */
 export const CONSOLE_TABLES = [
   "console_commands",
   "ingest_control",
@@ -61,6 +63,8 @@ export const CONSOLE_TABLES = [
   "audit_settings",
   "audit_runs",
   "audit_findings",
+  "roster",
+  "roster_sync",
 ] as const;
 
 /** ingest_control columns hx_app_rw may write. `row_written_at` is EXCLUDED:
@@ -171,6 +175,12 @@ export const UI_TABLE_GRANTS: ReadonlyArray<{ table: string; privileges: readonl
   // finding in it; the daemon writes both, so hx_ui reads and never writes.
   { table: "audit_runs", privileges: ["SELECT"] },
   { table: "audit_findings", privileges: ["SELECT"] },
+  // The organization's people, as let.ai reports them. The daemon receives the
+  // sync and writes it; the console renders adoption and never edits a roster —
+  // a roster this host could edit would be a directory that disagrees with the
+  // organization's own.
+  { table: "roster", privileges: ["SELECT"] },
+  { table: "roster_sync", privileges: ["SELECT"] },
   // The console's own read surface: sessions are column-level (below), and
   // everything the session rows point AT is metadata the console renders by
   // name — a person, a device, a repository, a project.

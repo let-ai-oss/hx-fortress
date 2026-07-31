@@ -69,6 +69,16 @@ export const DISCLOSURE_BOUNDARY =
   "No text, no excerpts, no previews: the transcript rests in the organization's bucket, readable " +
   `only through the tools the organization authorizes. ${DISCLOSURE_CANONICAL}`;
 
+/** On the adoption surface, which renders a directory of people this fortress
+ *  did not compile. Naming its origin is the point: an operator reading names,
+ *  addresses and teams should know they came from let.ai and are replaced whole
+ *  on every sync, not accumulated here. */
+export const DISCLOSURE_ROSTER_NOTE =
+  "The roster is people-data let.ai reports for this organization — names, addresses and team " +
+  "membership. It is stored here so this page can be answered without asking the cloud, it is " +
+  "replaced whole on every sync, and members who leave are removed on the retention the Data paths " +
+  "panel states.";
+
 /**
  * Every literal this module publishes.
  *

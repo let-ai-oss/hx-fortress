@@ -12,7 +12,18 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  adoptionStages,
+  ADOPTION_ACTIVE_DAYS,
+  attentionRows,
+  rosterTeams,
+  type AdoptionCounts,
+  type AdoptionStageView,
+  type AttentionRow,
+  type TeamSummary,
+} from "../console/adoption";
 import { readSpool } from "../console/audit-spool";
+import { readRosterSyncState, type RosterSyncState } from "../console/roster";
 import { redactedMessage } from "./redact";
 import type { MetricsSnapshot } from "../console/metrics";
 import {
@@ -51,6 +62,14 @@ import {
   type ConsolePersonRow,
   type ConsolePostgresFacts,
 } from "../query/console/inventory";
+import {
+  consoleAdoptionCountsQuery,
+  consoleRosterQuery,
+  consoleUnrosteredQuery,
+  type AdoptionCountsRow,
+  type RosterPersonRow,
+  type UnrosteredPersonRow,
+} from "../query/console/roster";
 import {
   consolePageLimit,
   consoleSessionByKeyQuery,
@@ -125,6 +144,27 @@ export interface ConsoleReadPortDeps {
   downloadBase: () => string | null;
   env?: Record<string, string | undefined>;
   now?: () => Date;
+}
+
+/** Everything the adoption page renders, in one answer: who the organization
+ *  employs, what the roster says they have, and what this host has actually
+ *  seen. The two halves stay labelled all the way to the screen. */
+export interface AdoptionView {
+  sync: RosterSyncState | null;
+  counts: AdoptionCounts;
+  stages: AdoptionStageView[];
+  roster: RosterPersonRow[];
+  unrostered: UnrosteredPersonRow[];
+  teams: TeamSummary[];
+  attention: AttentionRow[];
+}
+
+/** jsonb comes back as whatever the driver made of it. A member whose teams
+ *  arrive unusable belongs to no team, which is a valid answer — never a crash
+ *  in a group-by. */
+function normalizeRosterRow(row: RosterPersonRow): RosterPersonRow {
+  const teams = Array.isArray(row.teams) ? row.teams.filter((t) => typeof t === "string") : [];
+  return { ...row, teams, active: row.active === true };
 }
 
 /** The verifier's last measured clock offset, when it has measured one. Absent
@@ -257,6 +297,40 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     },
 
     people: () => query<ConsolePersonRow>(() => consolePeopleQuery(deps.universe)),
+
+    async adoption(): Promise<AdoptionView> {
+      const db = deps.db();
+      const sync = db ? await readRosterSyncState(db).catch(() => null) : null;
+      const [counts] = await query<AdoptionCountsRow>(() =>
+        consoleAdoptionCountsQuery(deps.universe, ADOPTION_ACTIVE_DAYS),
+      );
+      const roster = (await query<RosterPersonRow>(() => consoleRosterQuery(deps.universe))).map(
+        normalizeRosterRow,
+      );
+      const unrostered = await query<UnrosteredPersonRow>(() =>
+        consoleUnrosteredQuery(deps.universe),
+      );
+      const totals: AdoptionCounts = counts ?? {
+        rostered: 0,
+        installed: 0,
+        syncComplete: 0,
+        sending: 0,
+        active: 0,
+        formerMembers: 0,
+        unrostered: 0,
+      };
+      return {
+        // Null means no roster has EVER arrived, which the page says in its own
+        // words — never as an organization with nobody in it.
+        sync,
+        counts: totals,
+        stages: adoptionStages(totals),
+        roster,
+        unrostered,
+        teams: rosterTeams(roster),
+        attention: attentionRows(roster, now().getTime()),
+      };
+    },
     devices: () => query<ConsoleDeviceRow>(() => consoleDevicesQuery()),
     growth: (days) => query<ConsoleGrowthRow>(() => consoleGrowthQuery(deps.universe, days)),
 

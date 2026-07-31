@@ -9,6 +9,7 @@ import {
   type McpTunnelRequest,
   type McpTunnelResult,
   type MsgData,
+  type RosterSyncPayload,
 } from "../protocol";
 import type {
   CloudConnection,
@@ -97,6 +98,10 @@ export interface WsCloudConnectionDeps {
   /** MC-2368: computes the fortress's collection counts, piggybacked onto the
    *  heartbeat (throttled). Returns null when the DB isn't ready. Omit to disable. */
   collectionStats?: () => Promise<CollectionStats | null>;
+  /** Receives one rosterSync: the organization's active members and their device
+   *  inventory. Omit and the frame is accepted and dropped — which is what an
+   *  older build did to every frame it did not know, silently. */
+  onRoster?: (roster: RosterSyncPayload) => Promise<void>;
 }
 
 /** Reject if `p` doesn't settle within `ms` (MC-2517 fortress dispatch ceiling).
@@ -163,6 +168,8 @@ export class WsCloudConnection implements CloudConnection {
   private readonly maxFrameBytes: number;
   private closeResolve: (() => void) | null = null;
   private readonly queries = new FortressQueryRegistry();
+  /** Frame kinds already reported as unknown. Logged once each, not per frame. */
+  private readonly unknownFrames = new Set<string>();
 
   constructor(private readonly deps: WsCloudConnectionDeps) {
     this.reconnectMinMs = deps.reconnectMinMs ?? RECONNECT_MIN_MS;
@@ -541,6 +548,18 @@ export class WsCloudConnection implements CloudConnection {
         if (this.deps.mcp) await dispatchMcpFrame(this.deps.mcp, frame, send, this.deps.logger);
         break;
       }
+      case "rosterSync": {
+        if (!this.deps.onRoster) break;
+        try {
+          await this.deps.onRoster(frame.roster);
+        } catch (err) {
+          // A roster that cannot be stored is not a connection problem: the hub
+          // re-sends the whole set on the next sync, so the console keeps
+          // rendering the roster it has and says how old it is.
+          this.deps.logger.error("could not apply the roster let.ai sent", err);
+        }
+        break;
+      }
       case "heartbeatAck":
         break;
       case "moduleAdvertise": {
@@ -591,6 +610,21 @@ export class WsCloudConnection implements CloudConnection {
         this.stopped = true;
         settle(new Error(this._message));
         this.ws?.close();
+        break;
+      }
+      default: {
+        // A hub ahead of this fortress. Dropping it is correct — the envelope is
+        // additive precisely so an older peer keeps working — but dropping it
+        // SILENTLY is how a frame that was supposed to be handled goes unnoticed
+        // for a release. Logged once per kind, so a frame on every heartbeat
+        // cannot become the log.
+        const kind = String((frame as { t?: unknown }).t ?? "unnamed");
+        if (!this.unknownFrames.has(kind)) {
+          this.unknownFrames.add(kind);
+          this.deps.logger.error(
+            `ignoring a hub frame this build does not understand: ${kind} (the hub is newer than this fortress)`,
+          );
+        }
         break;
       }
     }

@@ -3,7 +3,13 @@ import path from "node:path";
 
 import { assertModuleId, type fortressPaths } from "./paths";
 import { HX_EMBEDDING_DIM } from "./postgres/schema/embeddings";
-import type { ConfigStore, FortressConfig, FortressPostgresConfig } from "./types";
+import { DEFAULT_ROSTER_INACTIVE_PURGE_DAYS } from "../console/roster";
+import type {
+  ConfigStore,
+  FortressConfig,
+  FortressPostgresConfig,
+  FortressRosterConfig,
+} from "./types";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -59,6 +65,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
     }
 
     const postgres = parsePostgresConfig(value.postgres);
+    const roster = parseRosterConfig(value.roster);
 
     return {
       schemaVersion: 1,
@@ -66,6 +73,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       gateway: { publicUrl: gatewayPublicUrl },
       modules: { enabled: [...enabled] },
       ...(postgres ? { postgres } : {}),
+      ...(roster ? { roster } : {}),
     };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
@@ -83,6 +91,26 @@ function parseGatewayPublicUrl(value: unknown): string {
   }
   assertGatewayPublicUrl(value.publicUrl);
   return value.publicUrl;
+}
+
+/** Absent means the default. A retention that parsed to something absurd is
+ *  refused rather than clamped: it decides when people's records disappear, and
+ *  silently substituting a number nobody asked for is the wrong kind of
+ *  forgiving. */
+function parseRosterConfig(value: unknown): FortressRosterConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("roster must be an object");
+  const days = value.inactivePurgeDays;
+  if (typeof days === "undefined") return undefined;
+  if (typeof days !== "number" || !Number.isInteger(days) || days < 0 || days > 3650) {
+    throw new Error("roster.inactivePurgeDays must be a whole number of days between 0 and 3650");
+  }
+  return { inactivePurgeDays: days };
+}
+
+/** What the sweep and the `roster purge-inactive` verb actually use. */
+export function rosterInactivePurgeDays(config: FortressConfig | null): number {
+  return config?.roster?.inactivePurgeDays ?? DEFAULT_ROSTER_INACTIVE_PURGE_DAYS;
 }
 
 function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined {
@@ -432,6 +460,9 @@ export async function ensureEnrollmentConfig(
     // which silently moved a fortress configured against an external database
     // onto a fresh embedded cluster — its data still there, invisible.
     ...(existing?.postgres ? { postgres: existing.postgres } : {}),
+    // Same reason: a retention the operator shortened must not spring back to
+    // the default because the fortress was re-enrolled.
+    ...(existing?.roster ? { roster: existing.roster } : {}),
   };
 
   // Only preserve the raw object when the config actually parsed: merging over

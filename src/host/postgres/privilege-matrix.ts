@@ -15,6 +15,7 @@
 import { PG_APP_RO_ROLE, PG_APP_RW_ROLE, PG_READONLY_ROLE, PG_SCHEMA } from "./cluster-roles";
 import {
   CONSOLE_ROUTINES,
+  CONSOLE_TABLES,
   INGEST_CONTROL_ANCHOR_COLUMN,
   PG_UI_ROLE,
   UI_READ_TABLES,
@@ -42,6 +43,14 @@ const TABLE_EXPECTATIONS: readonly TableExpectation[] = [
   { role: PG_APP_RW_ROLE, table: "audit_acks", granted: ["SELECT"] },
   { role: PG_APP_RW_ROLE, table: "audit_settings", granted: ["SELECT"] },
   { role: PG_APP_RW_ROLE, table: "ingest_control", granted: ["SELECT"] },
+  // The audit engine's own record and the roster ARE the daemon's to write: a
+  // run it cannot record is a run that never happened, and the roster arrives on
+  // the daemon's own connection. Neither is re-derivable from an operator
+  // decision, so neither is fenced — they are re-derivable from the world.
+  { role: PG_APP_RW_ROLE, table: "audit_runs", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+  { role: PG_APP_RW_ROLE, table: "audit_findings", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+  { role: PG_APP_RW_ROLE, table: "roster", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+  { role: PG_APP_RW_ROLE, table: "roster_sync", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
   // The console mints commands and drains the audit spool; it never transitions
   // a command and never writes the audit tables the engine owns.
   { role: PG_UI_ROLE, table: "console_commands", granted: ["SELECT", "INSERT"] },
@@ -49,11 +58,13 @@ const TABLE_EXPECTATIONS: readonly TableExpectation[] = [
   { role: PG_UI_ROLE, table: "ingest_control", granted: ["SELECT"] },
   { role: PG_UI_ROLE, table: "audit_acks", granted: ["SELECT"] },
   { role: PG_UI_ROLE, table: "audit_settings", granted: ["SELECT"] },
+  { role: PG_UI_ROLE, table: "audit_runs", granted: ["SELECT"] },
+  { role: PG_UI_ROLE, table: "audit_findings", granted: ["SELECT"] },
+  { role: PG_UI_ROLE, table: "roster", granted: ["SELECT"] },
+  { role: PG_UI_ROLE, table: "roster_sync", granted: ["SELECT"] },
   // The cloud-served read DSN sees nothing the console owns.
   ...[PG_READONLY_ROLE, PG_APP_RO_ROLE].flatMap((role) =>
-    ["console_commands", "admin_audit", "audit_acks", "audit_settings", "ingest_control"].map(
-      (table) => ({ role, table, granted: [] as readonly string[] }),
-    ),
+    CONSOLE_TABLES.map((table) => ({ role, table, granted: [] as readonly string[] })),
   ),
   // Transcript text is column-level for the console, so the TABLE grant is
   // absent — has_table_privilege returns FALSE for a column-only grant. Same

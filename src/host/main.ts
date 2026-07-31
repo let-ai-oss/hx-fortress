@@ -25,6 +25,7 @@ import {
   FileConfigStore,
   resolveEmbedConfig,
   resolveGatewayConfig,
+  rosterInactivePurgeDays,
 } from "./config";
 import {
   createEmbedWorker,
@@ -62,6 +63,12 @@ import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-contro
 import { downloadBaseFromCloudUrl } from "../update";
 import { readConsoleAdvertisement } from "../ui/advertise";
 import { runAuditForFortress } from "../console/audit-runner";
+import { purgeInactiveRoster, replaceRoster } from "../console/roster";
+import {
+  clearRosterPurgeIntent,
+  publishRosterPurge,
+  readRosterPurgeIntent,
+} from "../console/roster-signal";
 import { createWitnessClient } from "../console/audit-witness";
 import {
   postureFreshness,
@@ -351,6 +358,18 @@ export async function runFortressHost(
     collectionStats: async () => {
       const db = resolveHxDb();
       return db ? computeCollectionStats(db) : null;
+    },
+    // The roster arrives unsolicited, on connect and whenever the hub recomputes
+    // it. Stored as it lands so the console never has to ask the cloud a
+    // question at read time.
+    onRoster: async (roster) => {
+      const db = postgres.isReady() ? resolveHxDb() : null;
+      if (!db) throw new Error("the fortress database is not available");
+      const applied = await replaceRoster(db, roster);
+      bus.scopeFor("roster").info("applied the roster let.ai sent", {
+        members: applied.received,
+        departed: applied.deactivated,
+      });
     },
     enrollToken: pendingEnrollment?.token,
     async onEnrolled(cred) {
@@ -829,13 +848,72 @@ export async function runFortressHost(
     await clearWitnessIntent(paths.runtimeRoot).catch(() => {});
   }
 
-  process.on("SIGUSR2", () => void applyWitnessIntent());
+  /**
+   * Roster retention.
+   *
+   * Departed members are kept for a configurable window and then removed — the
+   * one place in this system where people-data ages out on its own. It reads the
+   * retention from config.json at every sweep rather than caching it at boot, so
+   * shortening it takes effect on the next pass instead of the next restart.
+   */
+  async function sweepRoster(requestedDays: number | null = null): Promise<void> {
+    const db = postgres.isReady() ? resolveHxDb() : null;
+    if (!db) return;
+    const configured = rosterInactivePurgeDays(
+      await new FileConfigStore(paths).load().catch(() => null),
+    );
+    const days = requestedDays ?? configured;
+    try {
+      await daemonAudit.run(
+        "system.roster_purge",
+        { engine: "roster retention", kind: `${days}d` },
+        async () => {
+          const removed = await purgeInactiveRoster(db, days);
+          await publishRosterPurge(paths.runtimeRoot, {
+            at: new Date().toISOString(),
+            removed,
+            days,
+          });
+          if (removed > 0) {
+            consoleLog.info("purged departed roster members", { removed, days });
+          }
+          return { removed, days };
+        },
+      );
+    } catch (err) {
+      consoleLog.error("the roster retention sweep failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** The terminal's half of `roster purge-inactive`: it writes the intent and
+   *  signals, because it holds no database credential and must not. */
+  async function applyRosterPurgeIntent(): Promise<void> {
+    const intent = await readRosterPurgeIntent(paths.runtimeRoot).catch(() => null);
+    if (!intent) return;
+    await sweepRoster(intent.days);
+    await clearRosterPurgeIntent(paths.runtimeRoot).catch(() => {});
+  }
+
+  // One signal, every pending intent: the terminal writes a file and nudges, and
+  // the daemon applies whichever files are there when it wakes.
+  process.on("SIGUSR2", () => {
+    void applyWitnessIntent();
+    void applyRosterPurgeIntent();
+  });
+
+  const rosterTimer = setInterval(() => void sweepRoster(), 24 * 60 * 60_000);
+  (rosterTimer as { unref?: () => void }).unref?.();
 
   const commandTimer = setInterval(() => void pollConsolePlane(), 1_000);
   (commandTimer as { unref?: () => void }).unref?.();
 
   async function bootConsolePlane(): Promise<void> {
     await refreshPause();
+    // A fortress that is off for a month must not wait another day for the
+    // retention it already owes.
+    await sweepRoster();
     // Orphaned credential files are secrets on disk for commands that will
     // never run; sweep them as soon as the daemon is up, not only on a timer.
     const swept = await sweepCmdCreds(paths.cmdCreds).catch(() => ({ deleted: [] }));
@@ -868,6 +946,7 @@ export async function runFortressHost(
   } finally {
     clearInterval(pauseTimer);
     clearInterval(postureTimer);
+    clearInterval(rosterTimer);
     clearInterval(commandTimer);
     metricsPublisher.stop();
     gatewayHandle?.stop();

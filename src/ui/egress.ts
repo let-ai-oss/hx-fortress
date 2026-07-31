@@ -158,6 +158,10 @@ export interface EgressInputs {
   embeddingEndpoint: string | null;
   /** True once `ui sso on` has advertised a console URL. */
   ssoAdvertised: boolean;
+  /** How long a departed member's roster row is kept, as configured. Stated in
+   *  the inbound row because a retention nobody can read is a retention nobody
+   *  can check. */
+  rosterRetentionDays: number;
 }
 
 /** Where the console is reachable from, stated from the resolved bind rather
@@ -276,6 +280,24 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       ],
     },
   ];
+
+  rows.push({
+    id: "roster-inbound",
+    name: "Roster inbound",
+    direction: "in",
+    peer: inputs.cloudUrl ?? "not enrolled",
+    carries:
+      "the organization's ACTIVE members — external id, display name, email, team names — and a " +
+      "per-member device inventory: installs, last seen, last upload and backfill progress",
+    gate: "the enrolled organization credential; the hub sends it unasked, on connect and on change",
+    notes: [
+      "Nothing about a session travels on this path, and nothing travels outward on it: the fortress " +
+        "answers no roster question and sends no directory of its own.",
+      "Only active members are sent. Somebody who leaves is absent from the next sync rather than " +
+        `tombstoned, so this host derives the departure itself and keeps the row for ` +
+        `${inputs.rosterRetentionDays} days before removing it.`,
+    ],
+  });
 
   rows.push({
     id: "console-url-advertised",

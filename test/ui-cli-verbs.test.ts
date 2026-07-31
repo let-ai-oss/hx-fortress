@@ -438,6 +438,7 @@ describe("the help registry", () => {
       "fortress",
       "console",
       "residency audit",
+      "roster",
       "console users",
       "console sso",
     ]);
@@ -447,6 +448,7 @@ describe("the help registry", () => {
       "hx-fortress ui user create <login> --role operator|readonly",
       "hx-fortress ui sso on",
       "hx-fortress container-run",
+      "hx-fortress roster purge-inactive [--days <n>]",
     ]) {
       expect(usages).toContain(verb);
     }

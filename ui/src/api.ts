@@ -29,6 +29,7 @@ export const API = {
   service: "/ui/api/service",
   sessions: "/ui/api/sessions",
   people: "/ui/api/people",
+  adoption: "/ui/api/adoption",
   devices: "/ui/api/devices",
   growth: "/ui/api/growth",
   facts: "/ui/api/facts",
@@ -252,6 +253,63 @@ export interface PersonRow {
   lastUploadAt: string | null;
 }
 
+export interface RosterPersonRow {
+  externalId: string;
+  displayName: string;
+  email: string | null;
+  teams: string[];
+  installed: number;
+  lastSeenAt: string | null;
+  lastUploadAt: string | null;
+  syncTotal: number | null;
+  syncDone: number | null;
+  syncReportedAt: string | null;
+  active: boolean;
+  inactiveSince: string | null;
+  sessions: number;
+  bytes: number | string;
+  lastActivityAt: string | null;
+}
+
+export interface AdoptionStageView {
+  id: string;
+  label: string;
+  /** The ONE thing this number was computed from. Rendered beside it, because a
+   *  funnel whose stages come from different places is only readable if it says
+   *  which is which. */
+  source: string;
+  attestation: "cloud-attested" | "fortress-observed";
+  detail: string;
+  count: number;
+  share: number | null;
+}
+
+export interface AdoptionView {
+  /** Null when no roster has ever arrived — a different fact from a roster that
+   *  reported nobody, and the page says so in different words. */
+  sync: { asOf: string; receivedAt: string; members: number } | null;
+  counts: {
+    rostered: number;
+    installed: number;
+    syncComplete: number;
+    sending: number;
+    active: number;
+    formerMembers: number;
+    unrostered: number;
+  };
+  stages: AdoptionStageView[];
+  roster: RosterPersonRow[];
+  unrostered: Array<{
+    userExternalId: string;
+    displayName: string | null;
+    sessions: number;
+    bytes: number | string;
+    lastActivityAt: string | null;
+  }>;
+  teams: Array<{ name: string; members: number; sending: number }>;
+  attention: Array<{ externalId: string; displayName: string; kind: string; detail: string }>;
+}
+
 export interface DeviceRow {
   userExternalId: string;
   deviceId: string;
@@ -457,6 +515,7 @@ export const api = {
   sessions: (query: Record<string, string>) =>
     getJson<SessionsPage>(`${API.sessions}?${new URLSearchParams(query).toString()}`),
   people: () => getJson<{ people: PersonRow[] }>(API.people),
+  adoption: () => getJson<AdoptionView>(API.adoption),
   devices: () => getJson<{ devices: DeviceRow[] }>(API.devices),
   growth: (days: number) => getJson<{ days: GrowthRow[] }>(`${API.growth}?days=${days}`),
   facts: () => getJson<FactsView>(API.facts),
