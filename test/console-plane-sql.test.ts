@@ -235,6 +235,20 @@ describe("the boot batch", () => {
     expect(UI_SESSION_COLUMNS).not.toContain("last_assistant_text");
   });
 
+  test("every statement naming the pgvector-gated table is guarded", () => {
+    // hx.embeddings exists only where the `vector` extension does — migration
+    // 0006 declares `requires: "vector"` and the runner SKIPS it otherwise. The
+    // whole batch is one transaction, so a bare statement naming the missing
+    // table aborts role provisioning entirely and the fortress comes up with no
+    // login roles at all.
+    const naming = batch().filter((statement) => statement.includes("hx.embeddings"));
+    expect(naming.length).toBeGreaterThan(0);
+    for (const statement of naming) {
+      expect(statement.startsWith("DO $$")).toBe(true);
+      expect(statement).toContain("relname = 'embeddings'");
+    }
+  });
+
   test("carries no cleartext beyond the role passwords it must set", () => {
     const stmts = batch();
     const passwordStatements = stmts.filter((s) => s.includes("PASSWORD"));

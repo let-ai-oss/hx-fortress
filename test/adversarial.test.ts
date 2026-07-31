@@ -349,6 +349,8 @@ interface Signer {
   mint(claims: Record<string, unknown>, window?: { iat?: number; exp?: number | string }): Promise<string>;
 }
 
+let mintCounter = 0;
+
 async function signer(): Promise<Signer> {
   const pair = generateKeyPairSync("ed25519", {
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
@@ -361,7 +363,10 @@ async function signer(): Promise<Signer> {
     mint: (claims, window = {}) =>
       new SignJWT(claims)
         .setProtectedHeader({ alg: "EdDSA" })
-        .setJti(typeof claims.jti === "string" ? claims.jti : `jti-${Math.random().toString(36).slice(2)}`)
+        // Counted, not random: a replay arm is about which jti was already
+        // spent, and a suite that cannot say which token it minted cannot fail
+        // the same way twice.
+        .setJti(typeof claims.jti === "string" ? claims.jti : `jti-${(mintCounter += 1).toString(36)}`)
         .setIssuedAt(window.iat)
         .setExpirationTime(window.exp ?? "2m")
         .sign(key),

@@ -235,7 +235,8 @@ describe("the DISPUTED copy", () => {
     expect(lines).toContain("recorded as a success");
     expect(lines).toContain("/ui/api/audit?action=console.command.outcome");
     expect(lines).toContain("rotate the hx_app_rw database credential");
-    expect(lines).toContain("D15 row in SECURITY.md");
+    // The pointer has to RESOLVE: the section it names is a heading in that file.
+    expect(lines).toContain('"Command outcomes are corroborated, not trusted" in SECURITY.md');
   });
 
   test("the denied arm reads differently", () => {

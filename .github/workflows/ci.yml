@@ -92,7 +92,12 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        # pgvector, not stock postgres: hx.embeddings is created only where the
+        # `vector` extension is available, and the console's column-level grant
+        # over it — the one that withholds the vector encoding of transcript
+        # text — is part of the matrix asserted below. An image without the
+        # extension would skip that table and leave the boundary unproven.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_PASSWORD: fortress-ci
           POSTGRES_DB: hx-db

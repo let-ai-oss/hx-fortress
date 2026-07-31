@@ -440,4 +440,87 @@ END $$`);
       );
     }, 60_000);
   });
+  // The adversarial arms that only a LIVE catalog can answer: what the two
+  // declared-hostile principals can actually do to the tables the engines own,
+  // and what a binary that comes back after a downgrade does about a row the
+  // downgraded one let in.
+  describe("as the declared-hostile principals", () => {
+    test("the write role reaches the fenced tables through the routines and no other way", async () => {
+      for (const statement of [
+        "INSERT INTO hx.audit_acks (org, session_id, acknowledged_by) VALUES ('o', 's', 'x')",
+        "UPDATE hx.audit_acks SET reason = 'x'",
+        "DELETE FROM hx.audit_acks",
+        "INSERT INTO hx.audit_settings (cloud_witness) VALUES (true)",
+        "UPDATE hx.audit_settings SET cloud_witness = true",
+        "DELETE FROM hx.audit_settings",
+      ]) {
+        expect([statement, await refused(rwDsn, statement)]).toMatchObject([statement, expect.stringMatching(/permission denied/i)]);
+      }
+      // The fence is TARGETED, not a blanket read-only: the audit engine's own
+      // run record is the daemon's to write, because a run it cannot record is
+      // a run that never happened.
+      expect(await refused(rwDsn, "INSERT INTO hx.audit_runs (trigger) VALUES ('adversarial')")).toBeNull();
+      await sql.run("", "DELETE FROM hx.audit_runs WHERE trigger = 'adversarial'");
+    });
+
+    test("the console role reads every engine table and writes none of them", async () => {
+      const readOnly: Array<[string, string]> = [
+        ["audit_acks", "INSERT INTO hx.audit_acks (org, session_id, acknowledged_by) VALUES ('o', 's', 'x')"],
+        ["audit_settings", "UPDATE hx.audit_settings SET cloud_witness = true"],
+        ["audit_runs", "INSERT INTO hx.audit_runs (trigger) VALUES ('ui')"],
+        ["audit_findings", "DELETE FROM hx.audit_findings"],
+        ["roster", "INSERT INTO hx.roster (external_id, display_name) VALUES ('x', 'X')"],
+        ["roster_sync", "UPDATE hx.roster_sync SET members = 0"],
+        ["migration_runs", "INSERT INTO hx.migration_runs (phase) VALUES ('arm')"],
+        ["migration_objects", "DELETE FROM hx.migration_objects"],
+        ["ingest_control", "INSERT INTO hx.ingest_control (paused_until) VALUES (now())"],
+      ];
+      for (const [table, statement] of readOnly) {
+        expect([table, await refused(uiDsn, statement)]).toMatchObject([table, expect.stringMatching(/permission denied/i)]);
+        expect([table, await refused(uiDsn, `SELECT 1 FROM hx.${table} LIMIT 1`)]).toEqual([table, null]);
+      }
+      // Its two writes, and only those two: a command row, and an audit record
+      // the daemon's own role cannot produce.
+      expect(await refused(uiDsn, "INSERT INTO hx.console_commands (kind, params) VALUES ('self_test', '{}')")).toBeNull();
+      const marker = `adversarial-${Date.now().toString(36)}`;
+      expect(
+        await refused(
+          uiDsn,
+          `INSERT INTO hx.admin_audit (spool_file_id, seq, action, kind) VALUES ('${marker}', 1, 'console.probe', 'intent')`,
+        ),
+      ).toBeNull();
+      await sql.run("", `DELETE FROM hx.admin_audit WHERE spool_file_id = '${marker}'`);
+    });
+
+    test("a row planted while an older binary held INSERT is fenced, never executed", async () => {
+      await sql.run("", "DELETE FROM hx.console_commands");
+      // Precisely what a downgraded binary's blanket schema grant does on its
+      // first boot, and the window this fence exists for.
+      await sql.run("", "GRANT INSERT ON hx.console_commands TO hx_app_rw");
+      const [planted] = await query<{ id: string }>(
+        rwDsn,
+        "INSERT INTO hx.console_commands (kind, params) VALUES ('update_apply', '{}') RETURNING id",
+      );
+
+      // The binary that comes back takes the grant away again...
+      await boot();
+      expect(await refused(rwDsn, "INSERT INTO hx.console_commands (kind) VALUES ('self_test')")).toMatch(
+        /permission denied/i,
+      );
+
+      // ...and closes out every row it cannot prove it was executing itself.
+      const gateway = createCommandGateway(createHxDb(rwDsn));
+      const inFlightPath = `${process.env.TMPDIR ?? "/tmp"}/hx-downgrade-${Date.now()}.json`;
+      const result = await runBootFence({ gateway, inFlightPath, claimedBy: "pid:boot" });
+      expect(result.rejected).toContain(planted.id);
+      const [row] = await query<{ status: string; error: string }>(
+        uiDsn,
+        `SELECT status, error FROM hx.console_commands WHERE id = '${planted.id}'`,
+      );
+      expect(row.status).toBe("rejected");
+      expect(row.error).toBe(REJECT_BOOT_FENCE);
+      // Terminal is terminal: not even the re-drive arm reopens it.
+      expect(await gateway.claim(planted.id, "pid:boot", true)).toBe(false);
+    }, 60_000);
+  });
 });

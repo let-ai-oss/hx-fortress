@@ -443,6 +443,29 @@ END $$`,
   ];
 }
 
+/**
+ * Wrap a statement so it runs only where `hx.embeddings` exists.
+ *
+ * That table is pgvector-gated: migration 0006 declares `requires: "vector"`,
+ * and the runner SKIPS it — deliberately, retrying on a later boot — on a
+ * cluster whose bundle does not package the extension. The whole ensureAppRoles
+ * block is ONE simple-query batch and therefore ONE transaction, so a bare
+ * statement naming the missing table does not just fail itself: it aborts role
+ * provisioning entirely, and the fortress comes up with no login roles at all.
+ */
+function whereEmbeddingsExist(statement: string): string {
+  return `DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = '${PG_SCHEMA}' AND c.relname = 'embeddings'
+  ) THEN
+    EXECUTE ${quoteLiteral(statement)};
+  END IF;
+END $$`;
+}
+
 // ── Phase 2 · table-level REVOKEs ────────────────────────────────────────────
 
 /**
@@ -474,7 +497,7 @@ export function revokeStatements(uiExtras: readonly string[] = [], views: readon
   // a table-level grant would include the two transcript-text columns. Same for
   // hx.embeddings, whose vector column encodes the text those columns hold.
   out.push(`REVOKE ALL ON ${PG_SCHEMA}.sessions FROM ${PG_UI_ROLE}`);
-  out.push(`REVOKE ALL ON ${PG_SCHEMA}.embeddings FROM ${PG_UI_ROLE}`);
+  out.push(whereEmbeddingsExist(`REVOKE ALL ON ${PG_SCHEMA}.embeddings FROM ${PG_UI_ROLE}`));
   // Views are owner-rights and can read straight past a column grant, so the
   // console is denied every one that is not deliberately allowlisted.
   for (const view of views) {
@@ -498,7 +521,9 @@ export function columnGrantStatements(): string[] {
     `GRANT INSERT (${INGEST_CONTROL_INSERT_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.ingest_control TO ${PG_APP_RW_ROLE}`,
     `GRANT UPDATE (${INGEST_CONTROL_UPDATE_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.ingest_control TO ${PG_APP_RW_ROLE}`,
     `GRANT SELECT (${UI_SESSION_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.sessions TO ${PG_UI_ROLE}`,
-    `GRANT SELECT (${UI_EMBEDDING_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.embeddings TO ${PG_UI_ROLE}`,
+    whereEmbeddingsExist(
+      `GRANT SELECT (${UI_EMBEDDING_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.embeddings TO ${PG_UI_ROLE}`,
+    ),
   ];
 }
 

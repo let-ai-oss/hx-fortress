@@ -257,9 +257,12 @@ export function disputedCopy(ctx: DisputedContext): string[] {
       : "This outcome was recorded as a failure or a refusal, and the fortress daemon's own record disagrees.",
     "The recorded outcome was not produced by this fortress daemon.",
     `Audit trail entry: ${ctx.auditLink}`,
+    // Named by its heading rather than by an internal label: the operator
+    // reading this has to be able to find the section by searching for what it
+    // says, not for what a ledger somewhere calls it.
     "Remediation: rotate the hx_app_rw database credential - the only authority that can report an " +
-      "outcome it did not produce - and read the D15 row in SECURITY.md for what that role can and " +
-      "cannot do.",
+      'outcome it did not produce - and read "Command outcomes are corroborated, not trusted" in ' +
+      "SECURITY.md for what that role can and cannot do.",
   ];
   if (ctx.externalPostgres) {
     lines.push(
