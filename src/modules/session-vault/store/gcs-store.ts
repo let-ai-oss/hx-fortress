@@ -48,6 +48,14 @@ export interface GcsStoreConfig {
   keyFilename?: string;
   /** Inline service-account credentials (parsed JSON). */
   credentials?: StorageOptions["credentials"];
+  /**
+   * An alternate GCS API root — the emulator seam (fake-gcs-server).
+   *
+   * It is a CONFIG field rather than an env read so the emulator can never be
+   * reached by a deployed fortress that happens to inherit STORAGE_EMULATOR_HOST
+   * from its environment: something must pass it here, deliberately.
+   */
+  apiEndpoint?: string;
 }
 
 /** Rewrite-in-place once a composed object reaches this many components. */
@@ -80,6 +88,7 @@ export class GcsStore implements SessionStore {
     } else if (cfg.credentials) {
       opts.credentials = cfg.credentials;
     }
+    if (cfg.apiEndpoint) opts.apiEndpoint = cfg.apiEndpoint;
     this.storage = new Storage(opts);
     this.bucketName = cfg.bucketName;
   }

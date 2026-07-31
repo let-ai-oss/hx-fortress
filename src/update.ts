@@ -29,6 +29,7 @@ import {
 } from "./version.js";
 import { assertHttpsDownloadUrl, isLoopbackHost } from "./host/config";
 import { SIGNATURE_ENFORCE, verifyFetchedArtifact } from "./host/trust/verify";
+import type { TrustedSigningKey } from "./host/trust/signing-keys";
 
 /** Hard ceiling on the decompressed self-update binary — a gzip-bomb guard. Well
  *  above a real single-file fortress binary, so it never trips on a legit build. */
@@ -52,6 +53,16 @@ export interface UpdateOpts {
   binPath?: string;
   log?: (msg: string) => void;
   onProgress?: (ev: UpdateProgress) => void;
+  /**
+   * Trust anchors for the detached signature. Defaults to the anchors baked into
+   * this binary — the ONLY set a released fortress ever uses. The rig overrides
+   * it so the enforced path can be driven against a fixture origin whose key
+   * exists nowhere in the repository.
+   */
+  trustedKeys?: readonly TrustedSigningKey[];
+  /** Defaults to SIGNATURE_ENFORCE. Overridden only to prove the enforcing
+   *  release's behaviour before the flag flips. */
+  enforceSignature?: boolean;
 }
 
 export interface UpdateResult {
@@ -169,7 +180,8 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
     fetchImpl: fetch,
     url: `${downloadBase}/${asset}`,
     bytes: binBytes,
-    enforce: SIGNATURE_ENFORCE,
+    enforce: opts.enforceSignature ?? SIGNATURE_ENFORCE,
+    trustedKeys: opts.trustedKeys,
     // Surface the "proceeding unverified" SECURITY warning (verify-if-present) —
     // without a log it is silently swallowed on every update.
     log,

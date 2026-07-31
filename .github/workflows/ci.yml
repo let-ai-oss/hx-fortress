@@ -51,6 +51,36 @@ jobs:
       - name: Test
         run: bun test
 
+  # The store backends are the code most likely to be wrong in a way a mock
+  # cannot see — signed URLs, compose, versioned deletes and listing are provider
+  # behaviour, not ours. This job proves the PINNED emulator images still start
+  # and answer; without it the rig rots silently, because every emulator-backed
+  # suite is skip-with-reason and a skip is not a failure.
+  storage-emulators:
+    name: Storage emulators (MinIO + fake-gcs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Pinned by digest inside the rig, not by a tag written here — one place
+      # decides which image a laptop and this job both run.
+      - name: Start the emulators
+        run: bun run rig:emulators:up
+
+      - name: Rig suite
+        run: bun test test/rig.test.ts
+
+      - name: Stop the emulators
+        if: always()
+        run: bun run rig:emulators:down
+
   # The privilege-matrix and one-way-machine acceptances need a real Postgres:
   # has_table_privilege / has_column_privilege / has_function_privilege only
   # mean anything against a live catalog. They run in their OWN job so the
