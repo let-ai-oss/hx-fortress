@@ -54,12 +54,23 @@ export type MigrationPhase =
   | "done"
   | "aborted";
 
-
-
-/** How long the pause is armed for the cut. Deliberately far inside the daemon's
- *  own pause cap: this is a barrier plus a final delta, not a maintenance
- *  window. */
+/** The whole budget the cut may hold writes off for, across every heartbeat.
+ *  Deliberately far inside the daemon's own pause cap: this is a barrier plus a
+ *  final delta, not a maintenance window. */
 export const SWAP_PAUSE_MS = 5 * 60_000;
+
+/** The most ONE pause episode is armed for. The window is held in heartbeats
+ *  rather than asked for in one piece: a run that dies mid-swap costs the
+ *  fortress a minute of refused uploads instead of the whole budget, and the
+ *  clamp that bounds an episode is anchored on a column only an INSERT can
+ *  stamp — so an extension is a NEW episode row, which costs a live daemon and
+ *  is exactly the thing a Postgres-only adversary cannot produce. */
+export const PAUSE_HEARTBEAT_MS = 60_000;
+
+/** How long to wait for the daemon's own write gate to report a pause in force.
+ *  Generous next to the heartbeat the gate refreshes on: the point is to prove
+ *  writes are actually being refused, not to race the daemon. */
+export const GATE_CONFIRM_MS = 30_000;
 
 /** How long the barrier may wait for quiet before the run gives up and resumes
  *  without swapping. */
@@ -99,6 +110,22 @@ export interface MigrationResult {
   /** The credentials version the swap wrote, when it swapped. */
   version: number | null;
   aborted: string | null;
+  /** Set when the pause could not be released. Reported rather than swallowed:
+   *  the gate stays shut until the deadline the daemon is enforcing lapses on
+   *  its own, and an operator who is not told reads a finished migration while
+   *  uploads are still being refused. */
+  resumeFailed: string | null;
+}
+
+/** What the daemon's write gate is enforcing RIGHT NOW — never what was asked
+ *  for. The gate consults a cached view of the pause row, and the deadline it
+ *  honours is the clamped one, so a run that fenced against its own request
+ *  would be measuring a number nothing enforces. */
+export interface PauseGateState {
+  /** The deadline writes are refused until, or null when writes are open. */
+  pausedUntil: Date | null;
+  /** The daemon cut the request down to its own cap. */
+  capped: boolean;
 }
 
 export interface MigrationDeps {
@@ -115,9 +142,15 @@ export interface MigrationDeps {
   quiesce: IngestQuiesce;
   /** Engage (or release) the short-TTL floor for new staging signatures. */
   armDrain: (on: boolean) => void;
-  /** Arm the ingest pause; returns the episode id the resume needs. */
+  /** Arm (or extend) the ingest pause; returns the episode id it created. */
   armPause: (until: Date, reason: string) => Promise<string>;
   resumeIngest: (episodeId: string) => Promise<void>;
+  /** What the daemon's write gate is enforcing, read after `refreshGate`. */
+  gate: () => PauseGateState;
+  /** Make the gate re-read the pause row NOW rather than at its next tick. The
+   *  engine proves the pause is in force by asking the thing that refuses
+   *  writes, and a stale answer would prove the previous episode instead. */
+  refreshGate: () => Promise<void>;
   /** Write the new storage block into credentials.json through the single CAS
    *  door, and return the version it advanced to. */
   swapCredentials: () => Promise<number>;
@@ -134,6 +167,8 @@ export interface MigrationDeps {
   clock?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   swapPauseMs?: number;
+  pauseHeartbeatMs?: number;
+  gateConfirmMs?: number;
   barrierMs?: number;
   maxDeltaPasses?: number;
 }
@@ -208,6 +243,7 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
     switched: false,
     version: null,
     aborted: null,
+    resumeFailed: null,
   };
 
   const plan = await deps.source.listAllCanonicalKeys();
@@ -310,12 +346,71 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
 
     // ── The pause, the barrier and the fence ────────────────────────────────
     result.phase = "quiescing";
-    const pauseMs = deps.swapPauseMs ?? SWAP_PAUSE_MS;
-    const pausedUntil = new Date(clock().getTime() + pauseMs);
-    const episode = await deps.armPause(pausedUntil, "storage migration swap");
+    const budgetMs = deps.swapPauseMs ?? SWAP_PAUSE_MS;
+    const heartbeatMs = Math.min(deps.pauseHeartbeatMs ?? PAUSE_HEARTBEAT_MS, budgetMs);
+    const gateConfirmMs = deps.gateConfirmMs ?? GATE_CONFIRM_MS;
+    const budgetEnds = clock().getTime() + budgetMs;
+    let armedUntil = new Date(0);
+    // The episode the resume has to name. Re-assigned by every heartbeat, so the
+    // release below clears the one actually in force.
+    let episode = "";
+
+    /** Arm, or EXTEND. Every extension is a NEW episode row rather than a moved
+     *  deadline: the clamp is anchored on a column only an INSERT can stamp, so
+     *  moving a deadline in place asks the gate to hold past a bound it has
+     *  already computed. */
+    const armPause = async (): Promise<string> => {
+      armedUntil = new Date(Math.min(budgetEnds, clock().getTime() + heartbeatMs));
+      return await deps.armPause(armedUntil, "storage migration swap");
+    };
+    /** Extend only when the episode in force is close to lapsing — a heartbeat
+     *  on every poll would be a row every quarter-second. */
+    const heartbeat = async (): Promise<void> => {
+      const now = clock().getTime();
+      if (now >= budgetEnds) return;
+      if (armedUntil.getTime() - now > heartbeatMs / 2) return;
+      episode = await armPause();
+    };
+    /** The pause is IN FORCE when the daemon's own gate says so.
+     *
+     *  Arming writes a row; the thing that refuses a write is the daemon's
+     *  cached view of it, and until that view has caught up the store is still
+     *  admitting commits. A barrier measured before then reports quiet about a
+     *  moment that has not started yet, and the delta, the tombstone replay and
+     *  the cut all run with writes landing behind them. */
+    const awaitInForce = async (): Promise<PauseGateState> => {
+      const deadline = clock().getTime() + gateConfirmMs;
+      for (;;) {
+        await deps.refreshGate();
+        const state = deps.gate();
+        // A clamped episode is returned as it is: every margin below would be
+        // computed from a deadline the gate does not honour, and the caller
+        // stops rather than cutting against it.
+        if (state.capped) return state;
+        if (state.pausedUntil && state.pausedUntil.getTime() >= armedUntil.getTime()) return state;
+        if (clock().getTime() >= deadline) return { pausedUntil: null, capped: state.capped };
+        await sleep(250);
+      }
+    };
+
+    episode = await armPause();
     try {
+      const inForce = await awaitInForce();
+      if (inForce.capped) {
+        result.phase = "aborted";
+        result.aborted =
+          "the daemon clamped this pause to its own cap, so the window is not the one that was armed — nothing was switched";
+        return result;
+      }
+      if (!inForce.pausedUntil) {
+        result.phase = "aborted";
+        result.aborted =
+          "the daemon's write gate never reported the pause in force, so writes were never proven held — nothing was switched";
+        return result;
+      }
+
       const barrierDeadline = new Date(
-        Math.min(pausedUntil.getTime(), clock().getTime() + (deps.barrierMs ?? BARRIER_MS)),
+        Math.min(budgetEnds, clock().getTime() + (deps.barrierMs ?? BARRIER_MS)),
       );
       emit({ phase: "quiescing", message: "waiting for in-flight writes and signatures" });
       const quiet = await awaitQuiesced({
@@ -323,6 +418,9 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
         deadline: barrierDeadline,
         clock,
         sleep,
+        // The barrier can outlast one heartbeat, and a pause that lapsed under
+        // it would reopen writes while this was still measuring quiet.
+        heartbeat,
       });
       if (!quiet) {
         result.phase = "aborted";
@@ -336,12 +434,18 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
       await deltaPass("quiescing");
       await replayTombstones(deps, emit);
 
-      // The fence. Between the barrier and here, time passed; if the pause is
-      // close to lapsing, the swap would land after writes reopened.
-      if (pausedUntil.getTime() - clock().getTime() < FENCE_MARGIN_MS) {
+      // The fence. Between the barrier and here, time passed — so the window is
+      // re-armed and then re-PROVEN, and the margin is measured against what the
+      // gate says it is enforcing rather than against what this run asked for. A
+      // fence that compared the request would sail a clamped episode through and
+      // begin a cut after writes had already reopened.
+      episode = await armPause();
+      const fence = await awaitInForce();
+      const remaining = fence.pausedUntil ? fence.pausedUntil.getTime() - clock().getTime() : 0;
+      if (fence.capped || remaining < FENCE_MARGIN_MS) {
         result.phase = "aborted";
         result.aborted =
-          "the pause window was nearly spent before the swap could start — nothing was switched";
+          "the pause the gate is enforcing was nearly spent before the swap could start — nothing was switched";
         return result;
       }
 
@@ -354,19 +458,38 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
 
       result.phase = "verifying";
       const missing = await verifyTarget(deps);
+      result.phase = "done";
       if (missing.length > 0) {
         // The swap already happened, so this is a report and not a rollback: the
         // source is untouched and still holds everything, which is what makes
-        // going back a credentials change rather than a recovery.
+        // going back a credentials change rather than a recovery. The event says
+        // so too — a "done" that read like a clean cut is how a partial move
+        // reaches an operator as a success.
         result.aborted = `${missing.length} object(s) are not readable in the new bucket: ${missing
           .slice(0, 5)
           .join(", ")}`;
+        emit({
+          phase: "done",
+          message: `the fortress is serving from the target bucket, and ${missing.length} object(s) did not come with it`,
+        });
+        return result;
       }
-      result.phase = "done";
       emit({ phase: "done", message: "the fortress is serving from the target bucket" });
       return result;
     } finally {
-      await deps.resumeIngest(episode).catch(() => {});
+      // NOT swallowed. A pause this run could not release holds every upload off
+      // the fortress until the deadline the daemon is enforcing lapses on its
+      // own, and a migration that reported success over that would send the
+      // operator looking at their clients.
+      try {
+        await deps.resumeIngest(episode);
+      } catch (error) {
+        result.resumeFailed = error instanceof Error ? error.message : String(error);
+        emit({
+          phase: result.phase,
+          message: `ingest could not be resumed (episode ${episode}): ${result.resumeFailed}`,
+        });
+      }
     }
   } finally {
     deps.armDrain(false);

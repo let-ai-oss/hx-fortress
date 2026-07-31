@@ -629,7 +629,13 @@ export async function runFortressHost(
     const now = new Date();
     let firstObservedAt: Date | null = null;
     if (row && row.resumedAt === null) {
-      firstObservedAt = new Date((await stampPauseAnchor(paths.pauseAnchor, now)).firstObservedAt);
+      // Keyed by EPISODE. An anchor kept merely because a file was there let an
+      // expired-but-unresumed episode hand its own exhausted bound to the next
+      // one, which made that pause expired the moment it was armed — the barrier
+      // a storage-migration swap waits on would then be a no-op nobody could see.
+      firstObservedAt = new Date(
+        (await stampPauseAnchor(paths.pauseAnchor, row.id, now)).firstObservedAt,
+      );
     } else {
       // Cleared on resume, so a later episode can never anchor to an earlier one.
       await clearPauseAnchor(paths.pauseAnchor);
@@ -760,6 +766,11 @@ export async function runFortressHost(
           // wedge by exiting the daemon over a bucket nothing serves from yet.
           buildTarget: (credentials) => buildDirectStore(credentials),
           quiesce,
+          // The gate the swap proves itself against is the one that refuses
+          // writes — this cached state, and the refresh that fills it — never
+          // the deadline the run asked the database for.
+          gate: () => ({ pausedUntil: pauseState.pausedUntil(), capped: pauseState.capped }),
+          refreshGate: refreshPause,
           setDrain: (on) => {
             drainArmed = on;
           },

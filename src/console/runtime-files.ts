@@ -64,28 +64,44 @@ export async function removeInFlight(filePath: string, id: string): Promise<void
 // ── Pause anchor ────────────────────────────────────────────────────────────
 
 export interface PauseAnchor {
-  /** When this daemon FIRST observed the current pause episode (ISO 8601). */
+  /** The episode this anchor belongs to. */
+  episodeId: string;
+  /** When this daemon FIRST observed that episode (ISO 8601). */
   firstObservedAt: string;
 }
 
 export async function readPauseAnchor(filePath: string): Promise<PauseAnchor | null> {
   const parsed = await readJson<Partial<PauseAnchor>>(filePath);
-  return typeof parsed?.firstObservedAt === "string"
-    ? { firstObservedAt: parsed.firstObservedAt }
+  return typeof parsed?.firstObservedAt === "string" && typeof parsed.episodeId === "string"
+    ? { episodeId: parsed.episodeId, firstObservedAt: parsed.firstObservedAt }
     : null;
 }
 
-/** Stamp the anchor if this is a NEW episode; keep it otherwise. A pause that
- *  is merely still running must not keep pushing its own bound forward. */
-export async function stampPauseAnchor(filePath: string, at: Date): Promise<PauseAnchor> {
+/**
+ * Stamp the anchor for one EPISODE; keep it while that episode is the one in
+ * force.
+ *
+ * Keyed by episode id rather than by presence, because presence alone gets both
+ * halves wrong. A pause that is merely still running must not keep pushing its
+ * own bound forward — but an episode that EXPIRED without ever being resumed
+ * used to keep its anchor too, and the next migration then anchored to a moment
+ * already past the cap: min() resolved to "expired" the instant the pause was
+ * armed, and the barrier a swap depends on became a silent no-op.
+ */
+export async function stampPauseAnchor(
+  filePath: string,
+  episodeId: string,
+  at: Date,
+): Promise<PauseAnchor> {
   const existing = await readPauseAnchor(filePath);
-  if (existing) return existing;
-  const anchor: PauseAnchor = { firstObservedAt: at.toISOString() };
+  if (existing?.episodeId === episodeId) return existing;
+  const anchor: PauseAnchor = { episodeId, firstObservedAt: at.toISOString() };
   await writePrivateJson(filePath, anchor);
   return anchor;
 }
 
-/** Cleared on resume, so a later episode can never anchor to an earlier one. */
+/** Cleared once no episode is in force, so nothing later anchors to an earlier
+ *  one. Belt to the episode key above rather than the only strap. */
 export async function clearPauseAnchor(filePath: string): Promise<void> {
   await unlink(filePath).catch(() => {});
 }

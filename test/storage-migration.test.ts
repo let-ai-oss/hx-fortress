@@ -20,9 +20,12 @@ import {
   sessionRef,
   type MigrationDeps,
   type MigrationEvent,
+  type PauseGateState,
 } from "../src/console/migration";
 import {
+  MIGRATION_BUSY_REFUSAL,
   MIGRATION_COMMANDS,
+  describeMigration,
   isMigrationCommand,
   runMigrationCommand,
   type MigrationRunnerDeps,
@@ -169,8 +172,47 @@ function seeded(count: number, name = "source"): MemoryStore {
   return store;
 }
 
+/**
+ * A stand-in for the daemon's write gate.
+ *
+ * It learns about an episode only when it is REFRESHED, and it enforces its own
+ * cap rather than what was asked for — the two properties a swap has to prove
+ * itself against, and the two the engine used to assume.
+ */
+class FakeGate {
+  private armedUntil: Date | null = null;
+  private seen: PauseGateState = { pausedUntil: null, capped: false };
+  /** When set, the latest instant this gate will admit to enforcing. */
+  cap: number | null = null;
+  /** When true, the gate never notices anything — a daemon that is not reading. */
+  blind = false;
+
+  constructor(private readonly now: () => number) {}
+
+  arm(until: Date): void {
+    this.armedUntil = until;
+  }
+  resume(): void {
+    this.armedUntil = null;
+  }
+  refresh(): void {
+    const until = this.armedUntil;
+    if (this.blind || !until) {
+      this.seen = { pausedUntil: null, capped: false };
+      return;
+    }
+    const capped = this.cap !== null && this.cap < until.getTime();
+    const effective = capped ? (this.cap as number) : until.getTime();
+    this.seen = { pausedUntil: effective > this.now() ? new Date(effective) : null, capped };
+  }
+  state(): PauseGateState {
+    return this.seen;
+  }
+}
+
 interface Harness {
   deps: MigrationDeps;
+  gate: FakeGate;
   source: MemoryStore;
   target: MemoryStore;
   quiesce: IngestQuiesce;
@@ -190,7 +232,8 @@ function harness(over: Partial<MigrationDeps> & { sessions?: number } = {}): Har
   const trace: string[] = [];
   const events: MigrationEvent[] = [];
   let clockMs = NOW;
-  const state = { version: 3, armed: false };
+  const state = { version: 3, armed: false, episodes: 0 };
+  const gate = new FakeGate(() => clockMs);
   const deps: MigrationDeps = {
     mode: "switch",
     source,
@@ -203,11 +246,16 @@ function harness(over: Partial<MigrationDeps> & { sessions?: number } = {}): Har
     },
     armPause: async (until) => {
       trace.push(`pause:${until.toISOString()}`);
-      return "episode-1";
+      gate.arm(until);
+      state.episodes += 1;
+      return `episode-${state.episodes}`;
     },
     resumeIngest: async (id) => {
+      gate.resume();
       trace.push(`resume:${id}`);
     },
+    gate: () => gate.state(),
+    refreshGate: async () => gate.refresh(),
     swapCredentials: async () => {
       trace.push("swap");
       state.version += 1;
@@ -225,6 +273,7 @@ function harness(over: Partial<MigrationDeps> & { sessions?: number } = {}): Har
   };
   return {
     deps,
+    gate,
     source,
     target,
     quiesce,
@@ -272,15 +321,85 @@ describe("what a run does, and stops at", () => {
     const result = await runStorageMigration(h.deps);
     expect(result).toMatchObject({ phase: "done", switched: true, version: 4, aborted: null });
     // The order is the whole point: the credentials move first, and the live
-    // binding follows them.
+    // binding follows them. The window is armed in heartbeats, and the fence
+    // re-arms before it measures — so the episode the resume names is the last
+    // one, never the first.
     expect(h.trace).toEqual([
       "drain:on",
-      `pause:${new Date(NOW + 5 * 60_000).toISOString()}`,
+      `pause:${new Date(NOW + 60_000).toISOString()}`,
+      `pause:${new Date(NOW + 60_000).toISOString()}`,
       "swap",
       "rebind",
-      "resume:episode-1",
+      "resume:episode-2",
       "drain:off",
     ]);
+  });
+});
+
+describe("the gate, not the request", () => {
+  test("a pause the daemon never reports in force switches nothing", async () => {
+    const h = harness({ sessions: 1, gateConfirmMs: 5_000 });
+    // The row is written and the gate never notices it: the store is still
+    // admitting commits, so a barrier here would be measuring the wrong moment.
+    h.gate.blind = true;
+    const result = await runStorageMigration(h.deps);
+    expect(result.phase).toBe("aborted");
+    expect(result.aborted).toContain("never reported the pause in force");
+    expect(h.trace).not.toContain("swap");
+    // The episode must not outlive the run that armed it.
+    expect(h.trace.some((t) => t.startsWith("resume:"))).toBe(true);
+  });
+
+  test("a clamped episode aborts instead of cutting against a window nothing honours", async () => {
+    const h = harness({ sessions: 1 });
+    // The daemon will hold writes for 10s, not the 60s that was asked for.
+    h.gate.cap = NOW + 10_000;
+    const result = await runStorageMigration(h.deps);
+    expect(result.phase).toBe("aborted");
+    expect(result.aborted).toContain("clamped");
+    expect(h.trace).not.toContain("swap");
+  });
+
+  test("the fence re-PROVES the pause; a gate that stopped reporting it refuses the cut", async () => {
+    const h = harness({ sessions: 1, gateConfirmMs: 5_000 });
+    let refreshes = 0;
+    h.deps.refreshGate = async (): Promise<void> => {
+      refreshes += 1;
+      // The daemon stops seeing the row once the barrier has been proven. A
+      // fence that compared its own arithmetic instead of asking would cut here.
+      if (refreshes > 1) h.gate.blind = true;
+      h.gate.refresh();
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.switched).toBe(false);
+    expect(h.trace).not.toContain("swap");
+  });
+
+  test("a barrier longer than one heartbeat re-arms rather than lapsing", async () => {
+    const h = harness({ sessions: 1, barrierMs: 120_000 });
+    // Never goes quiet, so the barrier runs its full two minutes — twice the
+    // length of one pause episode.
+    h.quiesce.enter();
+    const result = await runStorageMigration(h.deps);
+    expect(result.phase).toBe("aborted");
+    const arms = h.trace.filter((t) => t.startsWith("pause:"));
+    expect(arms.length).toBeGreaterThan(1);
+    // Each one is its own episode row: the clamp is anchored on a column only an
+    // INSERT stamps, so an extension cannot be a moved deadline.
+    expect(new Set(arms).size).toBeGreaterThan(1);
+  });
+
+  test("a pause that could not be released is reported, not swallowed", async () => {
+    const h = harness({
+      sessions: 1,
+      resumeIngest: async () => {
+        throw new Error("the fortress database went away");
+      },
+    });
+    const result = await runStorageMigration(h.deps);
+    expect(result.switched).toBe(true);
+    expect(result.resumeFailed).toContain("went away");
+    expect(describeMigration(result, "b")).toContain("INGEST IS STILL PAUSED");
   });
 });
 
@@ -495,14 +614,20 @@ describe("one session", () => {
 interface FakeDb {
   db: HxDb;
   statements: string[];
+  /** Bound values, parallel to `statements` — a status reaches the row as a
+   *  parameter, so the rendered SQL says `$3` where the word is. */
+  values: unknown[][];
 }
 
 function fakeDb(over: { episode?: boolean; openRun?: string | null } = {}): FakeDb {
   const statements: string[] = [];
+  const values: unknown[][] = [];
   const db = {
     execute: async (statement: SQL) => {
-      const sql = render(statement);
+      const query = dialect.sqlToQuery(statement);
+      const sql = query.sql;
       statements.push(sql);
+      values.push(query.params);
       if (sql.includes("FROM hx.ingest_control")) {
         return over.episode
           ? [
@@ -526,7 +651,15 @@ function fakeDb(over: { episode?: boolean; openRun?: string | null } = {}): Fake
       return [];
     },
   } as unknown as HxDb;
-  return { db, statements };
+  return { db, statements, values };
+}
+
+/** The bound values of the last statement matching `needle`. */
+function lastValues(fake: FakeDb, needle: string): unknown[] {
+  for (let i = fake.statements.length - 1; i >= 0; i -= 1) {
+    if (fake.statements[i]?.includes(needle)) return fake.values[i] ?? [];
+  }
+  return [];
 }
 
 const TARGET_CREDS: VaultCredentials = {
@@ -543,6 +676,8 @@ function runnerDeps(over: Partial<MigrationRunnerDeps> = {}): MigrationRunnerDep
     store: () => source,
     buildTarget: () => target,
     quiesce: new IngestQuiesce(),
+    gate: () => ({ pausedUntil: new Date(Date.now() + 60_000), capped: false }),
+    refreshGate: async () => {},
     setDrain: () => {},
     rebindStore: async () => {},
     targetCredentials: async () => TARGET_CREDS,
@@ -677,6 +812,52 @@ describe("arm, swap, resume", () => {
     expect(drain).toEqual([false]);
     expect(outcome).toContain("episode-7");
     expect(fake.statements.some((s) => s.includes("UPDATE hx.ingest_control"))).toBe(true);
+  });
+
+  test("a switch that failed its verification is recorded as switched, never aborted", async () => {
+    const fake = fakeDb();
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const outcome = await runMigrationCommand(
+      runnerDeps({
+        db: () => fake.db,
+        store: () => source,
+        buildTarget: () => target,
+        // The target loses its objects between the cut and the verification.
+        rebindStore: async () => {
+          target.canonical.clear();
+        },
+      }),
+      { command: "swap", target: TARGET_CREDS.bucket },
+    );
+    expect(outcome).toContain("did not verify");
+    // `aborted` means nothing was switched, and the same row carries switched_at.
+    expect(lastValues(fake, "UPDATE hx.migration_runs")).toContain("switched_unverified");
+  });
+
+  test("a second command is refused while one is running, resume included", async () => {
+    let release = (): void => {};
+    const held = new Promise<void>((r) => (release = r));
+    const first = runMigrationCommand(
+      runnerDeps({
+        targetCredentials: async () => {
+          await held;
+          return TARGET_CREDS;
+        },
+      }),
+      { command: "arm", target: TARGET_CREDS.bucket },
+    );
+    // The poll claims each row as it finds one, so two commands genuinely
+    // overlap — and the run that holds the pause is the one that releases it.
+    await expect(
+      runMigrationCommand(runnerDeps(), { command: "resume", target: null }),
+    ).rejects.toThrow(MIGRATION_BUSY_REFUSAL);
+    release();
+    await first;
+    // The latch is per-run, not a one-way door.
+    await expect(
+      runMigrationCommand(runnerDeps(), { command: "resume", target: null }),
+    ).resolves.toContain("normal lifetime");
   });
 
   test("resume on a fortress that was never paused says so instead of failing", async () => {

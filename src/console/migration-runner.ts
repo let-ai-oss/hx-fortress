@@ -38,7 +38,13 @@ import {
   saveMigrationRun,
   startMigrationRun,
 } from "./migration-store";
-import { runStorageMigration, type MigrationDeps, type MigrationResult } from "./migration";
+import { MIGRATION_PHASES } from "./command-params";
+import {
+  runStorageMigration,
+  type MigrationDeps,
+  type MigrationResult,
+  type PauseGateState,
+} from "./migration";
 import { envManagedRefusal } from "./rotation";
 import {
   readVaultCredentials,
@@ -50,10 +56,25 @@ import type { HxDb } from "../host/postgres/db";
 import type { ScopedLogger } from "../host/types";
 import type { SessionKey, SessionStore } from "../modules/session-vault/store/types";
 
-/** The three commands a console can send. Not the engine's phases: those name
- *  where one run got to, these name what the operator asked for. */
-export const MIGRATION_COMMANDS = ["arm", "swap", "resume"] as const;
+/** The three commands a console can send. Not the engine's PHASES, which name
+ *  where one run got to — these name what the operator asked for. The list is
+ *  the validator's, aliased rather than restated: two copies of one enum drift,
+ *  and the drift would be a row that validates and then has nothing to run it. */
+export const MIGRATION_COMMANDS = MIGRATION_PHASES;
 export type MigrationCommand = (typeof MIGRATION_COMMANDS)[number];
+
+/** One migration at a time on this fortress.
+ *
+ *  Two commands are two rows and the poll claims each as it finds one, so an arm
+ *  still copying and a swap submitted behind it would drive the same two
+ *  buckets, the same pause plane and the same credentials file at once — and the
+ *  arm's tail would raise the short-TTL floor again after the swap had lowered
+ *  it, pinning every staging signature at a minute until the daemon restarted. */
+let migrationInFlight = false;
+
+export const MIGRATION_BUSY_REFUSAL =
+  "a storage migration is already running on this fortress — wait for its answer. The run that " +
+  "holds the pause is the one that releases it.";
 
 export function isMigrationCommand(value: unknown): value is MigrationCommand {
   return typeof value === "string" && (MIGRATION_COMMANDS as readonly string[]).includes(value);
@@ -70,6 +91,11 @@ export interface MigrationRunnerDeps {
   buildTarget: (credentials: VaultCredentials) => SessionStore;
   /** The counter and the signature floor the pre-swap barrier waits on. */
   quiesce: IngestQuiesce;
+  /** What the daemon's write gate is enforcing — the deadline that actually
+   *  refuses uploads, which is not the one a run asked for. */
+  gate: () => PauseGateState;
+  /** Make that gate re-read the pause row now, rather than at its next tick. */
+  refreshGate: () => Promise<void>;
   /** Engage or release the short-TTL floor for NEW staging signatures. */
   setDrain: (on: boolean) => void;
   /** Swap the live store binding onto the swapped credentials — the SAME
@@ -116,13 +142,20 @@ export function describeMigration(result: MigrationResult, targetBucket: string)
   const moved =
     `${result.sessionsCopied} of ${result.sessionsTotal} session(s) copied to ${targetBucket}, ` +
     `${Math.round(result.bytesCopied / 1024)} KiB over ${result.deltaPasses} delta pass(es)`;
+  // A pause nobody released is the first thing an operator needs to read: until
+  // its deadline lapses this fortress refuses every upload, and no other line
+  // here would explain why.
+  const stuck = result.resumeFailed
+    ? ` — INGEST IS STILL PAUSED: the pause could not be released (${result.resumeFailed}). ` +
+      "It lifts by itself when its deadline passes; `resume` is the way to lift it now"
+    : "";
   if (!result.switched) {
-    return result.aborted ? `${moved} — nothing was switched: ${result.aborted}` : moved;
+    return result.aborted ? `${moved} — nothing was switched: ${result.aborted}${stuck}` : `${moved}${stuck}`;
   }
   const version = `credentials.json is at version ${result.version ?? 0}`;
   return result.aborted
-    ? `switched to ${targetBucket} (${version}), but the new bucket did not verify: ${result.aborted}`
-    : `switched to ${targetBucket}; ${version}; the source bucket is untouched and is the way back`;
+    ? `switched to ${targetBucket} (${version}), but the new bucket did not verify: ${result.aborted}${stuck}`
+    : `switched to ${targetBucket}; ${version}; the source bucket is untouched and is the way back${stuck}`;
 }
 
 /**
@@ -132,6 +165,19 @@ export function describeMigration(result: MigrationResult, targetBucket: string)
  * one it renders as the failure. Neither is invented by the console.
  */
 export async function runMigrationCommand(
+  deps: MigrationRunnerDeps,
+  args: MigrationCommandArgs,
+): Promise<string> {
+  if (migrationInFlight) throw new Error(MIGRATION_BUSY_REFUSAL);
+  migrationInFlight = true;
+  try {
+    return await driveMigrationCommand(deps, args);
+  } finally {
+    migrationInFlight = false;
+  }
+}
+
+async function driveMigrationCommand(
   deps: MigrationRunnerDeps,
   args: MigrationCommandArgs,
 ): Promise<string> {
@@ -204,6 +250,8 @@ export async function runMigrationCommand(
     },
     armPause: (until, reason) => armPause(db, { until, reason, armedBy: "storage migration" }),
     resumeIngest: (episodeId) => resumeIngest(db, episodeId),
+    gate: deps.gate,
+    refreshGate: deps.refreshGate,
     swapCredentials: async () => {
       // THE single door for credentials.json: the O_EXCL lock, the version CAS
       // and the version BUMP the console's live reader watches for. A direct

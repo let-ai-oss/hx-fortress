@@ -124,16 +124,32 @@ describe("the pause anchor file", () => {
   });
 
   test("stamps once per episode and is cleared on resume", async () => {
-    const first = await stampPauseAnchor(anchorPath, NOW);
-    const again = await stampPauseAnchor(anchorPath, new Date(NOW.getTime() + 60_000));
+    const first = await stampPauseAnchor(anchorPath, "episode-1", NOW);
+    const again = await stampPauseAnchor(anchorPath, "episode-1", new Date(NOW.getTime() + 60_000));
     // A pause that is merely still running must not keep pushing its own bound.
     expect(again.firstObservedAt).toBe(first.firstObservedAt);
 
     await clearPauseAnchor(anchorPath);
     expect(await readPauseAnchor(anchorPath)).toBeNull();
 
-    const second = await stampPauseAnchor(anchorPath, new Date(NOW.getTime() + 3_600_000));
+    const second = await stampPauseAnchor(anchorPath, "episode-2", new Date(NOW.getTime() + 3_600_000));
     expect(second.firstObservedAt).not.toBe(first.firstObservedAt);
+  });
+
+  test("a NEW episode re-anchors even when the last one was never resumed", async () => {
+    // The defect this closes: an episode that EXPIRED without a resume left its
+    // anchor behind, and the next pause inherited a bound already past the cap —
+    // so min() resolved to expired the instant it was armed and the barrier a
+    // swap waits on became a no-op nothing reported.
+    const stale = await stampPauseAnchor(anchorPath, "episode-1", NOW);
+    const fresh = await stampPauseAnchor(
+      anchorPath,
+      "episode-2",
+      new Date(NOW.getTime() + 30 * 60_000),
+    );
+    expect(fresh.episodeId).toBe("episode-2");
+    expect(fresh.firstObservedAt).not.toBe(stale.firstObservedAt);
+    expect((await readPauseAnchor(anchorPath))?.episodeId).toBe("episode-2");
   });
 });
 

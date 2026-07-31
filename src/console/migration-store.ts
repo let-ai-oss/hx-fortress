@@ -117,11 +117,17 @@ export async function saveMigrationRun(
                status = ${
                  args.error
                    ? "failed"
-                   : result?.aborted
-                     ? "aborted"
-                     : args.finished
-                       ? "done"
-                       : "running"
+                   : // A run that CUT OVER and then failed its verification is
+                     // not aborted: `aborted` says nothing was switched, and the
+                     // row would carry that word beside its own switched_at. It
+                     // is a switch nobody has proven, and the name says which.
+                     result?.switched && result.aborted
+                     ? "switched_unverified"
+                     : result?.aborted
+                       ? "aborted"
+                       : args.finished
+                         ? "done"
+                         : "running"
                },
                phase = ${result ? result.phase : sql`phase`},
                sessions_total = ${result ? result.sessionsTotal : sql`sessions_total`},
@@ -129,7 +135,7 @@ export async function saveMigrationRun(
                bytes_copied = ${result ? result.bytesCopied : sql`bytes_copied`},
                delta_passes = ${result ? result.deltaPasses : sql`delta_passes`},
                switched_at = ${result?.switched ? sql`now()` : sql`switched_at`},
-               error = ${args.error ?? result?.aborted ?? null}
+               error = ${args.error ?? result?.aborted ?? result?.resumeFailed ?? null}
          WHERE id = ${runId}::uuid`,
   );
 }

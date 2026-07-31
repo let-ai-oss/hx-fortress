@@ -255,6 +255,10 @@ export async function awaitQuiesced(args: {
   quiesce: IngestQuiesce;
   deadline: Date;
   flush?: () => Promise<void>;
+  /** Called on every poll. The pause is held in short episodes, and a barrier
+   *  that ran longer than one of them would be measuring quiet after the gate
+   *  had already reopened. */
+  heartbeat?: () => Promise<void>;
   clock?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   pollMs?: number;
@@ -266,6 +270,7 @@ export async function awaitQuiesced(args: {
   while (clock().getTime() < args.deadline.getTime()) {
     if (args.quiesce.isQuiesced(clock())) return true;
     await sleep(pollMs);
+    if (args.heartbeat) await args.heartbeat();
     if (args.flush) await args.flush();
   }
   // A lapsed deadline ABORTS the swap: proceeding would cut over a store that
