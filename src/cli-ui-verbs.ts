@@ -51,6 +51,7 @@ import {
   PEOPLE_VISIBILITY_DISCLOSURE,
   SETUP_LINK_NOTE,
   ssoRequiresEnablement,
+  SSO_ON_DISCLOSURE,
 } from "./ui/copy";
 import { holderAlive, readInstanceLock } from "./ui/instance";
 import { getUiServiceControl, type UiServiceControl } from "./ui/service-control";
@@ -376,6 +377,7 @@ async function ssoVerb(args: readonly string[], ctx: Ctx): Promise<number> {
   }
   await ctx.config.update((current) => ({ ...current, sso: true }));
   ctx.write("One-click entry from the workbench is on.");
+  for (const line of SSO_ON_DISCLOSURE) ctx.write(line);
   for (const line of PEOPLE_VISIBILITY_DISCLOSURE) ctx.write(line);
   ctx.write(`Console URL advertised to let.ai: ${config.publicUrl}`);
   ctx.write("An organization owner approves it in the workbench before the button appears.");

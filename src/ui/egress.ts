@@ -292,6 +292,22 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
   });
 
   rows.push({
+    id: "sso-door",
+    name: "One-click entry from the workbench",
+    direction: "in",
+    peer: inputs.ui.publicUrl ?? "not advertised",
+    carries: "a signed, single-use grant naming a workbench user and an organization",
+    gate: "the organization's signing key, this fortress's own org id, this console's own origin, and a 30-second clock allowance",
+    notes: [
+      "A valid grant creates NO session and shows NO data: it lands the browser on the sign-in " +
+        "form with the workbench identity rendered beside it. Every capability the session ends " +
+        "up with comes from the local account whose password is typed there.",
+      "The grant is single-use. The workbench identity it carries is recorded alongside whatever " +
+        "that sign-in goes on to do.",
+    ],
+  });
+
+  rows.push({
     id: "enrollment",
     name: "Enrollment",
     direction: "both",

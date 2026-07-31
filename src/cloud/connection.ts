@@ -58,7 +58,16 @@ export interface WsCloudConnectionDeps {
   dispatcher: MessageDispatcher;
   credentialStore: CredentialStore;
   logger: HostLogger;
-  identity: FortressIdentity;
+  /**
+   * What this fortress says about itself in `hello` / `enroll`.
+   *
+   * EVALUATED PER CONNECTION ATTEMPT when it is a function, because two of its
+   * fields are operator settings that change while the daemon runs: a frozen
+   * snapshot makes `ui sso off` and `ui disable` unable to clear the advertised
+   * console URL — the next reconnect re-sends whatever boot happened to read,
+   * and the workbench button never goes away.
+   */
+  identity: FortressIdentity | (() => FortressIdentity | Promise<FortressIdentity>);
   moduleLoader?: ModuleLifecycleHandler;
   /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled, so
    *  the gateway can verify capability tokens offline. H-2: the store PINS the key
@@ -256,6 +265,20 @@ export class WsCloudConnection implements CloudConnection {
     });
   }
 
+  /** The identity as of THIS attempt. A failure to read it must not stop the
+   *  fortress connecting: an omitted field leaves the hub holding what it has,
+   *  which is the documented absent state. */
+  private async resolveIdentity(): Promise<FortressIdentity> {
+    const source = this.deps.identity;
+    if (typeof source !== "function") return source;
+    try {
+      return await source();
+    } catch (err) {
+      this.deps.logger.error("could not compose the fortress identity for this connection", err);
+      return { version: "unknown", protocolVersion: 0 };
+    }
+  }
+
   private async dial(
     config: FortressConfig,
     onFirstConnect: () => void,
@@ -312,16 +335,19 @@ export class WsCloudConnection implements CloudConnection {
       // (re-)bootstrap intent and must win over any leftover credentials.json
       // from a previous install — otherwise a stale credential shadows the token
       // and the hub rejects the stale `hello` with `invalid_credential`.
-      if (this.activeEnrollToken) {
-        send({ t: "enroll", enrollToken: this.activeEnrollToken, ...this.deps.identity });
-      } else if (cred) {
-        send({
-          t: "hello",
-          fortressId: cred.fortressId,
-          credential: cred.credential,
-          ...this.deps.identity,
-        });
-      }
+      void (async (): Promise<void> => {
+        const identity = await this.resolveIdentity();
+        if (this.activeEnrollToken) {
+          send({ t: "enroll", enrollToken: this.activeEnrollToken, ...identity });
+        } else if (cred) {
+          send({
+            t: "hello",
+            fortressId: cred.fortressId,
+            credential: cred.credential,
+            ...identity,
+          });
+        }
+      })();
       let lastStatsAt = 0;
       const STATS_MIN_INTERVAL_MS = 60_000;
       this.heartbeatTimer = setInterval(() => {

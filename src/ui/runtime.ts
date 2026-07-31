@@ -24,6 +24,13 @@ import { EventStreamRegistry } from "./events";
 import { MUTATE_ROUTES } from "./mutate-routes";
 import { READ_ROUTES } from "./read-routes";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
+import {
+  ConsumedGrants,
+  EntryContexts,
+  verifyConsoleGrant,
+  type EntryRecord,
+  type GrantVerdict,
+} from "./sso-grant";
 import { SESSION_HEADER, SessionTable, type SessionPolicy, type UiSession } from "./sessions";
 import {
   LiveUsers,
@@ -44,6 +51,15 @@ export interface UiRuntimeOptions {
   onWarn?: (message: string) => void;
   /** Injected in tests. */
   now?: () => number;
+  /** What the SSO door needs to verify a grant. Absent in the asset-only unit
+   *  tests and on a fortress with no pinned key, where the door renders the
+   *  generic page rather than a reason it cannot substantiate. */
+  sso?: {
+    pinnedKey: () => Promise<string | null>;
+    orgId: () => Promise<string | null>;
+    /** Called with the measured offset when the clock is why a grant failed. */
+    onClockSkew?: (offsetSeconds: number) => Promise<void>;
+  };
 }
 
 export type AuthVerdict =
@@ -63,6 +79,10 @@ export class UiRuntime {
   readonly streams = new EventStreamRegistry();
   readonly config: LiveUiConfig;
   readonly users: UsersStore;
+  /** Grants already exchanged, and the workbench identities their exchanges
+   *  produced. Both in memory: they only have to outlive the grant. */
+  readonly consumedGrants = new ConsumedGrants();
+  readonly entries = new EntryContexts();
   private readonly live: LiveUsers;
   private readonly options: UiRuntimeOptions;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -94,6 +114,38 @@ export class UiRuntime {
 
   readUsers(): Promise<UsersFile> {
     return this.live.read();
+  }
+
+  /**
+   * Verify a one-click grant and produce the entry record the sign-in stamps
+   * from.
+   *
+   * A valid grant mints NO session and reveals no data. It produces an
+   * annotation and nothing else — every capability the eventual session has
+   * comes from the local account whose password is typed on the form this lands
+   * on.
+   */
+  async exchangeGrant(grant: string): Promise<GrantVerdict & { entry?: EntryRecord }> {
+    const config = await this.readConfig();
+    const sso = this.options.sso;
+    const verdict = await verifyConsoleGrant({
+      grant,
+      publicKey: (await sso?.pinnedKey()) ?? null,
+      orgId: (await sso?.orgId()) ?? null,
+      publicUrlOrigin:
+        this.options.env?.FORTRESS_UI_PUBLIC_URL?.trim() || config.publicUrl,
+      ssoEnabled: config.sso,
+      now: () => new Date(this.now()),
+      ...(sso?.onClockSkew ? { onClockSkew: sso.onClockSkew } : {}),
+      consume: (jti, expiresAt) =>
+        this.consumedGrants.consume(jti, expiresAt, new Date(this.now())),
+    });
+    if (!verdict.ok) return verdict;
+    const entry = this.entries.create(
+      { workbenchSub: verdict.claims.sub, org: verdict.claims.org },
+      new Date(this.now()),
+    );
+    return { ...verdict, entry };
   }
 
   static policyOf(config: UiConfig): SessionPolicy {

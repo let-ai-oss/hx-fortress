@@ -60,6 +60,7 @@ import { createCommandExecutors } from "../console/executors";
 import { getServiceManager } from "../service";
 import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-control";
 import { downloadBaseFromCloudUrl } from "../update";
+import { readConsoleAdvertisement } from "../ui/advertise";
 import { DaemonAudit } from "../console/daemon-audit";
 import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
 import { sweepCmdCreds } from "../console/cmd-creds";
@@ -310,14 +311,22 @@ export async function runFortressHost(
   const connectionDependencies: WsCloudConnectionDeps = {
     dispatcher: registry,
     credentialStore,
-    identity: {
+    // Composed at EVERY connection attempt, not once at boot: consoleUrl and
+    // runtimeKind are read from ui.json and the environment as they stand now,
+    // so `ui sso off` and `ui disable` reach the hub on the next reconnect
+    // instead of being overwritten by whatever boot happened to read.
+    identity: async () => ({
       version,
       protocolVersion: SUPPORTED_PROTOCOL_VERSION,
       storageKind: vaultCreds?.store ?? undefined,
       bucketRegion: vaultCreds?.region ?? undefined,
       bucket: vaultCreds?.bucket ?? undefined,
       gatewayUrl: gateway.gatewayUrl,
-    },
+      ...(await readConsoleAdvertisement({
+        config: new LiveUiConfig(paths.uiConfig),
+        env: process.env,
+      })),
+    }),
     logger,
     signingKeyStore,
     verifyGrant: verifyGrantFn,

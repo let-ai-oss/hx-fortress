@@ -78,6 +78,24 @@ export function ssoRequiresEnablement(container: boolean): string {
     : "the console is not enabled — run `hx-fortress ui --install-service` first, then run this again";
 }
 
+/**
+ * What turning one-click entry ON actually discloses, printed at every site that
+ * turns it on — the wizard's combined prompt and `ui sso on`. One constant,
+ * because the two used to say different amounts of the truth.
+ *
+ * It is uncomfortable and says it anyway: the URL travels on every reconnect, it
+ * is visible to people outside this organization, and turning it off is not
+ * retroactive — it stops the next reconnect from sending it.
+ */
+export const SSO_ON_DISCLOSURE: readonly string[] = [
+  "Turning this on sends this console's public URL to let.ai:",
+  "  It is re-sent on every reconnect, not once. Organization owners see it in the workbench,",
+  "  and let.ai operators see it in their fleet view. `hx-fortress ui sso off` clears it on the",
+  "  next reconnect; it does not unsend what has already been sent.",
+  "  The URL conveys no capability on its own: a one-click arrival lands on this console's",
+  "  sign-in form and can do nothing until a local account signs in.",
+];
+
 /** Stated on the audit panel. Failed public sign-ins are the one thing this
  *  system collapses, and the open window is the only thing a crash can cost — a
  *  console that implied otherwise would be claiming a completeness no

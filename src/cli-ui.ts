@@ -35,6 +35,9 @@ import { acquireInstanceLock, portCollisionMessage, probeOccupant } from "./ui/i
 import { UiRuntime } from "./ui/runtime";
 import { startUiServer, type UiServerCtx } from "./ui/server";
 import { getServiceManager } from "./service";
+import { FileCredentialStore } from "./cloud/credentials";
+import { FileSigningKeyStore } from "./gateway/signing-key-store";
+import { writeClockSkew } from "./ui/clock-skew";
 
 type WriteLine = (line: string) => void;
 
@@ -238,6 +241,20 @@ export async function runUiCommand(
     cmdCredsDir: paths.cmdCreds,
     env,
     onWarn: (message) => write(`warning: ${message}`),
+    sso: {
+      // Read per verification, never cached: the hub can rotate the org key
+      // while this console is serving, and a cached copy would reject every
+      // grant minted after the rotation.
+      pinnedKey: () => new FileSigningKeyStore(paths.signingKey).pinnedKey().catch(() => null),
+      orgId: async () =>
+        (await new FileCredentialStore(paths.credentials).load().catch(() => null))?.orgId ?? null,
+      // The producer of the file the Posture panel reads. Written only when the
+      // clock is the reason a hand-off failed, so the warning it drives is
+      // never permanently on.
+      onClockSkew: async (offsetSeconds) => {
+        await writeClockSkew(paths.runtimeRoot, offsetSeconds).catch(() => {});
+      },
+    },
   });
   await runtime.restoreLockouts();
 

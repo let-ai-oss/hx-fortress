@@ -36,13 +36,23 @@ export default function Bootstrap(): React.ReactElement {
         // Kept in memory and handed to the sign-in screen by NAVIGATING, not by
         // reloading: a document load would throw away the display fields this
         // exchange just returned, and the annotation would be gone by the time
-        // anyone could read it.
-        if (result.display) app.setSsoIdentity(result.display);
+        // anyone could read it. They are DISPLAY ONLY — the entry id is what the
+        // sign-in carries, and the server stamps the identity from its own
+        // record of it.
+        app.setSsoIdentity({
+          workbenchUser: result.workbenchSub,
+          organization: result.org,
+        });
+        // The banner phrase comes from THIS response. It renders to an arrival
+        // that presented a live grant and to nobody else, so a plain sign-in
+        // still says nothing about which fortress this is.
+        app.setMarker(result.marker);
+        app.setEntryId(result.entryId);
         app.navigate({ view: "overview" }, { replace: true });
         window.history.replaceState(
           window.history.state,
           "",
-          `/#e=${encodeURIComponent(result.entryToken)}`,
+          `/#e=${encodeURIComponent(result.entryId)}`,
         );
       })
       .catch((err: unknown) => {

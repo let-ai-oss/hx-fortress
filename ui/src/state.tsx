@@ -77,6 +77,9 @@ interface AppState {
   sessionBudgets: string | null;
   ssoIdentity: SsoIdentity | null;
   setSsoIdentity: (identity: SsoIdentity | null) => void;
+  /** Names the server-side record of a one-click arrival. Display-free: it
+   *  carries no identity of its own, only a reference to one. */
+  setEntryId: (entryId: string | null) => void;
   /** The operator's banner phrase, once a valid setup or entry token was
    *  presented. Null before that, on every arrival. */
   marker: string | null;
@@ -136,6 +139,10 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
   const [sessionBudgets, setSessionBudgets] = useState<string | null>(null);
   const [ssoIdentity, setSsoIdentity] = useState<SsoIdentity | null>(null);
   const [marker, setMarker] = useState<string | null>(null);
+  // Held in memory, seeded from the fragment so a RELOAD after the hand-off
+  // still records the dual identity — the annotation is cosmetic and does not
+  // survive, but the record does.
+  const entryIdRef = useRef<string | null>(takeFragmentToken("e"));
   const [live, setLive] = useState<LiveState>({ kind: "connecting" });
   const [logLines, setLogLines] = useState<LogLine[]>([]);
   const [theme, setTheme] = useState<string>(() =>
@@ -236,11 +243,18 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
   }, [forgetSession]);
 
   const signIn = useCallback(async (login: string, password: string) => {
-    const result = await api.signIn(login, password);
+    // The entry id rides along when there is one. It is a NAME for a record the
+    // server holds; the workbench identity stamped on this session comes from
+    // that record, so a client that made one up annotates nothing.
+    const result = await api.signIn(login, password, entryIdRef.current);
     writeToken(result.token);
     setSessionBudgets(result.sessions);
     const principal = await api.whoami();
     setAuth({ kind: "signed-in", principal });
+  }, []);
+
+  const setEntryId = useCallback((entryId: string | null) => {
+    entryIdRef.current = entryId;
   }, []);
 
   const signOut = useCallback(async () => {
@@ -260,24 +274,13 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
   // console that showed its operator's banner phrase to any stranger who reached
   // the port would be disclosing which fortress this is before anyone signed in.
   useEffect(() => {
-    // READ AND CLEARED: the token stays in this effect's closure for the length
-    // of one request and leaves the address bar immediately, so a screenshot, a
-    // bookmark or a shared URL does not carry it. The setup screen takes its own
-    // token the same way, during its first render.
-    const token = takeFragmentToken("e");
-    if (!token) return;
-    let cancelled = false;
-    void api
-      .setupStatus(token)
-      .then((status) => {
-        if (!cancelled) setMarker(status.marker);
-      })
-      .catch(() => {
-        // A dead or unrecognized token discloses nothing: no marker, no reason.
-      });
-    return () => {
-      cancelled = true;
-    };
+    // READ AND CLEARED at construction: the entry id leaves the address bar
+    // immediately, so a screenshot, a bookmark or a shared URL does not carry
+    // it. The banner phrase for a one-click arrival came back with the exchange
+    // itself; the setup screen takes its own token the same way, during its
+    // first render.
+    const carried = takeFragmentToken("e");
+    if (carried) entryIdRef.current = carried;
   }, [route.view]);
 
   // ── the one long-lived connection ──────────────────────────────────────────
@@ -327,6 +330,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       sessionBudgets,
       ssoIdentity,
       setSsoIdentity,
+      setEntryId,
       marker,
       setMarker,
       live,

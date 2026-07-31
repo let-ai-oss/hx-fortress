@@ -397,10 +397,17 @@ export interface SignedIn {
 // ── the calls ────────────────────────────────────────────────────────────────
 
 export const api = {
-  signIn: (login: string, password: string) =>
+  /** `entryId` names a server-side record. The workbench identity is stamped
+   *  from that record — never from anything this client sends — so a forged one
+   *  annotates nothing. */
+  signIn: (login: string, password: string, entryId?: string | null) =>
     getJson<{ token: string; login: string; role: "operator" | "readonly"; sessions: string }>(
       API.session,
-      { method: "POST", body: { login, password }, anonymous: true },
+      {
+        method: "POST",
+        body: { login, password, ...(entryId ? { entryId } : {}) },
+        anonymous: true,
+      },
     ),
   whoami: () => getJson<SignedIn>(API.session),
   signOut: () => request(API.session, { method: "DELETE" }).then(() => undefined),
@@ -417,8 +424,10 @@ export const api = {
       body: { password },
       anonymous: true,
     }),
+  /** FOUR fields. Three are for the page to render; only `entryId` is carried
+   *  onward, and all it carries is an annotation the SERVER stamps. */
   ssoExchange: (grant: string) =>
-    getJson<{ entryToken: string; display?: { workbenchUser?: string; organization?: string } }>(
+    getJson<{ entryId: string; workbenchSub: string; org: string; marker: string | null }>(
       API.ssoExchange,
       { method: "POST", body: { grant }, anonymous: true },
     ),

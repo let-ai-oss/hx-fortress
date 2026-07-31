@@ -31,6 +31,7 @@ import {
 } from "../src/console/audit-spool";
 import { DaemonAudit } from "../src/console/daemon-audit";
 import { pollCommands, runBootFence, type CommandGateway, type CommandRow } from "../src/console/commands";
+import { EntryContexts } from "../src/ui/sso-grant";
 import { AuditDrain, payloadFingerprint, type DrainDb } from "../src/ui/audit-drain";
 import { ConsoleAudit } from "../src/ui/audit-writer";
 import { disabledWindowMarkers } from "../src/ui/audit-markers";
@@ -479,6 +480,7 @@ describe("public auth failures collapse; everything else does not", () => {
     const runtime = {
       readConfig: async () => ({ marker: null, sessionTtlHours: 12, sessionIdleMinutes: 60 }),
       signIn: async () => ({ ok: false as const, status: 429 as const, reason: "too many attempts", retryAfterMs: 1000 }),
+      entries: new EntryContexts(),
     };
     const { audit } = consoleAudit();
     const res = await handleAuthRoute(
@@ -534,6 +536,7 @@ describe("the audited routes", () => {
       readUsers: async () => ({ users: [] }),
       sessions: { validate: () => ({ ok: true as const, session }), revoke: () => {} },
       completeSetup: async () => ({ login: "erik", role: "operator" }),
+      entries: new EntryContexts(),
     };
     const ctx = { runtime: runtime as never, remoteKey: "10.0.0.1", remoteAddr: "10.0.0.1", audit };
     await handleAuthRoute(

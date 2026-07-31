@@ -73,6 +73,41 @@ export async function handleAuthRoute(
   const path = new URL(req.url).pathname;
   const { runtime } = ctx;
 
+  if (path === SSO_EXCHANGE_PATH && req.method === "POST") {
+    const body = await readJson(req);
+    const grant = typeof body.grant === "string" ? body.grant : "";
+    const config = await runtime.readConfig();
+    const verdict = await runtime.exchangeGrant(grant);
+    if (!verdict.ok || !verdict.entry) {
+      ctx.audit?.noteFailure(AUDIT_ACTIONS.ssoExchangeFailed, { remoteKey: ctx.remoteKey });
+      // The REASON is the page; the offset is the remediation. Neither says
+      // anything a caller could not already have learned from the grant it
+      // presented — and `generic` says nothing at all.
+      return json(
+        {
+          error: verdict.ok ? "generic" : verdict.reason,
+          ...(!verdict.ok && verdict.offsetSeconds !== undefined
+            ? { offsetSeconds: verdict.offsetSeconds }
+            : {}),
+        },
+        400,
+      );
+    }
+    await ctx.audit?.raise(AUDIT_ACTIONS.ssoExchange, {
+      params: { org: verdict.claims.org, workbenchSub: verdict.claims.sub, remote: ctx.remoteKey },
+    });
+    // FOUR fields, and three of them are for the page to render. The entry id is
+    // the only one that carries authority, and all it carries is an annotation:
+    // the sign-in stamps the workbench identity from the record this id names,
+    // never from anything the client sends back.
+    return json({
+      entryId: verdict.entry.id,
+      workbenchSub: verdict.claims.sub,
+      org: verdict.claims.org,
+      marker: config.marker,
+    });
+  }
+
   if (path === SIGN_IN_PATH && req.method === "POST") {
     const body = await readJson(req);
     const login = typeof body.login === "string" ? body.login : "";
@@ -80,11 +115,15 @@ export async function handleAuthRoute(
     const config = await runtime.readConfig();
     // The entry id is a server-side record; anything the client claims about the
     // workbench identity is ignored, and the stamp comes from the record alone.
+    const entry = runtime.entries.read(
+      typeof body.entryId === "string" ? body.entryId : null,
+    );
     const result = await runtime.signIn({
       login,
       password,
       remoteKey: ctx.remoteKey,
       remoteAddr: ctx.remoteAddr,
+      workbenchSub: entry?.workbenchSub ?? null,
     });
     if (!result.ok) {
       // A refusal by a rate bucket or by the global ceiling appends NOTHING: it
