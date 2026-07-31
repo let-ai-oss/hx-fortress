@@ -35,7 +35,7 @@
     "@aws-sdk/client-s3": "^3.1080.0",
     "@aws-sdk/s3-request-presigner": "^3.1080.0",
     "@google-cloud/storage": "^7.21.0",
-    "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#7d0665497b36297f7699acc95f5a2b466d8ec8a0",
+    "@let-ai/hx-protocol": "git+https://github.com/let-ai-oss/hx-protocol.git#bab4ea9f815bd0ba0609c0575eac92989dece088",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "drizzle-orm": "^0.45.2",
     "jose": "^6.2.3"

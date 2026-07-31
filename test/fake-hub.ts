@@ -8,8 +8,22 @@
 import type { ServerWebSocket } from "bun";
 import { createServer } from "node:net";
 import { decodeFrame, encodeFrame } from "../src/protocol";
-import type { FortressToHubFrame, HubToFortressFrame } from "../src/protocol";
+import type {
+  FortressQueryPayload,
+  FortressQueryResultPayload,
+  FortressToHubFrame,
+  HubToFortressFrame,
+} from "../src/protocol";
+import type { FortressQueryFrame } from "../src/cloud/fortress-query";
 import { SUPPORTED_PROTOCOL_VERSION } from "../src/cloud/connection";
+
+/** What a hub does with a bounded question. Returning `null` is the OLD-HUB
+ *  case — no answer at all, which is exactly what a hub that never learned the
+ *  frame does, and the case a timeout has to terminate. */
+export type QueryAnswer =
+  | { result: FortressQueryResultPayload }
+  | { error: string }
+  | null;
 
 export interface FakeHubOptions {
   /** Override the org id sent in enrolled/welcome (default "test-org"). */
@@ -25,14 +39,17 @@ export interface FakeHubOptions {
    * instead of the normal enrolled/welcome response.
    */
   rejectWith?: string;
+  /** Omitted = an old hub: fortressQuery is ignored, silently. */
+  answerQuery?: (query: FortressQueryPayload, id: string) => QueryAnswer;
 }
 
 export class FakeHub {
   readonly url: string;
   private readonly server: Bun.Server<undefined>;
   private socket: ServerWebSocket<undefined> | null = null;
-  private _received: FortressToHubFrame[] = [];
-  private readonly opts: Required<Omit<FakeHubOptions, "rejectWith">> & Pick<FakeHubOptions, "rejectWith">;
+  private _received: Array<FortressToHubFrame | FortressQueryFrame> = [];
+  private readonly opts: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery">> &
+    Pick<FakeHubOptions, "rejectWith" | "answerQuery">;
 
   static async create(options: FakeHubOptions = {}): Promise<FakeHub> {
     const port = await reservePort();
@@ -42,6 +59,7 @@ export class FakeHub {
       credential: options.credential ?? "test-credential",
       protocolVersion: options.protocolVersion ?? SUPPORTED_PROTOCOL_VERSION,
       rejectWith: options.rejectWith,
+      answerQuery: options.answerQuery,
     };
     const hub = new FakeHub(
       Bun.serve<undefined>({
@@ -57,9 +75,9 @@ export class FakeHub {
           },
           message: (ws, data) => {
             const raw = typeof data === "string" ? data : data.toString();
-            let frame: FortressToHubFrame;
+            let frame: FortressToHubFrame | FortressQueryFrame;
             try {
-              frame = decodeFrame<FortressToHubFrame>(raw);
+              frame = decodeFrame<FortressToHubFrame | FortressQueryFrame>(raw);
             } catch {
               return;
             }
@@ -78,8 +96,8 @@ export class FakeHub {
 
   private constructor(
     server: Bun.Server<undefined>,
-    options: Required<Omit<FakeHubOptions, "rejectWith">> &
-      Pick<FakeHubOptions, "rejectWith">,
+    options: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery">> &
+      Pick<FakeHubOptions, "rejectWith" | "answerQuery">,
   ) {
     this.server = server;
     this.opts = options;
@@ -87,7 +105,7 @@ export class FakeHub {
   }
 
   /** All frames received from the Fortress client, in arrival order. */
-  received(): readonly FortressToHubFrame[] {
+  received(): ReadonlyArray<FortressToHubFrame | FortressQueryFrame> {
     return [...this._received];
   }
 
@@ -101,13 +119,34 @@ export class FakeHub {
     this.socket?.close(1001, "test-drop");
   }
 
-  /** Stop the hub server, immediately closing any open connections. */
+  /** Stop the hub server, immediately closing any open connections.
+   *
+   *  BOUNDED: a socket this hub closed from its own side leaves the forced stop
+   *  waiting on a peer that may never answer, and a rig that can hang is a rig
+   *  that hangs the whole suite. Each hub reserves a fresh port, so giving up on
+   *  the wait costs nothing. */
   async stop(): Promise<void> {
-    await this.server.stop(true);
+    await Promise.race([this.server.stop(true), Bun.sleep(250)]);
   }
 
-  private autoRespond(ws: ServerWebSocket<undefined>, frame: FortressToHubFrame): void {
+  private autoRespond(
+    ws: ServerWebSocket<undefined>,
+    frame: FortressToHubFrame | FortressQueryFrame,
+  ): void {
     const { orgId, fortressId, credential, protocolVersion, rejectWith } = this.opts;
+
+    if (frame.t === "fortressQuery") {
+      const answer = this.opts.answerQuery?.(frame.query, frame.id) ?? null;
+      if (!answer) return; // an old hub answers nothing at all
+      ws.send(
+        encodeFrame(
+          "error" in answer
+            ? { t: "fortressQueryError", id: frame.id, error: answer.error }
+            : { t: "fortressQueryResult", id: frame.id, result: answer.result },
+        ),
+      );
+      return;
+    }
 
     if (frame.t === "enroll") {
       if (rejectWith) {

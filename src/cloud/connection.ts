@@ -26,6 +26,14 @@ import { sanitizeDbError } from "../host/postgres/sanitize";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { CloudCredential, CredentialStore } from "./credentials";
+import {
+  FortressQueryRegistry,
+  FortressQueryUnavailable,
+  isFortressQueryAnswer,
+  type FortressQueryAnswerFrame,
+  type FortressQueryFrame,
+} from "./fortress-query";
+import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
 
 export const SUPPORTED_PROTOCOL_VERSION = 1;
 
@@ -145,6 +153,7 @@ export class WsCloudConnection implements CloudConnection {
   private readonly reconnectMaxMs: number;
   private readonly maxFrameBytes: number;
   private closeResolve: (() => void) | null = null;
+  private readonly queries = new FortressQueryRegistry();
 
   constructor(private readonly deps: WsCloudConnectionDeps) {
     this.reconnectMinMs = deps.reconnectMinMs ?? RECONNECT_MIN_MS;
@@ -195,10 +204,43 @@ export class WsCloudConnection implements CloudConnection {
     }
   }
 
+  /**
+   * Ask the hub a bounded question and wait for its answer.
+   *
+   * Daemon-only, and it NEVER hangs and never invents an answer: no socket, a
+   * saturated registry, a close, a reconnect and a hub too old to recognise the
+   * frame all reject with FortressQueryUnavailable. The last of those is the
+   * silent case — an unupgraded hub sends nothing at all — which is why the
+   * timeout, not an error frame, is what makes it terminate.
+   */
+  request(
+    query: FortressQueryPayload,
+    timeoutMs?: number,
+  ): Promise<FortressQueryResultPayload> {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new FortressQueryUnavailable("offline"));
+    }
+    const opened = this.queries.open(timeoutMs);
+    if (!opened.id) return opened.answer;
+    const frame: FortressQueryFrame = { t: "fortressQuery", id: opened.id, query };
+    try {
+      ws.send(encodeFrame(frame));
+    } catch (err) {
+      this.queries.settle({
+        t: "fortressQueryError",
+        id: opened.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return opened.answer;
+  }
+
   close(): Promise<void> {
     this.stopped = true;
     this._state = "closing";
     this.clearHeartbeat();
+    this.queries.drain("closed");
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -244,6 +286,15 @@ export class WsCloudConnection implements CloudConnection {
     if (!cred && !this.activeEnrollToken) {
       this._state = "offline";
       settle(new Error("No Fortress credentials and no enrollment token — cannot connect"));
+      return;
+    }
+
+    // close() may have landed while the credential load was in flight. The check
+    // at the top of dial() ran before that await, so without this one a reconnect
+    // opens a socket AFTER the caller was told the connection was closed — and
+    // nothing ever closes it, because close() already saw the old socket.
+    if (this.stopped) {
+      this._state = "offline";
       return;
     }
 
@@ -299,13 +350,23 @@ export class WsCloudConnection implements CloudConnection {
       // `raw.length` (UTF-16 code units), so a multi-byte payload can't sneak past
       // the byte ceiling.
       if (Buffer.byteLength(raw) > this.maxFrameBytes) return;
-      const decoded = safeDecodeFrame<HubToFortressFrame>(raw);
+      const decoded = safeDecodeFrame<HubToFortressFrame | FortressQueryAnswerFrame>(raw);
       if (!decoded.ok) return;
+      // Answers are correlated, not dispatched: they belong to a caller holding a
+      // promise, and an unknown id is dropped rather than routed anywhere.
+      if (isFortressQueryAnswer(decoded.frame)) {
+        this.queries.settle(decoded.frame);
+        return;
+      }
       void this.handleFrame(decoded.frame, send, settle);
     });
 
     ws.addEventListener("close", () => {
       this.clearHeartbeat();
+      // Correlation ids do not survive a socket: the hub on the other side of the
+      // next one has never heard of them, so anything outstanding is answered
+      // now rather than left to its own timeout.
+      this.queries.drain(this.stopped ? "closed" : "offline");
       if (this.stopped) {
         this._state = "offline";
         const resolve = this.closeResolve;
