@@ -264,6 +264,13 @@ export class EventStreamRegistry {
         headers: {
           "content-type": "text/event-stream",
           "cache-control": "no-store",
+          // Set here rather than by the response finisher: a stream is already
+          // flowing when the finisher would run. The two that belong on a live
+          // body are carried anyway - a sniffed event stream is a stream a
+          // browser may decide to execute, and a referrer is a leak whatever
+          // the content type.
+          "x-content-type-options": "nosniff",
+          "referrer-policy": "no-referrer",
           // Platform edges buffer text/event-stream by default, which turns a
           // live stream into a page that arrives at the end.
           "x-accel-buffering": "no",

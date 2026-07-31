@@ -20,8 +20,12 @@
 //
 // The Host allowlist is enforced in the serve shell rather than here, because it
 // re-reads ui.json per request and this handler is deliberately synchronous and
-// stateless. /healthz and the instance handshake are exempt: both answer before
-// any name for this console exists.
+// stateless. /healthz and the instance handshake are exempt from THAT check
+// alone: both answer before any name for this console exists. The handshake
+// still passes the gate, so its meter and its loopback rule are the gate's like
+// every other route's; /healthz passes nothing at all, deliberately — a platform
+// probe that could be starved, or that could fail because a configuration file
+// did not parse, is not a health check.
 
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
@@ -129,12 +133,30 @@ export function looksLikeAsset(pathname: string): boolean {
 /** Reserved for the console's own API; never served from the asset map. */
 const API_PREFIX = "/ui/api/";
 
+/**
+ * The ceiling on a request body, enforced by the server before a handler runs.
+ *
+ * Every body the console reads is small control-plane JSON — a login, a password,
+ * a grant, a command's parameters — and the largest of them is a JWT. Without a
+ * stated ceiling the runtime default applies, which lets an unauthenticated
+ * caller make this process buffer megabytes per request on the one route that
+ * answers before a session exists.
+ */
+export const MAX_REQUEST_BODY_BYTES = 256 * 1024;
+
 /** The identity handshake. Enumerated in the public route set, never audited. */
 export const INSTANCE_PROBE_PATH = "/ui/api/instance";
 
 /** The handshake and the health probe answer before this console has a name, so
- *  neither can be gated on the Host allowlist. */
+ *  neither can be gated on the Host allowlist. Exemption from the ALLOWLIST
+ *  only — see UNGATED_PATH for the one route that skips the gate as well. */
 export const HOST_EXEMPT_PATHS: ReadonlySet<string> = new Set(["/healthz", INSTANCE_PROBE_PATH]);
+
+/** The single route that reaches the handler without a verdict. It is
+ *  deliberately unmetered (BUCKETS names no bucket for it) and deliberately
+ *  independent of ui.json, because a platform health check runs on its own
+ *  schedule and must answer while the console is refusing everything else. */
+export const UNGATED_PATH = "/healthz";
 
 const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "localhost"]);
 
@@ -237,13 +259,16 @@ export function startUiServer(
   const answer = async (req: Request, peer: string | undefined): Promise<Response> => {
     const runtime = ctx.runtime;
     const path = new URL(req.url).pathname;
-    if (!runtime || HOST_EXEMPT_PATHS.has(path)) return handleUiRequest(req, ctx, peer);
+    if (!runtime || path === UNGATED_PATH) return handleUiRequest(req, ctx, peer);
     const config = await runtime.readConfig();
-    const host = runtime.hostCheck(req, config, ctx.port);
-    if (!host.ok) {
-      return finish(new Response(host.reason, { status: 400 }), "no-store", csp);
+    let hsts = false;
+    if (!HOST_EXEMPT_PATHS.has(path)) {
+      const host = runtime.hostCheck(req, config, ctx.port);
+      if (!host.ok) {
+        return finish(new Response(host.reason, { status: 400 }), "no-store", csp);
+      }
+      hsts = host.scheme === "https";
     }
-    const hsts = host.scheme === "https";
 
     // The gate decides everything — bucket, loopback rule, session, role, Origin.
     // No handler below it re-decides any of that, and nothing reaches a handler
@@ -308,6 +333,7 @@ export function startUiServer(
       return Bun.serve({
         hostname: host,
         port: ctx.port,
+        maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
         fetch: (req, server) => answer(req, server.requestIP(req)?.address),
       });
     } catch (err) {
