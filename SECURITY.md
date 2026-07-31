@@ -51,8 +51,8 @@ attacks. The wire-protocol types live in `hx-protocol`; the client daemon in
 
 # Threat model
 
-This section describes what the shipped code does. Every statement here is
-asserted by a test in this repository; where a property does not hold, it is
+This section describes what the shipped code does. The properties it names are
+ones this repository's tests assert; where a property does not hold, it is
 written down under **Known residuals** rather than omitted.
 
 ## The two ways in
@@ -271,14 +271,20 @@ rather than *impossible*.
 Against an **external Postgres** (`FORTRESS_DATABASE_URL`) both fences above are
 **void**. There is no role split to enforce, the operator's role OWNS the tables
 — an owner cannot be constrained by `REVOKE` and bypasses any routine with plain
-DML — and the apparatus is never created there at all. The metadata-only column
-boundary is void for the same reason. Console mutations still work; they are
-simply not contained, and the console says so on the pages that depend on them.
+DML — and the apparatus is never created there at all. Console mutations still
+work; they are simply not contained, and the console says so on the pages that
+depend on them.
 
-Remediation: run the daemon under a NON-OWNING role.
+The metadata-only column boundary is not applied there either: the grants that
+create it are issued by the embedded provider's boot, which never runs against
+an external DSN. Unless the operator provisioned a restricted console role
+themselves, the console connects with whatever privilege the DSN carries.
+
+Remediation for all three: run the daemon under a NON-OWNING role.
 `hx-fortress ui config --print-role-sql` emits that script — table DML only,
 `SELECT, UPDATE` on the command queue and never `INSERT`, so minting stays with
-the console role the same script creates.
+the console role the same script creates, and the same column-scoped `SELECT`
+on `hx.sessions` that the embedded boot issues.
 
 ## The console process holds a bucket-write-capable key
 
