@@ -1,5 +1,6 @@
 import { startFortress, statusFortress, stopFortress } from "./cli-lifecycle";
 import { setFortressCredential } from "./cli-credentials";
+import { runDevCommand, type DevCommandDeps } from "./cli-dev";
 import { runUiCommand, type UiCommandDeps } from "./cli-ui";
 import { renderHelp } from "./ui/help";
 import {
@@ -29,6 +30,7 @@ import {
 
 type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
 type RunUi = (args: readonly string[], deps: UiCommandDeps) => Promise<number>;
+type RunDev = (args: readonly string[], deps: DevCommandDeps) => Promise<number>;
 type RunEnrollWizard = (options: WizardEntryOpts) => Promise<void>;
 type RunTui = () => Promise<number>;
 type RunUpdate = (opts: { downloadBaseUrl: string; binPath?: string; log?: (msg: string) => void; onProgress?: (ev: UpdateProgress) => void }) => Promise<UpdateResult>;
@@ -40,6 +42,7 @@ interface CliDependencies {
   runLogs?: RunLogs;
   runTui?: RunTui;
   runUi?: RunUi;
+  runDev?: RunDev;
   runUpdate?: RunUpdate;
   writeLine?: (line: string) => void;
   /** Override the Fortress root directory — used in tests to supply a temp config. */
@@ -226,6 +229,14 @@ export async function runCli(
       }
       case "ui":
         return await (dependencies.runUi ?? runUiCommand)(args.slice(1), {
+          writeLine,
+          fortressRoot: dependencies.fortressRoot,
+        });
+      // Absent from `help` on purpose: it is gated on a development build and on
+      // an unenrolled fortress, and a shipped binary should not advertise a verb
+      // group it refuses to run.
+      case "dev":
+        return await (dependencies.runDev ?? runDevCommand)(args.slice(1), {
           writeLine,
           fortressRoot: dependencies.fortressRoot,
         });
