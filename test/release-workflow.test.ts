@@ -47,6 +47,22 @@ describe("release workflow", () => {
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
   });
 
+  test("the rolling release publishes only on a push to main", () => {
+    // A workflow_dispatch is how the IMMUTABLE release is cut, from a build tag
+    // that already exists. Ungated, the rolling step would run there too and
+    // delete that tag's release, then force-move the very tag the pre-dispatch
+    // check verified — underneath the ceremony reading it.
+    const step = workflow.indexOf("- name: Publish rolling release");
+    expect(step).toBeGreaterThan(-1);
+    const gate = workflow.indexOf(
+      "if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+      step,
+    );
+    expect(gate).toBeGreaterThan(step);
+    // The gate is this step's own, not one belonging to a later step.
+    expect(gate).toBeLessThan(workflow.indexOf('gh release create "$tag"', step));
+  });
+
   test("signs artifacts and attests build provenance (supply-chain)", () => {
     // Ed25519 detached signatures over the binaries + pgvector tarball…
     expect(workflow).toContain("scripts/sign-artifact.ts");

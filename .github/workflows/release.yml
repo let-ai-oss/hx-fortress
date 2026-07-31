@@ -141,7 +141,12 @@ jobs:
         with:
           subject-path: "dist/hx-fortress-*.gz"
 
+      # Pushes only. A manual dispatch is how an immutable release is cut from an
+      # existing build tag; letting the rolling step run there would delete and
+      # recreate that same tag's release underneath the ceremony that is reading
+      # it, and force-move the tag the pre-dispatch check just verified.
       - name: Publish rolling release
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
