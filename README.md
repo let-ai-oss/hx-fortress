@@ -10,7 +10,9 @@ contracts, and the lifecycle CLI for running Fortress as a persistent per-user
 launchd or systemd service. Structured logs, module loading, and cloud
 transport are implemented. Release artifacts bundle the core `session_vault`
 module, and both the self-update command and the install-from-source and
-prebuilt installers are shipped.
+prebuilt installers are shipped. The same binary serves the administration
+console described under
+[The administration console](#the-administration-console).
 
 ## Install
 
@@ -50,18 +52,401 @@ can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
 
 ## Commands
 
-The Fortress CLI surface is:
+`hx-fortress` with no arguments opens the terminal dashboard, and
+`hx-fortress help` prints the whole surface. The groups are:
 
 ```text
-hx-fortress start
-hx-fortress stop
-hx-fortress status
-hx-fortress logs
-hx-fortress update
+fortress         enroll · start · stop · status · logs · update · credentials set
+console          ui · ui enable · ui disable · ui config · ui marker
+console users    ui user create · list · disable · delete · reset
+console sso      ui sso on · ui sso off
+residency audit  audit witness show|on|off · audit acks reconcile
+roster           roster purge-inactive
 ```
 
-`hx-fortress host` is the internal foreground command used by the OS service
-manager. It is not intended for direct user invocation.
+`hx-fortress host` runs the daemon in the foreground and is what the OS service
+manager invokes. `hx-fortress container-run` is the container entrypoint that
+supervises the daemon and the console together. Neither is meant to be typed by
+hand.
+
+## The administration console
+
+A fortress is an appliance for one organization: one host, one bucket, one
+database, one roster of people. The console is the window onto that appliance —
+a browser surface for whoever runs it, so that "is ingest healthy", "who in the
+organization is actually covered" and "does this host hold what it is supposed
+to hold" are questions with answers rather than questions that need a shell.
+Administrators reach it from their own machines; the fortress stays where the
+organization put it.
+
+The console is a **separate process from the daemon**. The daemon owns the cloud
+tunnel, the ingest gateway, Postgres and the object store; the console owns a
+listener, a set of local accounts and its own audit spool. That separation is
+what lets the console render a stopped daemon and offer to start it, and it is
+why the two are enabled, configured and supervised independently.
+
+### Reaching it
+
+**One click from the workbench.** In let.ai, an organization owner opens
+Clarity → Settings → Storage and uses *Open fortress console*. The button
+appears once this fortress has advertised a console URL, which needs all three
+of `hx-fortress ui sso on`, an https public URL, and the console enabled. The
+advertisement is recomputed on every reconnect, so `ui sso off` clears it on the
+next one — and does not unsend what has already been sent. The button is
+owner-only; operators and auditors who are not owners receive the console URL
+from the administrator who created their account, alongside their setup link.
+The URL is organization infrastructure rather than a secret, and on its own it
+conveys nothing.
+
+**SSH and `hx-fortress ui`.** The cloud-independent path, and the one to use
+when let.ai is unreachable. Forward the port and run the console in the
+foreground:
+
+```sh
+ssh -L 8788:127.0.0.1:8788 <fortress-host>
+hx-fortress ui
+```
+
+Then open `http://127.0.0.1:8788`. The console prints the URL to reach it on,
+along with the disclosure of what a console login grants.
+
+Neither path is an entry in itself. A workbench arrival lands on the console's
+sign-in form: the grant it carries names the workbench identity for the audit
+trail and mints no session, no token and no read. Every session belongs to a
+fortress-local account.
+
+### Accounts
+
+Accounts are created from the terminal, and only from the terminal:
+
+```sh
+hx-fortress ui user create alice --role operator
+hx-fortress ui user create audit-bot --role readonly
+hx-fortress ui user list
+hx-fortress ui user disable alice
+hx-fortress ui user reset alice
+hx-fortress ui user delete alice
+```
+
+There are two roles and the difference between them is exactly one thing:
+`readonly` reaches every read surface, `operator` additionally reaches the two
+write routes. `readonly` is the auditor and monitoring persona — it sees the
+same numbers, and a control it may not use is disabled carrying the server's own
+refusal.
+
+**No password is ever typed at a terminal.** `user create` and `user reset`
+print a one-time setup link instead, and the person opens it and sets their own
+password in the browser. The token rides the URL *fragment*, so it never reaches
+a request line, an access log or a `Referer`; it lasts 24 hours, dies once the
+password is set, and completion requires a POST so a link preview cannot consume
+it. `user reset` leaves the current password working until the new link is
+completed — a reset that locked someone out the moment it was issued would
+strand them if the link never arrived.
+
+Sessions live in the serving process's memory: 12 hours absolute and 60 minutes
+idle by default, both configurable, and a console restart ends every one of
+them. `user disable` and `user delete` end that account's live sessions on their
+next request.
+
+### The surfaces, and where their numbers come from
+
+| Surface | Path | What it answers | Where the figures come from |
+| --- | --- | --- | --- |
+| Overview | `/` | is this fortress healthy right now | the daemon's `status.json` and `metrics.json` heartbeat files; session and byte totals from Postgres; bucket versioning and lifecycle read live from the provider |
+| Sessions | `/sessions` | what has arrived, from whom, and when | Postgres metadata only, never transcript text; *Verify* additionally stats the object in the bucket |
+| Adoption | `/people` | who in the organization is covered | the roster let.ai sent, and this host's own session rows — kept apart, never blended |
+| Residency | `/residency` | does this host hold what it is supposed to | an audit the daemon runs; routing posture from the cached answer to let.ai |
+| Posture & Audit | `/compliance` | where data enters and leaves, and who did what | data paths computed from the effective configuration; the admin trail from Postgres, falling back to the on-disk spool |
+| Postgres | `/postgres` | is the database up, and how large | the daemon's status file, and Postgres itself |
+| Object storage | `/storage` | which bucket, versioned how, under what lifecycle — and every storage migration this host has run | the resolved storage credential and live provider calls; migration runs from Postgres |
+| Embeddings | `/embeddings` | how much is embedded, under which model | Postgres row counts; the vector column is never selected |
+| Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the release origin for the version check |
+| Logs | `/logs` | what the daemon is saying | a live tail of the daemon's structured log file |
+
+**An absent number is never rendered as a zero.** A figure the console could not
+obtain renders as an em dash with the reason beside it — "the daemon has
+published no metrics", "Postgres is not accepting connections", "unavailable —
+the fortress key cannot read bucket configuration". A panel whose refresh failed
+keeps the last figures it had and says they are no longer current, rather than
+replacing them with nothing.
+
+**Staleness has thresholds, and the console states them.** The daemon writes a
+heartbeat every 5 seconds; a status file older than 15 seconds reads as *not
+responding*. A control that needs a live daemon refuses **before** it queues
+anything — a row nobody polls for would sit until its deadline and then be
+rejected, which reads as the work failing rather than the ask. A cached answer
+from let.ai older than 15 minutes is labelled stale rather than presented as
+current, and a residency roll-up that could not reach let.ai is never called
+clean.
+
+Sessions belonging to another organization are counted so the totals reconcile
+against the bucket, and their metadata is not shown.
+
+### Adoption, and what a coverage figure means
+
+Adoption is a funnel of five stages, and every stage carries the source it was
+computed from — because the hub knows who the organization employs and what they
+have installed, and only this host knows what actually arrived here. A stage
+with two sources would be a figure nobody could reconcile against either.
+
+| Stage | Counts | Attested by |
+| --- | --- | --- |
+| On the roster | active members let.ai reports for this organization | let.ai |
+| Client installed | members with at least one active install, counted by machine | let.ai |
+| Backfill reported complete | members whose most recent backfill report has nothing outstanding | let.ai |
+| Sending to this fortress | members with at least one session on this host | this fortress |
+| Active in the last 30 days | members with session activity here inside the window | this fortress |
+
+The denominator is **active members only**. People who have left are counted
+separately and never divided into: a coverage figure that keeps counting
+departed employees falls forever, and one that deletes them loses the fact that
+their sessions are still here. People sending to this fortress whom the roster
+does not know at all are their own labelled bucket, never folded into the
+percentage.
+
+"Quiet" is derived from the last **upload**, never the last heartbeat. A client
+heartbeats whether or not it is sending anything, so last-seen stays fresh on an
+install that has silently stopped — which is exactly the install worth finding.
+An install that has not uploaded for 14 days is listed for attention, as are
+members with no install reported, installs that have never uploaded, and
+backfills still outstanding.
+
+`hx-fortress roster purge-inactive [--days <n>]` removes directory rows for
+members who left more than the retention ago. It removes directory rows only;
+their sessions on this fortress are untouched.
+
+### The residency audit
+
+The audit answers one question per session: is the transcript where this
+organization decided it should be? It reads every session row, stats the object
+in this fortress's bucket, and — for sessions that reached this host *through*
+let.ai — asks let.ai whether it still holds a copy.
+
+It runs when an operator asks for one, from Residency or the command plane.
+There is no timer: a run walks every session and stats objects in the bucket,
+and doing that on a schedule nobody was reading would spend the storage budget
+on an answer no one asked for.
+
+| Verdict | What it means | Acknowledgeable |
+| --- | --- | --- |
+| `confirmed` | held here, and let.ai reports no copy | — |
+| `also_at_letai` | held here, and a historical let.ai copy exists | yes |
+| `not_delivered_here` | let.ai recorded this fortress as a destination and the object never arrived | **no** |
+| `no_record` | uploaded before let.ai recorded per-destination delivery | — |
+| `unknown_provenance` | the row predates channel tracking, or was recovered after an index outage | — |
+| `not_applicable` | uploaded straight to this fortress; the id was never sent to let.ai | — |
+
+`not_delivered_here` is the incident: something that should be on this fortress
+is not. It is never downgraded by an acknowledgement — an acknowledgement
+explains why a copy exists somewhere, and no answer to that makes a missing
+object present. `also_at_letai` is separate and weaker: the object *is* here, and
+bytes at let.ai either predate this fortress or belong to a session also
+attributed to a let.ai-hosted organization. Per session it fails the check until
+acknowledged; in the fleet roll-up an acknowledged one qualifies the verdict
+rather than failing it.
+
+**Only a cloud-relayed session is ever named to let.ai.** A session uploaded
+straight to this fortress was never known to let.ai by id, so there is nothing to
+ask about, and one whose channel is unrecorded is not assumed to be either. The
+witness is controlled locally:
+
+```sh
+hx-fortress audit witness show
+hx-fortress audit witness off
+```
+
+With it off, no session id leaves this host and every eligible session says so by
+name — never "no copy was found", because nothing was asked. A run that could not
+reach let.ai says that instead, as a different fact.
+
+`hx-fortress audit acks reconcile` lists acknowledgements that have no matching
+record in this host's own audit trail; `--re-confirm` writes them again through
+the fenced routine so they land in it.
+
+### Asking the daemon to do something
+
+The console holds no vault credential, no signing key and no store handle. Work
+that needs one is a **request**: a row in the command queue that the daemon
+claims, performs and records. Eight kinds exist — apply an update, rotate a
+credential, run a storage migration, run a checkup, run a self-test, run the
+residency audit, toggle the cloud witness, acknowledge a finding.
+
+Service control is the exception. Start, stop and restart run in the console
+process, because the thing being controlled is the daemon and a stopped daemon
+polls for nothing.
+
+The console renders **the daemon's own record**, not the fact that a request was
+accepted. A terminal outcome that no daemon-written record corroborates renders
+as *Reported (unconfirmed)*; one a record contradicts renders as *Disputed*,
+names which way the disagreement runs, links the trail entry and gives the
+remediation. Neither is ever rendered as success.
+
+Where a build carries no release signing anchor, the console says so at the
+update control: the download is checked against its published checksum, which
+proves the bytes are intact and not who produced them.
+
+### Moving the fortress to another bucket
+
+A storage migration is driven from Object storage, in three gestures:
+
+| Gesture | What it does |
+| --- | --- |
+| `arm` | copy everything, then keep copying the delta; shorten the lifetime of new upload signatures |
+| `swap` | prove the fortress is quiet, cut onto the new bucket, verify |
+| `resume` | clear the pause left by a swap that was abandoned |
+
+Arm first, and leave it armed as long as you like — ingest keeps running
+throughout and nothing is held. Repeated delta passes narrow what has changed
+since the bulk copy, so the work remaining when you cut approaches zero. Supply
+the target bucket's credentials with the arm; they travel to a single-use `0600`
+file and never into the command row, and the daemon reads and unlinks them in
+one step. A target whose credentials name a different bucket than the one you
+asked for is refused.
+
+Swap when ready. It first drains outstanding presigned uploads — a presigned PUT
+lands in the bucket directly, invisible to this process, so a pause cannot stop
+one and a counter cannot see it — then waits for quiet, re-checks the pause
+deadline immediately before the cut, swaps, and verifies. The pause is armed for
+at most 5 minutes and the barrier waits at most 2. A swap that cannot prove quiet
+resumes without cutting rather than cutting anyway.
+
+**The source bucket is never deleted.** Not at the end, not on success, not as
+cleanup. The old bucket *is* the rollback: if the new one turns out wrong, point
+the fortress back at it. Emptying it is a separate, deliberate act you take by
+hand once you are satisfied — and the run record names every object that was
+copied, with a checksum computed from what was read back out of the *target*
+rather than from what was sent.
+
+Object storage renders each run: the bucket pair, sessions and bytes copied,
+delta passes, when the cut happened, and how it ended. A run that stopped short
+is continued rather than restarted, so what an arm already proved is what a swap
+gets to skip.
+
+Storage configured by environment (`FORTRESS_STORAGE_BUCKET`) is refused before
+any copy begins. On a container the bucket belongs to the deployment, and a
+migration that moved it would be undone by the next redeploy.
+
+### Configuring the console
+
+Settings live in `$FORTRESS_ROOT/ui/ui.json` — mode `0600`, in a `0700`
+directory, beside the account store and the audit spool. The console and the
+`hx-fortress ui` verbs are its only writers; the browser can narrow the
+configuration (`sso` off) and never widen it. `hx-fortress ui config` prints the
+effective value of every key and where that value came from.
+
+| Variable | Purpose |
+| --- | --- |
+| `FORTRESS_UI_ENABLE` | `1` or `true` turns the console on. It can only turn it **on**: it is OR-ed with the stored setting, and `hx-fortress ui disable` refuses while it is set rather than writing a `false` the environment would override. |
+| `FORTRESS_UI_PORT` | Console port. Default `8788`. |
+| `FORTRESS_UI_BIND` | Listen address. Default `127.0.0.1`. |
+| `FORTRESS_UI_PUBLIC_URL` | The https origin the console is reached on when something terminates TLS in front of it. A bare origin — no path, query, fragment or userinfo. |
+| `FORTRESS_UI_CONTAINER_BIND` | `1` permits the dual-stack bind anywhere, with the residual printed. The override for a container the detector did not recognize; equivalent to `--allow-insecure-bind`. |
+| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume with its setup link printed to the container log. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
+| `FORTRESS_CONTAINER` | `0` disables container detection entirely, as `--no-container` does on the command line. |
+
+For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and a
+command-line flag wins over the environment. `FORTRESS_UI_ENABLE` is the
+exception: it is OR-ed, never authoritative in both directions.
+
+| `ui.json` key | Default | Written by |
+| --- | --- | --- |
+| `enabled` | `false` | `ui enable` / `ui disable`, and `ui --install-service` |
+| `port` | `8788` | `ui config set port` |
+| `bind` | `127.0.0.1` | `ui config set bind` |
+| `publicUrl` | unset | `ui config set publicUrl` |
+| `trustedProxies` | none | `ui config set trustedProxies <csv>` |
+| `sso` | `false` | `ui sso on` / `ui sso off` |
+| `sessionTtlHours` | `12` | `ui config set sessionTtlHours` |
+| `sessionIdleMinutes` | `60` | `ui config set sessionIdleMinutes` |
+| `databaseUrl` | unset | `ui config set databaseUrl --stdin` |
+| `allowInsecureBind` | `false` | `ui --install-service --allow-insecure-bind` |
+| `marker` | unset | `ui marker "<phrase>"` / `ui marker --clear` |
+
+`databaseUrl` is read from stdin and refuses a positional argument by name: a
+DSN carries a password, and argv is visible in `/proc/<pid>/cmdline`, in `ps`
+and in shell history.
+
+```sh
+printf %s "$DSN" | hx-fortress ui config set databaseUrl --stdin
+```
+
+`trustedProxies` decides whether `X-Forwarded-For` is honoured at all. With none
+configured the header is ignored and every sign-in limit is keyed on the socket
+peer — which, behind any platform edge, is one address for everybody.
+
+### Where the console runs
+
+**Host installs** get a user service:
+
+```sh
+hx-fortress ui --install-service      # systemd --user, or launchd on macOS
+hx-fortress ui --uninstall-service    # removes the unit, keeps the settings
+```
+
+The installer refuses when this shell's fortress root differs from the daemon's:
+a console on a different root reads a different database, a different audit spool
+and a different set of accounts.
+
+On Linux a `systemd --user` unit stops when your last login session ends. The
+installer detects that and says so; it does not fix it for you:
+
+```sh
+sudo loginctl enable-linger <user>
+```
+
+**lxc and nspawn containers are host installs.** They run `systemd --user`, keep
+the terminal dashboard and keep full service control, so they take the rungs
+above. What they do not have is Docker's published-port indirection — a wildcard
+bind inside one is a real LAN bind — so widening the bind there takes the
+explicit gesture.
+
+**Docker-class containers** — Docker, Podman, Kubernetes, Railway — have no unit
+to install and nothing for `systemctl` to mean. Set `FORTRESS_UI_ENABLE=1` and
+redeploy; that is the entire gesture, and a redeploy without it is how you turn
+the console off again. Service control is hidden there, with its reason: the
+orchestrator owns starting, stopping and updating this fortress.
+
+**The bind rule.** Outside a container a non-loopback bind is refused unless an
+https `FORTRESS_UI_PUBLIC_URL` is set or `--allow-insecure-bind` is passed, and
+the residual is printed either way. Inside a detected docker-class container with
+`FORTRESS_UI_ENABLE` the console binds dual-stack, so the documented
+`-p 127.0.0.1:8788:8788` publish works with no extra gesture. Everywhere else —
+lxc, nspawn, or a runtime the detector did not recognize — widening takes
+`FORTRESS_UI_CONTAINER_BIND=1` or `--allow-insecure-bind`.
+
+**Behind a reverse proxy**, terminate TLS in front of the console and tell it
+the origin it is reached on:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name fortress.example.com;
+
+  location / {
+    proxy_pass http://127.0.0.1:8788;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+  }
+}
+```
+
+```sh
+hx-fortress ui config set publicUrl https://fortress.example.com
+hx-fortress ui config set trustedProxies 127.0.0.1
+hx-fortress ui sso on
+```
+
+`publicUrl` must be https and a bare origin; `hx-fortress ui sso on` refuses
+without one rather than warning. The console sends
+`Strict-Transport-Security` on responses that actually arrived over that
+configured https host — asserting it on a plain-http console would pin a browser
+to a scheme that console cannot serve.
+
+Keep the proxy's `Host` header intact. Every request is checked against an
+allowlist rebuilt from a live read of `ui.json` — literal loopback on any port,
+and the configured public host on its own port — and a name nobody configured is
+refused, which is what closes DNS rebinding.
 
 ## Cloud-service run mode
 
@@ -194,23 +579,32 @@ starts both. It **refuses to run anywhere it is not pid 1**: pid 1 is what
 receives the runtime's `SIGTERM`, and a daemon killed by the grace timeout never
 writes its last status, never drains its audit spool and never stops its
 Postgres cleanly. `hx-fortress host` remains the way to run only the daemon.
+The two processes are supervised differently, and the difference is deliberate.
+**If the daemon exits, the supervisor stops the console and exits with the
+daemon's own exit code.** A container whose daemon has died is not doing its job,
+and an orchestrator told so can restart it, back it off, or roll the deployment
+back; one that sees the container still running learns nothing, and a crash loop
+hidden inside a healthy-looking container is the failure nobody is paged for.
+There is a second reason it cannot simply respawn: the daemon daemonizes its own
+postmaster, which is re-parented to pid 1 when the daemon dies, so a replacement
+daemon in the same container would find a cluster already running and be unable
+to start one. Set a restart policy on the container instead — compose
+`restart:`, a Kubernetes `restartPolicy` — the same one
+`FORTRESS_STORE_EXIT_ON_WEDGE` already assumes.
 
-**The daemon's exit is the container's exit**, with its exit code. Restarting it
-is your orchestrator's decision, not this supervisor's: a fortress that never
-boots has to be visible as a crash loop, and the postmaster the daemon
-daemonizes is re-parented to pid 1 when it dies, so a second daemon in the same
-container cannot start a cluster that is already running. Set a restart policy
-(compose `restart:`, a Kubernetes `restartPolicy`) — the same one
-`FORTRESS_STORE_EXIT_ON_WEDGE` already assumes. The console is the process this
-supervisor does restart, with backoff, and it stops for good when
-`hx-fortress ui disable` flips the setting.
+**Only the console is respawned**, on a doubling backoff from one second to
+thirty (reset once it has stayed up), and only while it is still enabled. The supervisor re-reads that setting as it runs, so
+`hx-fortress ui disable` stops the console within seconds and leaves it stopped
+— without touching the daemon or the ingest it is serving.
 
-| Variable | Purpose |
-| --- | --- |
-| `FORTRESS_UI_ENABLE` | `1` turns the console on. `hx-fortress ui disable` cannot switch this off — the environment wins; unset it and redeploy. |
-| `FORTRESS_UI_PORT` | Console port (default `8788`). |
-| `FORTRESS_UI_PUBLIC_URL` | The https origin the console is reached on, when an ingress terminates TLS in front of it. |
-| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume with its setup link printed to the container log. A login that already exists is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
+`SIGTERM` and `SIGINT` are forwarded to both, console first and daemon last,
+because the console reads the daemon's status and its database.
+
+Set `FORTRESS_UI_ENABLE=1` to turn the console on here, and redeploy to turn it
+off again — `hx-fortress ui disable` refuses while the variable is set, because
+writing `enabled: false` would change nothing. That variable and the rest of the
+console's environment are documented in full under
+[Configuring the console](#configuring-the-console).
 
 `HOME=/data` in the image, beside `FORTRESS_ROOT=/data`, because
 `credentials.json` lives under `$HOME/.let/session-vault/`. An image whose HOME
