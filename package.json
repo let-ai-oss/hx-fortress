@@ -18,8 +18,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "db:check": "drizzle-kit check",
-    "check": "bun run typecheck && bun run lint && bun run db:check && bun test"
+    "check": "bun run typecheck && bun run lint && bun test"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

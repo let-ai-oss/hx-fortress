@@ -1,11 +1,20 @@
 import type { Migration } from "../migrate";
 
-// Migrations in apply order. Each entry imports a drizzle-kit-generated `.sql`
-// file as embedded text (so it survives `bun build --compile` — the runtime
-// never reads a migrations folder). The `name` matches the drizzle journal tag.
+// THE registry of migrations, in apply order — nothing else decides what runs or
+// when. Each entry imports a `.sql` file as embedded text (so it survives
+// `bun build --compile`; the runtime never reads a migrations folder), and `name`
+// is the key the runner records as applied.
 //
-// Adding a migration: run `bunx drizzle-kit generate` (or `--custom` for
-// extensions/views/roles), then append one import + one array entry here.
+// There is no drizzle journal or snapshot set behind this list. 0000-0014 are
+// drizzle-kit output kept verbatim; 0015 onward are hand-written SQL, because what
+// they express — roles, REVOKEs, the SECURITY DEFINER apparatus, data backfills —
+// is not derivable from the Drizzle schema, and a generator that cannot emit them
+// cannot verify them either. `drizzle-kit check` went with the snapshots; the
+// ordering invariant it nominally covered is asserted against these entries
+// directly (test/host-postgres-migrate.test.ts).
+//
+// Adding a migration: write `NNNN_<name>.sql` with the next unused number, then
+// append one import + one array entry here. Never edit an applied file.
 import sql0000Extensions from "./0000_extensions.sql" with { type: "text" };
 import sql0001Dimensions from "./0001_dimensions.sql" with { type: "text" };
 import sql0002Sessions from "./0002_sessions.sql" with { type: "text" };

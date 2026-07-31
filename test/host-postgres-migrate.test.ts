@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
+import path from "node:path";
 
 import { runMigrations, type Migration, type MigrationExec } from "../src/host/postgres/migrate";
+import { migrations } from "../src/host/postgres/migrations/manifest";
 
 /** In-memory fake: records exec'd statements, tracks schema_migrations, and
  *  answers extension-availability from the given set. */
@@ -77,5 +80,37 @@ describe("runMigrations", () => {
     const done = await runMigrations(db, gated);
     expect(done).toEqual(["0006_vec"]);
     expect(db.applied.has("0006_vec")).toBe(true);
+  });
+});
+
+// The manifest is the only registry there is — no drizzle journal, no snapshots,
+// and `drizzle-kit check` dropped with them. These assertions are what remains
+// standing in their place: a mis-numbered or re-used prefix would apply a
+// migration out of order on a fresh cluster and silently no-op on an old one.
+describe("the migration manifest", () => {
+  const prefixes = migrations.map((m) => m.name.slice(0, 4));
+
+  test("every name is NNNN_<slug> and the array is in ascending prefix order", () => {
+    for (const migration of migrations) {
+      expect(migration.name).toMatch(/^\d{4}_[a-z0-9_]+$/);
+    }
+    expect(prefixes).toEqual([...prefixes].sort());
+  });
+
+  test("no prefix is used twice", () => {
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+  });
+
+  test("each entry's name matches the .sql file it embeds", async () => {
+    const dir = path.join(import.meta.dir, "..", "src", "host", "postgres", "migrations");
+    const onDisk = (await readdir(dir)).filter((f) => f.endsWith(".sql")).sort();
+    expect(migrations.map((m) => `${m.name}.sql`)).toEqual(onDisk);
+  });
+
+  // 0009 was reserved for an embed-job lease table that the implementation
+  // replaced with an in-process worker; the runner keys on names, not on a dense
+  // range, so the hole is inert. Asserted so a later "fix" cannot renumber into it.
+  test("0009 is absent by design", () => {
+    expect(prefixes).not.toContain("0009");
   });
 });
