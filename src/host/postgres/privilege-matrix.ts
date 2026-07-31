@@ -51,6 +51,8 @@ const TABLE_EXPECTATIONS: readonly TableExpectation[] = [
   { role: PG_APP_RW_ROLE, table: "audit_findings", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
   { role: PG_APP_RW_ROLE, table: "roster", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
   { role: PG_APP_RW_ROLE, table: "roster_sync", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+  { role: PG_APP_RW_ROLE, table: "migration_runs", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
+  { role: PG_APP_RW_ROLE, table: "migration_objects", granted: ["SELECT", "INSERT", "UPDATE", "DELETE"] },
   // The console mints commands and drains the audit spool; it never transitions
   // a command and never writes the audit tables the engine owns.
   { role: PG_UI_ROLE, table: "console_commands", granted: ["SELECT", "INSERT"] },
@@ -62,6 +64,8 @@ const TABLE_EXPECTATIONS: readonly TableExpectation[] = [
   { role: PG_UI_ROLE, table: "audit_findings", granted: ["SELECT"] },
   { role: PG_UI_ROLE, table: "roster", granted: ["SELECT"] },
   { role: PG_UI_ROLE, table: "roster_sync", granted: ["SELECT"] },
+  { role: PG_UI_ROLE, table: "migration_runs", granted: ["SELECT"] },
+  { role: PG_UI_ROLE, table: "migration_objects", granted: ["SELECT"] },
   // The cloud-served read DSN sees nothing the console owns.
   ...[PG_READONLY_ROLE, PG_APP_RO_ROLE].flatMap((role) =>
     CONSOLE_TABLES.map((table) => ({ role, table, granted: [] as readonly string[] })),

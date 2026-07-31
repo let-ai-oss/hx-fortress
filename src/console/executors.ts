@@ -17,6 +17,7 @@ import { finishAuditRun, recordFindings, startAuditRun } from "./audit-store";
 import type { RollUpCounts } from "./audit-verdicts";
 import { runCheckup, summarizeCheckup, type CheckupDeps } from "./checkup";
 import { readCurrentEpisode } from "./ingest-control-db";
+import { isMigrationCommand, type MigrationCommand } from "./migration-runner";
 import {
   applyRotation,
   describeRotation,
@@ -31,7 +32,7 @@ import {
 } from "../modules/session-vault/credentials";
 import { buildDirectStore } from "../modules/session-vault/store";
 import { runFortressUpdate } from "../update";
-import type { CommandExecutor, CommandExecutors } from "./commands";
+import type { CommandExecutors } from "./commands";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import type { HostStatusSnapshot, ScopedLogger } from "../host/types";
 import type { HxDb } from "../host/postgres/db";
@@ -61,6 +62,13 @@ export interface ExecutorDeps {
   /** One residency audit pass, already wired to this fortress's store, its
    *  witness and its acknowledgements. */
   runAudit: () => Promise<AuditRunResult>;
+  /** One storage-migration command, already wired to this fortress's two
+   *  buckets, its pause plane and its credentials file. */
+  runMigration: (args: {
+    command: MigrationCommand;
+    target: string | null;
+    credentialRef: string | null;
+  }) => Promise<string>;
   /** Flip the egress toggle through the fenced routine. */
   setCloudWitness: (enabled: boolean) => Promise<void>;
   /** Write one acknowledgement through the fenced routine. */
@@ -70,16 +78,6 @@ export interface ExecutorDeps {
    *  a daemon that restarted itself here would die before the record it is
    *  about to write, leaving a swap nobody can prove happened. */
   onBinarySwapped: () => void;
-}
-
-/** A kind whose executor belongs to work this build does not carry. It is
- *  unreachable from the console, which offers a control only for the kinds it
- *  can run; a row of this kind was minted by something else, and failing it is
- *  the honest answer. */
-function notCarried(kind: string): CommandExecutor {
-  return async () => {
-    throw new Error(`this build does not run ${kind}`);
-  };
 }
 
 const EMPTY_COUNTS: RollUpCounts = {
@@ -194,7 +192,27 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
       await deps.rebindStore();
       return describeRotation(payload, written.credentials);
     },
-    run_migration: notCarried("run_migration"),
+    /**
+     * Moving the fortress's objects to another bucket, in the three steps an
+     * operator drives it in.
+     *
+     * The daemon runs it for the same reason it runs a rotation: the cut is a
+     * write to credentials.json, and the console holds neither that file's lock
+     * nor a store handle to prove the new bucket with. The engine's own order —
+     * copy, delta, drain, barrier, fence — is what keeps the arm→swap window
+     * measured in seconds; this only names which part of it was asked for.
+     */
+    run_migration: async (ctx) => {
+      const command = ctx.params.phase;
+      if (!isMigrationCommand(command)) {
+        throw new Error(`this build does not run a ${String(command)} migration step`);
+      }
+      return await deps.runMigration({
+        command,
+        target: typeof ctx.params.target === "string" ? ctx.params.target : null,
+        credentialRef: ctx.credentialRef,
+      });
+    },
     run_checkup: async () => {
       await assertNotMigrating(deps);
       return summarizeCheckup(await runCheckup(checkupDeps(deps)));

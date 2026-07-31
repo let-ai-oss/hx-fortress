@@ -32,6 +32,7 @@ import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { ty
 import sql0015ConsolePlane from "./0015_console_plane.sql" with { type: "text" };
 import sql0017AuditEngine from "./0017_audit_engine.sql" with { type: "text" };
 import sql0018Roster from "./0018_roster.sql" with { type: "text" };
+import sql0019MigrationRuns from "./0019_migration_runs.sql" with { type: "text" };
 import sql0016AuditRefFile from "./0016_audit_ref_file.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
@@ -88,4 +89,8 @@ export const migrations: Migration[] = [
   // a locally-derived `active` flag for members who stopped being sent, and a
   // singleton whose ABSENCE means no sync has ever landed. NOT gated.
   { name: "0018_roster", sql: sql0018Roster },
+  // The storage migration's own record: one row per run, one per copied session
+  // with the checksum it was verified against — which is what makes a resume
+  // able to re-copy exactly what is missing. NOT gated.
+  { name: "0019_migration_runs", sql: sql0019MigrationRuns },
 ];

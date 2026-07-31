@@ -293,9 +293,11 @@ describe("the roster tables", () => {
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS "hx"."roster_sync"');
     expect(sql).toContain("REVOKE ALL ON hx.roster FROM hx_readonly");
     expect(sql).toContain("REVOKE ALL ON hx.roster_sync FROM hx_app_ro");
-    // Applied numbers are never edited, so the roster is its own file.
+    // Applied numbers are never edited, so the roster is its own file, appended
+    // after the last one that had already run — and later work appends after it
+    // rather than reopening it.
     const names = migrations.map((m) => m.name);
-    expect(names.indexOf("0018_roster")).toBe(names.length - 1);
+    expect(names.indexOf("0018_roster")).toBeGreaterThan(names.indexOf("0017_audit_engine"));
   });
 
   test("the console reads them and writes neither", () => {

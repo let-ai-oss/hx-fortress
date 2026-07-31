@@ -434,6 +434,9 @@ function executorDeps(overrides: {
     runAudit: async () => {
       throw new Error("not wired");
     },
+    runMigration: async () => {
+      throw new Error("not wired");
+    },
     setCloudWitness: async () => {},
     acknowledgeFinding: async () => {},
     onBinarySwapped: () => {},

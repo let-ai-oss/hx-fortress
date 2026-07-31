@@ -15,6 +15,7 @@ import {
   readVaultCredentials,
   redactCredentials,
   writeVaultCredentials,
+  type VaultCredentials,
 } from "../modules/session-vault/credentials.js";
 import { applyHeadlessBootstrap } from "./headless-bootstrap";
 import {
@@ -63,6 +64,8 @@ import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-contro
 import { downloadBaseFromCloudUrl } from "../update";
 import { readConsoleAdvertisement } from "../ui/advertise";
 import { runAuditForFortress } from "../console/audit-runner";
+import { runMigrationCommand } from "../console/migration-runner";
+import { buildDirectStore } from "../modules/session-vault/store";
 import { purgeInactiveRoster, replaceRoster } from "../console/roster";
 import {
   clearRosterPurgeIntent,
@@ -86,7 +89,7 @@ import {
 import { sql as sqlTag } from "drizzle-orm";
 import { DaemonAudit } from "../console/daemon-audit";
 import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
-import { sweepCmdCreds } from "../console/cmd-creds";
+import { consumeCredentialRef, sweepCmdCreds } from "../console/cmd-creds";
 import { effectivePause, PauseState } from "../console/ingest-control";
 import { readCurrentEpisode } from "../console/ingest-control-db";
 import { IngestQuiesce } from "../console/pause-gate";
@@ -183,6 +186,10 @@ export async function runFortressHost(
   // it, and refreshed from Postgres on the status-heartbeat cadence.
   const pauseState = new PauseState();
   const quiesce = new IngestQuiesce();
+  // The drain latch: while it is up, new staging signatures are cut short so the
+  // pre-swap barrier has a bounded floor to wait out. In MEMORY on purpose — a
+  // restart clears it, which bounds an armed migration nobody followed up.
+  let drainArmed = false;
   const parkedArtifactsPath = path.join(paths.runtimeRoot, "artifact-replay.jsonl");
   const metrics = new MetricsRegistry();
   metrics.declareCounter("ingest.paused_refusals");
@@ -219,7 +226,7 @@ export async function runFortressHost(
     // Closure to the provider declared below (same late-binding as resolveHxDb):
     // only invoked at wedge-escalation time, long after startup completes.
     stopEmbeddedPostgres: () => postgres.stop(),
-    pause: { state: pauseState, quiesce },
+    pause: { state: pauseState, quiesce, armed: () => drainArmed },
   });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
@@ -726,6 +733,32 @@ export async function runFortressHost(
             })),
           ),
       }),
+    runMigration: ({ command, target, credentialRef }) =>
+      runMigrationCommand(
+        {
+          db: () => (postgres.isReady() ? resolveHxDb() : null),
+          store: () => vaultModule.getStore(),
+          // The DIRECT backend for the candidate: the migration is the only
+          // thing writing this bucket, and a guarded store would escalate a
+          // wedge by exiting the daemon over a bucket nothing serves from yet.
+          buildTarget: (credentials) => buildDirectStore(credentials),
+          quiesce,
+          setDrain: (on) => {
+            drainArmed = on;
+          },
+          // The ONLY way the swapped credentials reach the running daemon, and
+          // the same factory init() uses: a bare backend here would serve every
+          // later write with no pause gate, no deadline and no rebuild policy.
+          rebindStore: () => vaultModule.rebindStore(),
+          targetCredentials: () =>
+            credentialRef
+              ? consumeCredentialRef<VaultCredentials>(paths.cmdCreds, credentialRef)
+              : Promise.resolve(null),
+          env: process.env,
+          logger: consoleLog,
+        },
+        { command, target },
+      ),
     setCloudWitness: (enabled) => applyCloudWitness(enabled),
     acknowledgeFinding: async ({ org, sessionId, reason }) => {
       const db = postgres.isReady() ? resolveHxDb() : null;

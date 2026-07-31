@@ -61,11 +61,18 @@ export async function readCurrentEpisode(db: HxDb): Promise<IngestControlRow | n
 export async function armPause(
   db: HxDb,
   args: { until: Date; reason: string; armedBy: string },
-): Promise<void> {
-  await db.execute(
+): Promise<string> {
+  const result = await db.execute(
     sql`INSERT INTO hx.ingest_control (paused_until, reason, armed_by)
-        VALUES (${args.until.toISOString()}::timestamptz, ${args.reason}, ${args.armedBy})`,
+        VALUES (${args.until.toISOString()}::timestamptz, ${args.reason}, ${args.armedBy})
+        RETURNING id`,
   );
+  // RETURNING rather than a follow-up read of "the newest row": the resume has
+  // to name the episode this call created, and a second statement could name a
+  // later one.
+  const id = rows(result)[0]?.id;
+  if (typeof id !== "string") throw new Error("the fortress database armed no pause episode");
+  return id;
 }
 
 /** Clear the current episode. The caller also clears the daemon's anchor file,

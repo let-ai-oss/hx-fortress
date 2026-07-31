@@ -65,6 +65,8 @@ export const CONSOLE_TABLES = [
   "audit_findings",
   "roster",
   "roster_sync",
+  "migration_runs",
+  "migration_objects",
 ] as const;
 
 /** ingest_control columns hx_app_rw may write. `row_written_at` is EXCLUDED:
@@ -181,6 +183,10 @@ export const UI_TABLE_GRANTS: ReadonlyArray<{ table: string; privileges: readonl
   // organization's own.
   { table: "roster", privileges: ["SELECT"] },
   { table: "roster_sync", privileges: ["SELECT"] },
+  // The storage migration's record. The daemon runs the move and writes both;
+  // the console renders the run and its progress.
+  { table: "migration_runs", privileges: ["SELECT"] },
+  { table: "migration_objects", privileges: ["SELECT"] },
   // The console's own read surface: sessions are column-level (below), and
   // everything the session rows point AT is metadata the console renders by
   // name — a person, a device, a repository, a project.
