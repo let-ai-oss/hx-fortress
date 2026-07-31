@@ -38,6 +38,7 @@ import {
   stagingObject,
 } from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
+import { randomUUID } from "node:crypto";
 
 export interface GcsStoreConfig {
   projectId: string;
@@ -57,7 +58,22 @@ export class GcsStore implements SessionStore {
   private _bucket: Bucket | null = null;
 
   constructor(cfg: GcsStoreConfig) {
-    const opts: StorageOptions = { projectId: cfg.projectId };
+    const opts: StorageOptions = {
+      projectId: cfg.projectId,
+      // retryOptions bound the SDK's JS-level RETRY loop (real under any
+      // runtime). `timeout` reaches the transport only on Node, where
+      // node-fetch is real; the shipped Bun binary swaps in Bun's native
+      // fetch, which ignores it — there, GuardedStore's per-call deadline is
+      // the ONLY effective bound (2026-07-30 incident; verified empirically).
+      // Kept as defense for Node-run deployments of this module.
+      timeout: 15_000,
+      retryOptions: {
+        autoRetry: true,
+        maxRetries: 3,
+        totalTimeout: 45,
+        maxRetryDelay: 10,
+      },
+    };
     if (cfg.keyFilename) {
       opts.keyFilename = cfg.keyFilename;
     } else if (cfg.credentials) {
@@ -170,15 +186,20 @@ export class GcsStore implements SessionStore {
   }
 
   async writeCanonicalText(key: SessionKey, text: string): Promise<void> {
+    // Per-call timeout: on Node runtimes simple uploads honor only the
+    // per-call value (client-level timeout does not reach file.save), and
+    // node-fetch's timeout spans the whole request body — hence the generous
+    // budget. Under the shipped Bun binary this knob is inert (native fetch
+    // ignores it) and GuardedStore's heavy deadline is the effective bound.
     await this.bucket()
       .file(canonicalObject(key))
-      .save(text, { contentType: "application/x-ndjson", resumable: false });
+      .save(text, { contentType: "application/x-ndjson", resumable: false, timeout: 120_000 });
   }
 
   async writeArtifact(key: SessionKey, name: string, text: string): Promise<void> {
     await this.bucket()
       .file(artifactObject(key, name))
-      .save(text, { contentType: "application/json", resumable: false });
+      .save(text, { contentType: "application/json", resumable: false, timeout: 15_000 });
   }
 
   async readArtifactText(key: SessionKey, name: string): Promise<string | null> {
@@ -279,8 +300,14 @@ export class GcsStore implements SessionStore {
   }
 
   async selfTest(): Promise<void> {
-    const file = this.bucket().file(`.session-vault/selftest-${Date.now()}.txt`);
-    await file.save("ok", { contentType: "text/plain", resumable: false });
+    // Per-CALL name: the daemon probe, the cloud's test-connection RPC and the
+    // enroll wizard can all run selfTest concurrently in/across processes — a
+    // shared key lets one caller's delete land inside another's save→read
+    // window and report a spurious failure on a healthy store. Stranded
+    // objects from failed deletes (and versioned-bucket accrual) are owned by
+    // the provisioned `.session-vault/` lifecycle rules, not by naming.
+    const file = this.bucket().file(`.session-vault/selftest-${randomUUID().slice(0, 12)}.txt`);
+    await file.save("ok", { contentType: "text/plain", resumable: false, timeout: 15_000 });
     const [buf] = await file.download();
     if (buf.toString("utf8") !== "ok") throw new Error("self-test readback mismatch");
     await file.delete().catch(() => {});

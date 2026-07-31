@@ -13,7 +13,12 @@ import type { SessionKey } from "./types.js";
 const SEG = /^[A-Za-z0-9._-]{1,200}$/;
 
 function assertSegment(v: string, label: string): void {
-  if (!SEG.test(v) || v === "." || v === "..") throw new Error(`invalid ${label} segment`);
+  // A leading dot is RESERVED for internal artifacts (".staging",
+  // ".compact-*", the ".session-vault/" probe prefix — which now carries
+  // lifecycle DELETION rules): a key segment that could park customer data
+  // under an expiring internal prefix must be structurally impossible, not
+  // merely unlikely. Subsumes the "." / ".." traversal rejections.
+  if (!SEG.test(v) || v.startsWith(".")) throw new Error(`invalid ${label} segment`);
 }
 
 /** Validate a sessionId, which is EITHER a plain colon-free segment OR the agent-

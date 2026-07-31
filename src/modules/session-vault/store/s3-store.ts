@@ -57,6 +57,7 @@ import {
   stagingObject,
 } from "./keys.js";
 import { maxCanonicalBytes } from "./limits.js";
+import { randomUUID } from "node:crypto";
 
 export interface S3StoreConfig {
   region: string;
@@ -316,8 +317,15 @@ export class S3Store implements SessionStore {
     return { complete: true, deleted };
   }
 
+  /** Release the SDK client's sockets so a GuardedStore rebuild cannot leak
+   *  the old pool (S3Client owns its handler, unlike GCS's shared agent). */
+  destroyClient(): void {
+    this.s3.destroy();
+  }
+
   async selfTest(): Promise<void> {
-    const keyName = `.session-vault/selftest-${Date.now()}.txt`;
+    // Per-call name — see GcsStore.selfTest for the rationale.
+    const keyName = `.session-vault/selftest-${randomUUID().slice(0, 12)}.txt`;
     await this.s3.send(
       new PutObjectCommand({ Bucket: this.bucket, Key: keyName, Body: "ok", ContentType: "text/plain" }),
     );

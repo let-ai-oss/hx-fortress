@@ -154,6 +154,9 @@ export async function runFortressHost(
     db: resolveHxDb,
     dbRead: resolveHxDbRead,
     notify: emitIngest,
+    // Closure to the provider declared below (same late-binding as resolveHxDb):
+    // only invoked at wedge-escalation time, long after startup completes.
+    stopEmbeddedPostgres: () => postgres.stop(),
   });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
