@@ -25,6 +25,7 @@ import type {
   SessionStore,
   SignedDownload,
   SignedUpload,
+  StagingUploadOptions,
 } from "./types.js";
 import type { ScopedLogger } from "../../../host/types.js";
 
@@ -182,8 +183,8 @@ export class GuardedStore implements SessionStore {
     }
   }
 
-  signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
-    return this.guard("signStagingUpload", this.opTimeoutMs, (s) => s.signStagingUpload(key, chunkId));
+  signStagingUpload(key: SessionKey, chunkId: string, opts?: StagingUploadOptions): Promise<SignedUpload> {
+    return this.guard("signStagingUpload", this.opTimeoutMs, (s) => s.signStagingUpload(key, chunkId, opts));
   }
   readChunkText(key: SessionKey, chunkId: string): Promise<string> {
     return this.guard("readChunkText", this.heavyOpTimeoutMs, (s) => s.readChunkText(key, chunkId));

@@ -78,6 +78,12 @@ function parseStatus(value: unknown): HostStatusSnapshot {
     assertNullableString(value.host.startedAt, "host.startedAt");
     assertString(value.host.updatedAt, "host.updatedAt");
     assertNullableString(value.host.error, "host.error");
+    // OPTIONAL, both of them. Every enrolled fortress in the field holds a
+    // status.json written before either existed, and a parse error there would
+    // turn an upgrade into "Fortress: unavailable" — so absence is a state to
+    // render (age unknown, root unknown), never a refusal.
+    assertOptionalString(value.host.writtenAt, "host.writtenAt");
+    assertOptionalString(value.host.root, "host.root");
 
     if (!isRecord(value.connection)) {
       throw new Error("connection must be an object");
@@ -109,6 +115,8 @@ function parseStatus(value: unknown): HostStatusSnapshot {
         startedAt: value.host.startedAt as string | null,
         updatedAt: value.host.updatedAt as string,
         error: value.host.error as string | null,
+        ...(typeof value.host.writtenAt === "string" ? { writtenAt: value.host.writtenAt } : {}),
+        ...(typeof value.host.root === "string" ? { root: value.host.root } : {}),
       },
       connection: {
         state: value.connection.state as ConnectionState,
@@ -144,6 +152,12 @@ function parseModule(value: unknown, index: number): ModuleRuntimeStatus {
 
 function assertString(value: unknown, field: string): asserts value is string {
   if (typeof value !== "string") throw new Error(`${field} must be a string`);
+}
+
+function assertOptionalString(value: unknown, field: string): void {
+  if (value !== undefined && typeof value !== "string") {
+    throw new Error(`${field} must be a string when present`);
+  }
 }
 
 function assertNullableString(

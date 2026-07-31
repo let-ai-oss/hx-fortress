@@ -4,6 +4,7 @@ import { runUiCommand, type UiCommandDeps } from "./cli-ui";
 import {
   createProductionLogsDeps,
   logsCommand,
+  parseLogsArgs,
   type LogsOptions,
 } from "./cli-logs";
 import { FileConfigStore } from "./host/config";
@@ -107,11 +108,7 @@ export async function runCli(
         return 0;
       case "logs": {
         const paths = fortressPaths();
-        const rest = args.slice(1);
-        const moduleFilter = rest.find((a) => !a.startsWith("--"));
-        const linesIdx = rest.indexOf("--lines");
-        const linesArg = linesIdx >= 0 ? Number(rest[linesIdx + 1]) : NaN;
-        const linesBack = Number.isFinite(linesArg) && linesArg >= 0 ? linesArg : 50;
+        const { moduleFilter, linesBack, follow } = parseLogsArgs(args.slice(1));
         const runLogs =
           dependencies.runLogs ??
           ((opts: Omit<LogsOptions, "follow" | "signal">) => {
@@ -119,7 +116,7 @@ export async function runCli(
             const onSig = () => ac.abort();
             process.once("SIGINT", onSig);
             return logsCommand(
-              { ...opts, follow: true, signal: ac.signal },
+              { ...opts, follow, signal: ac.signal },
               createProductionLogsDeps(),
             ).finally(() => process.removeListener("SIGINT", onSig));
           });

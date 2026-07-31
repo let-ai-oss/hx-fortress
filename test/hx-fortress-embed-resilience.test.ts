@@ -228,9 +228,10 @@ describe.if(!!DSN)("hx-fortress embed — worker drain + dead-letter (A3)", () =
       drainTurns.push(userTurn(`drain question number ${i} about indexing`));
       drainTurns.push(asstTurn(`drain answer number ${i} add an index`));
     }
-    await ingestCommit(db, { ...base, key: { userId: USER, family: FAMILY, sessionId: SID_DRAIN }, chunkText: drainTurns.join("\n"), meta: { title: "Drain" } });
+    await ingestCommit(db, { ingestChannel: "tunnel", ...base, key: { userId: USER, family: FAMILY, sessionId: SID_DRAIN }, chunkText: drainTurns.join("\n"), meta: { title: "Drain" } });
     // 1 poison + 2 good turns.
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       ...base,
       key: { userId: USER, family: FAMILY, sessionId: SID_DL },
       chunkText: [userTurn("POISONPILL this turn cannot be embedded"), asstTurn("a good answer one"), userTurn("a good question two")].join("\n"),

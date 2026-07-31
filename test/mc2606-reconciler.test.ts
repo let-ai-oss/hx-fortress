@@ -143,6 +143,7 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
     const text = claudeCanonical("Already Indexed");
     // Ingest it normally first (authoritative auto write).
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key,
       chunkId: "c1",
@@ -220,6 +221,7 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
       JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: "floor me" }] } }),
     ].join("\n");
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key,
       chunkId: "c1",
@@ -248,6 +250,7 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
     const text = claudeCanonical("Live Owned");
     // An authoritative (auto) write creates the row first.
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key,
       chunkId: "c1",
@@ -276,6 +279,7 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
         message: { content: [{ type: "text", text: "an extra turn a rebuild would add" }] },
       });
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: { orgExternalId: null, projectExternalId: null, repoSlug: null, deviceId: null },
       key,
       chunkId: "reconcile",

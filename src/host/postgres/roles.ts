@@ -1,8 +1,9 @@
 // De-superuser least-privilege role split (embedded Postgres): per-install
-// generated passwords for the three DB roles the fortress uses —
+// generated passwords for the DB roles the fortress uses —
 //   • fortress   — the bootstrap superuser (DDL, migrations, extensions, role mgmt)
 //   • hx_app_rw  — the ingest/embed DML role (no DDL, no superuser)
 //   • hx_app_ro  — the MCP read-tool role (SELECT only, via hx_readonly)
+//   • hx_ui      — the console login role (mints commands, drains the audit spool)
 //
 // The secrets are minted once per install and persisted 0600 next to the pgdata
 // under the fortress root, so they survive restarts. They MUST be preserved
@@ -23,10 +24,15 @@ export interface RoleSecrets {
   appRo: string;
   /** Password for the `hx_app_rw` DML role. */
   appRw: string;
+  /** Password for the `hx_ui` console login role. */
+  ui: string;
 }
 
-/** A full, non-empty triple. A partial/corrupt file is treated as absent. */
-function isValidSecrets(value: unknown): value is RoleSecrets {
+/** The three secrets every enrolled install already has. A partial/corrupt file
+ *  is treated as absent. `ui` is deliberately NOT required here: it was added
+ *  after the file shipped, and demanding it would regenerate the whole triple on
+ *  upgrade — which cannot re-authenticate an already-hardened scram cluster. */
+function hasCoreSecrets(value: unknown): value is Omit<RoleSecrets, "ui"> {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -54,15 +60,28 @@ async function writeSecrets(secretsPath: string, secrets: RoleSecrets): Promise<
   await rename(tmp, secretsPath);
 }
 
-/** Read the persisted role secrets, or mint + persist a fresh triple when the
- *  file is absent or invalid. Idempotent: once written, every later boot returns
- *  the same secrets. */
+/** Read the persisted role secrets, or mint + persist what is missing. ADDITIVE:
+ *  an existing file keeps its stored values byte-identical and only gains the
+ *  secrets it lacks, so the console password is stable across boots and an
+ *  upgrade never invalidates the passwords the running cluster authenticates
+ *  with. Idempotent: once complete, every later boot returns the same secrets. */
 export async function ensureRoleSecrets(secretsPath: string): Promise<RoleSecrets> {
   if (existsSync(secretsPath)) {
     try {
       const parsed = JSON.parse(await readFile(secretsPath, "utf8")) as unknown;
-      if (isValidSecrets(parsed)) {
-        return { super: parsed.super, appRo: parsed.appRo, appRw: parsed.appRw };
+      if (hasCoreSecrets(parsed)) {
+        const stored = parsed as Partial<RoleSecrets> & Omit<RoleSecrets, "ui">;
+        if (typeof stored.ui === "string" && stored.ui.length > 0) {
+          return { super: stored.super, appRo: stored.appRo, appRw: stored.appRw, ui: stored.ui };
+        }
+        const upgraded: RoleSecrets = {
+          super: stored.super,
+          appRo: stored.appRo,
+          appRw: stored.appRw,
+          ui: generateSecret(),
+        };
+        await writeSecrets(secretsPath, upgraded);
+        return upgraded;
       }
     } catch {
       // Corrupt/partial file — fall through and regenerate. (On an already-
@@ -73,6 +92,7 @@ export async function ensureRoleSecrets(secretsPath: string): Promise<RoleSecret
     super: generateSecret(),
     appRo: generateSecret(),
     appRw: generateSecret(),
+    ui: generateSecret(),
   };
   await writeSecrets(secretsPath, secrets);
   return secrets;

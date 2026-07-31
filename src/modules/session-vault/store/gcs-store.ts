@@ -22,6 +22,7 @@ import type {
   SessionStore,
   SignedDownload,
   SignedUpload,
+  StagingUploadOptions,
 } from "./types.js";
 import {
   metadataFromCanonicalObjectName,
@@ -37,7 +38,7 @@ import {
   sessionPrefix,
   stagingObject,
 } from "./keys.js";
-import { maxCanonicalBytes } from "./limits.js";
+import { clampStagingTtl, maxCanonicalBytes } from "./limits.js";
 import { randomUUID } from "node:crypto";
 
 export interface GcsStoreConfig {
@@ -88,9 +89,15 @@ export class GcsStore implements SessionStore {
     return this._bucket;
   }
 
-  async signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
+  async signStagingUpload(
+    key: SessionKey,
+    chunkId: string,
+    opts?: StagingUploadOptions,
+  ): Promise<SignedUpload> {
     const objectName = stagingObject(key, chunkId);
-    const expiresMs = Date.now() + 15 * 60 * 1000;
+    // Shorter only — see the S3 store: the quiesce barrier before a storage
+    // swap has to wait out every signature that is still valid.
+    const expiresMs = Date.now() + clampStagingTtl(opts?.ttlSeconds) * 1000;
     const [url] = await this.bucket()
       .file(objectName)
       .getSignedUrl({

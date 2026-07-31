@@ -4,6 +4,7 @@ import path from "node:path";
 import { acquireBinaries } from "./acquire";
 import { detectMusl, resolveZonkyClassifier } from "./classifier";
 import {
+  auditConsolePlane,
   ensureAppRoles,
   ensureAuth,
   ensureCluster,
@@ -14,6 +15,7 @@ import {
   PG_ROLE,
   type ClusterSql,
 } from "./cluster";
+import { embeddedPgJson, writePgJson } from "./pg-json";
 import { ensureRoleSecrets, type RoleSecrets } from "./roles";
 import { makeExtractor, makeTarGzExtractor } from "./extract";
 import { runMigrations } from "./migrate";
@@ -46,6 +48,9 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
     const url = resolved.externalUrl;
     return createExternalPostgres(url, () => probe(url), async () => {
       await runMigrations(makeMigrationExec(url), migrations);
+      // No role split exists externally — the operator's single DSN is what the
+      // console gets, and the banner reports containment as unavailable.
+      await writePgJson(deps.paths.pgJson, { mode: "external", databaseUrl: url });
     });
   }
 
@@ -100,6 +105,30 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       try {
         const rows = await client.unsafe(query);
         return Array.isArray(rows) && rows.length > 0;
+      } finally {
+        await client.end();
+      }
+    },
+    query: async <T = Record<string, unknown>>(database: string, statement: string): Promise<T[]> => {
+      const client = new Bun.SQL(superDsn(database, await getSecrets()));
+      try {
+        const rows = await client.unsafe(statement);
+        return (Array.isArray(rows) ? rows : []) as T[];
+      } finally {
+        await client.end();
+      }
+    },
+    // ONE connection, ONE simple-query batch — which Postgres runs as one
+    // implicit transaction. `run` is a statement per connection (autocommit),
+    // so a role/grant sequence issued through it could be interrupted halfway
+    // and leave a half-provisioned privilege state durably in place. Explicit
+    // BEGIN/COMMIT is not an option: Bun.SQL rejects them on a pooled
+    // connection, which is why the batch path is the atomicity mechanism.
+    runMany: async (database, statements) => {
+      if (statements.length === 0) return;
+      const client = new Bun.SQL(superDsn(database, await getSecrets()));
+      try {
+        await client.unsafe(statements.map((s) => `${s};`).join("\n")).simple();
       } finally {
         await client.end();
       }
@@ -193,7 +222,18 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
       await runMigrations(makeMigrationExec(superDsn(PG_DATABASE, await getSecrets())), migrations);
     },
     ensureAppRoles: async () => {
-      await ensureAppRoles(sql, await getSecrets());
+      const s = await getSecrets();
+      await ensureAppRoles(sql, s);
+      // The console reads its coordinates from here and carries no environment
+      // of its own, so an env-sourced port has to be republished every boot.
+      await writePgJson(
+        deps.paths.pgJson,
+        embeddedPgJson({ host: "127.0.0.1", port, database: PG_DATABASE, password: s.ui }),
+      );
+      const violations = await auditConsolePlane(sql);
+      for (const violation of violations) {
+        deps.logger?.error("console-plane ownership invariant violated", { violation });
+      }
     },
   });
 }

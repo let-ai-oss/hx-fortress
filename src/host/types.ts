@@ -58,6 +58,16 @@ export interface HostStatusSnapshot {
     startedAt: string | null;
     updatedAt: string;
     error: string | null;
+    /** When this snapshot was WRITTEN — refreshed by the heartbeat as well as by
+     *  every transition, so a reader can tell "nothing has changed" from "the
+     *  daemon stopped writing". Absent on a file written by a pre-heartbeat
+     *  binary; readers must treat that as age-unknown, never as stale. */
+    writtenAt?: string;
+    /** The daemon's RESOLVED fortress root. The console compares it against its
+     *  own by file identity, so a second daemon on a different root is visible
+     *  as a mismatch instead of silently serving the wrong install. Absent on a
+     *  pre-console file. */
+    root?: string;
   };
   connection: {
     state: ConnectionState;

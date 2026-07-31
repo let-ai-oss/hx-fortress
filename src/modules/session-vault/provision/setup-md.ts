@@ -5,7 +5,7 @@
 
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { VAULT_HOME, credentialsPath, type VaultStorageKind } from "../credentials.js";
+import { credentialsPath, vaultHome, type VaultStorageKind } from "../credentials.js";
 import { FilePendingEnrollmentStore } from "../../../cloud/credentials.js";
 import { fortressPaths } from "../../../host/paths.js";
 
@@ -21,7 +21,7 @@ export interface TemplateContext {
 }
 
 export async function writeCredentialsTemplate(ctx: TemplateContext): Promise<string> {
-  await mkdir(VAULT_HOME, { recursive: true });
+  await mkdir(vaultHome(), { recursive: true });
   const body =
     ctx.store === "gcs"
       ? {
@@ -50,7 +50,7 @@ export async function writeCredentialsTemplate(ctx: TemplateContext): Promise<st
 }
 
 export async function writeSetupMd(ctx: TemplateContext): Promise<string> {
-  const p = path.join(VAULT_HOME, "SETUP.md");
+  const p = path.join(vaultHome(), "SETUP.md");
   await writeFile(p, renderSetupMd(ctx), { mode: 0o600 });
   return p;
 }

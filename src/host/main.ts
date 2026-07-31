@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+
 import {
   FileCredentialStore,
   FilePendingEnrollmentStore,
@@ -49,6 +52,15 @@ import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
 import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
+import { drainParkedArtifacts, parkArtifact } from "../console/artifact-replay";
+import { createCommandGateway } from "../console/command-gateway";
+import { runBootFence } from "../console/commands";
+import { sweepCmdCreds } from "../console/cmd-creds";
+import { effectivePause, PauseState } from "../console/ingest-control";
+import { readCurrentEpisode } from "../console/ingest-control-db";
+import { IngestQuiesce } from "../console/pause-gate";
+import { MetricsRegistry, startMetricsPublisher } from "../console/metrics";
+import { clearPauseAnchor, stampPauseAnchor } from "../console/runtime-files";
 
 export interface HostMainDependencies {
   root?: string;
@@ -134,6 +146,25 @@ export async function runFortressHost(
     hxDbRo = createHxDb(dsn);
     return hxDbRo;
   };
+  // The store-write pause plane. The state is what the gate consults on every
+  // bucket-mutating call; the counter is what a pre-swap quiesce barrier waits
+  // on. Both are created before the store so the gate can be composed around
+  // it, and refreshed from Postgres on the status-heartbeat cadence.
+  const pauseState = new PauseState();
+  const quiesce = new IngestQuiesce();
+  const parkedArtifactsPath = path.join(paths.runtimeRoot, "artifact-replay.jsonl");
+  const metrics = new MetricsRegistry();
+  metrics.declareCounter("ingest.paused_refusals");
+  metrics.registerGauge("ingest.pause_seconds_remaining", () => {
+    const until = pauseState.pausedUntil();
+    return until ? Math.max(0, Math.round((until.getTime() - Date.now()) / 1000)) : 0;
+  });
+  metrics.registerGauge("store.in_flight_writes", () => quiesce.pending);
+  // A gauge that returns null is OMITTED rather than published as 0 — "the
+  // direct gateway is off on this fortress" and "the gateway served nothing"
+  // read identically as a zero and mean opposite things.
+  metrics.registerGauge("gateway.enabled", () => (gateway.enabled ? 1 : null));
+
   // Fortress→cloud realtime bridge (MC-2415): ingest paths emit invalidations
   // here; the closure is repointed at the live connection once it's built below
   // (the connection is constructed after the module that needs to emit). A
@@ -157,6 +188,7 @@ export async function runFortressHost(
     // Closure to the provider declared below (same late-binding as resolveHxDb):
     // only invoked at wedge-escalation time, long after startup completes.
     stopEmbeddedPostgres: () => postgres.stop(),
+    pause: { state: pauseState, quiesce },
   });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
@@ -189,6 +221,7 @@ export async function runFortressHost(
     credentialStore,
     pendingEnrollmentStore,
     writeVaultCredentials,
+    readVaultCredentials,
     logger: bus.scopeFor("fortress"),
   });
 
@@ -307,6 +340,10 @@ export async function runFortressHost(
     supervisor: registry,
     statusStore: new FileStatusStore(paths),
     logger,
+    // Published so a console can prove by file identity that it is looking at
+    // THIS install rather than a second daemon on another root.
+    root: paths.root,
+    afterPostgres: () => bootConsolePlane(),
     // Low · fold a secret-free vault view into each status snapshot (never keys).
     vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
     async afterConnect() {
@@ -397,6 +434,8 @@ export async function runFortressHost(
       // MC-2517 · the bounded query embedder (fails fast on a stalled OpenAI call).
       embedder: queryEmbedder,
       notify: emitIngest,
+      quiesce,
+      parkArtifact: (entry) => parkArtifact(parkedArtifactsPath, entry),
     });
   }
 
@@ -466,9 +505,103 @@ export async function runFortressHost(
     bus.scopeFor("guarantor").warn("guarantor disabled (FORTRESS_GUARANTOR_DISABLED)");
   }
 
+  // Republished every 10s, and once immediately: an ABSENT metrics.json means
+  // "no daemon", so the file has to exist as soon as one does rather than a
+  // tick later.
+  const metricsPublisher = startMetricsPublisher({
+    registry: metrics,
+    filePath: paths.metrics,
+    onError: (err) =>
+      bus.scopeFor("fortress").warn("could not publish metrics", {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+  });
+  void metricsPublisher.flush();
+
+  // Refreshes the cached pause deadline on the status-heartbeat cadence. A
+  // FAILED read keeps the last known deadline: losing Postgres must never
+  // REOPEN the gate under a migration that armed the pause and then lost its
+  // database.
+  const consoleLog = bus.scopeFor("console");
+  const refreshPause = async (): Promise<void> => {
+    const db = resolveHxDb();
+    if (!db || !postgres.isReady()) return;
+    let row;
+    try {
+      row = await readCurrentEpisode(db);
+    } catch {
+      pauseState.observeUnavailable();
+      return;
+    }
+    const now = new Date();
+    let firstObservedAt: Date | null = null;
+    if (row && row.resumedAt === null) {
+      firstObservedAt = new Date((await stampPauseAnchor(paths.pauseAnchor, now)).firstObservedAt);
+    } else {
+      // Cleared on resume, so a later episode can never anchor to an earlier one.
+      await clearPauseAnchor(paths.pauseAnchor);
+    }
+    const pause = effectivePause({ row, firstObservedAt, now });
+    const wasPaused = pauseState.isPaused(now);
+    pauseState.observe(pause);
+    if (pause.capped) {
+      consoleLog.warn("ingest pause deadline exceeds the cap and was clamped", {
+        requested: row?.pausedUntil.toISOString() ?? null,
+        effective: pause.pausedUntil?.toISOString() ?? null,
+      });
+    }
+    if (wasPaused && !pauseState.isPaused(now)) {
+      // Writes are open again — replay everything the gate refused.
+      const store = vaultModule.getStore();
+      if (store) {
+        const result = await drainParkedArtifacts(parkedArtifactsPath, (entry) =>
+          store.writeArtifact(entry.key, entry.name, entry.text),
+        );
+        if (result.replayed > 0 || result.failed > 0) {
+          consoleLog.info("replayed parked artifact writes after resume", {
+            replayed: result.replayed,
+            failed: result.failed,
+          });
+        }
+      }
+    }
+  };
+  const pauseTimer = setInterval(() => void refreshPause(), 5_000);
+  (pauseTimer as { unref?: () => void }).unref?.();
+
+  /** Boot order: role provisioning (inside postgres.start) → FENCE → any poll.
+   *  Fence-first is unachievable under the embedded apparatus — ensureAppRoles
+   *  is what CREATES hx.reject_command, and Postgres resolves the function at
+   *  parse time, so the statement errors even against zero rows. */
+  async function bootConsolePlane(): Promise<void> {
+    await refreshPause();
+    // Orphaned credential files are secrets on disk for commands that will
+    // never run; sweep them as soon as the daemon is up, not only on a timer.
+    const swept = await sweepCmdCreds(paths.cmdCreds).catch(() => ({ deleted: [] }));
+    if (swept.deleted.length > 0) {
+      consoleLog.info("swept expired command credentials", { count: swept.deleted.length });
+    }
+    const db = resolveHxDb();
+    if (!db || !postgres.isReady()) return;
+    try {
+      await runBootFence({
+        gateway: createCommandGateway(db),
+        inFlightPath: paths.commandsInFlight,
+        claimedBy: `${process.pid}:${randomUUID()}`,
+        logger: consoleLog,
+      });
+    } catch (err) {
+      consoleLog.error("console command boot fence failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   try {
     await (dependencies.run ?? runHost)(runtime);
   } finally {
+    clearInterval(pauseTimer);
+    metricsPublisher.stop();
     gatewayHandle?.stop();
     setEmbedSignalHandler(() => {});
     setReconcileSignalHandler(() => {});

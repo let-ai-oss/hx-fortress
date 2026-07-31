@@ -3,6 +3,8 @@
 // credentials — inline in credentials.json, or (when a block is absent) the
 // host's own ADC / instance role. let.ai never sees either.
 
+import { IngestQuiesce, PauseGatedStore } from "../../console/pause-gate.js";
+import type { PauseState } from "../../console/ingest-control.js";
 import { GcsStore, type GcsStoreConfig } from "./store/gcs-store.js";
 import { GuardedStore, type GuardedStoreOptions } from "./store/guarded-store.js";
 import { S3Store } from "./store/s3-store.js";
@@ -114,14 +116,28 @@ export function createWedgeEscalation(opts: {
   };
 }
 
+export interface StorePauseHooks {
+  state: PauseState;
+  quiesce: IngestQuiesce;
+  /** True while a drain is armed — new staging signatures are cut short so the
+   *  pre-swap barrier has a bounded floor to wait for. */
+  armed?: () => boolean;
+}
+
 /** The concrete backend, wrapped in GuardedStore: every call gets a hard
  *  deadline and the SDK client is rebuilt after consecutive breaches — a hung
  *  keep-alive pool wedged prod ingest for three hours on 2026-07-30. The
- *  factory hands GuardedStore a way to rebuild the inner store fresh. */
+ *  factory hands GuardedStore a way to rebuild the inner store fresh.
+ *
+ *  The pause gate composes OUTSIDE GuardedStore: gate → guarded → backend. A
+ *  write refused because ingest is paused must not consume a deadline or count
+ *  toward the rebuild/escalation streak — a quiesced fortress is deliberately
+ *  holding writes, not wedged, and charging it as a wedge would restart the
+ *  process in the middle of a migration. */
 export function buildStore(
   c: VaultCredentials,
   logger?: ScopedLogger,
-  hooks?: { beforeExit?: () => Promise<void> },
+  hooks?: { beforeExit?: () => Promise<void>; pause?: StorePauseHooks },
 ): SessionStore {
   let lastInner: SessionStore | null = null;
   const factory = (): SessionStore => {
@@ -142,11 +158,15 @@ export function buildStore(
     lastInner = buildInnerStore(c);
     return lastInner;
   };
-  return new GuardedStore(factory, {
+  const guarded = new GuardedStore(factory, {
     logger,
     ...deadlineEnvOverrides(),
     onWedgedBeyondRecovery: createWedgeEscalation({ logger, beforeExit: hooks?.beforeExit }),
   });
+  const pause = hooks?.pause;
+  return pause
+    ? new PauseGatedStore(guarded, pause.state, pause.quiesce, { armed: pause.armed })
+    : guarded;
 }
 
 function buildInnerStore(c: VaultCredentials): SessionStore {

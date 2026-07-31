@@ -13,7 +13,7 @@ import {
 import type { RoleSecrets } from "../src/host/postgres/roles";
 import type { Spawner } from "../src/host/postgres/spawn";
 
-const SECRETS: RoleSecrets = { super: "super-pw", appRo: "ro-pw", appRw: "rw-pw" };
+const SECRETS: RoleSecrets = { super: "super-pw", appRo: "ro-pw", appRw: "rw-pw", ui: "ui-pw" };
 
 function recorder(results: Array<{ code: number }> = []): {
   spawner: Spawner;
@@ -35,16 +35,25 @@ function recorder(results: Array<{ code: number }> = []): {
 
 function fakeSql(
   exists: boolean | ((database: string, query: string) => boolean) = false,
-): { sql: ClusterSql; runs: Array<[string, string]> } {
+  rows: () => Record<string, unknown>[] = () => [],
+): { sql: ClusterSql; runs: Array<[string, string]>; batches: string[][] } {
   const runs: Array<[string, string]> = [];
+  const batches: string[][] = [];
   const existsFn = typeof exists === "function" ? exists : () => exists;
   return {
     runs,
+    batches,
     sql: {
       run: async (database, statement) => {
         runs.push([database, statement]);
       },
       exists: async (database, query) => existsFn(database, query),
+      // ensureAppRoles issues ONE preflight read whose row carries three JSON
+      // arrays; `rows` supplies the routine list a test wants to plant.
+      query: async () => [{ routines: rows(), extras: [], views: [] }] as never[],
+      runMany: async (_database, statements) => {
+        batches.push([...statements]);
+      },
     },
   };
 }
@@ -135,16 +144,24 @@ describe("ensureAuth (in-place trust→scram conversion)", () => {
   });
 });
 
-describe("ensureAppRoles (idempotent least-privilege roles)", () => {
-  test("creates both login roles + grants when they are absent", async () => {
-    const { sql, runs } = fakeSql(false);
+describe("ensureAppRoles (idempotent least-privilege roles + command plane)", () => {
+  async function batchOf(): Promise<string[]> {
+    const { sql, batches } = fakeSql(false);
     await ensureAppRoles(sql, SECRETS);
-    const stmts = runs.map(([, s]) => s);
+    expect(batches.length).toBe(1); // ONE transaction, never statement-per-connection
+    return batches[0];
+  }
 
-    expect(stmts).toContain("CREATE ROLE hx_app_ro LOGIN IN ROLE hx_readonly");
-    expect(stmts).toContain("CREATE ROLE hx_app_rw LOGIN");
+  test("provisions every role and grant in a single batch", async () => {
+    const stmts = await batchOf();
+
+    expect(stmts.some((s) => s.includes("CREATE ROLE hx_app_ro LOGIN IN ROLE hx_readonly"))).toBe(true);
+    expect(stmts.some((s) => s.includes("CREATE ROLE hx_app_rw LOGIN"))).toBe(true);
+    expect(stmts.some((s) => s.includes("CREATE ROLE hx_cmd_owner NOLOGIN"))).toBe(true);
+    expect(stmts.some((s) => s.includes("CREATE ROLE hx_ui LOGIN"))).toBe(true);
     expect(stmts).toContain("ALTER ROLE hx_app_ro WITH PASSWORD 'ro-pw'");
     expect(stmts).toContain("ALTER ROLE hx_app_rw WITH PASSWORD 'rw-pw'");
+    expect(stmts).toContain("ALTER ROLE hx_ui WITH PASSWORD 'ui-pw'");
     expect(stmts).toContain("GRANT hx_readonly TO hx_app_ro");
     expect(stmts).toContain("GRANT USAGE ON SCHEMA hx TO hx_app_rw");
     expect(
@@ -152,25 +169,99 @@ describe("ensureAppRoles (idempotent least-privilege roles)", () => {
     ).toBe(true);
     expect(stmts.some((s) => s.includes("GRANT USAGE ON ALL SEQUENCES IN SCHEMA hx TO hx_app_rw"))).toBe(true);
     expect(stmts.some((s) => s.startsWith("ALTER DEFAULT PRIVILEGES IN SCHEMA hx"))).toBe(true);
-    // The migration journal's writes are revoked back from the DML role.
     expect(
-      stmts.some((s) =>
-        /REVOKE INSERT, UPDATE, DELETE ON hx\.schema_migrations FROM hx_app_rw/.test(s),
-      ),
+      stmts.some((s) => /REVOKE INSERT, UPDATE, DELETE ON hx\.schema_migrations FROM hx_app_rw/.test(s)),
     ).toBe(true);
     // hx_app_rw never gets DDL/superuser via this path.
-    expect(stmts.some((s) => /CREATE TABLE|SUPERUSER|CREATEROLE|CREATEDB/.test(s))).toBe(false);
+    expect(stmts.some((s) => /CREATE TABLE|SUPERUSER\b|CREATEDB\b/.test(s.replace(/NOSUPERUSER|NOCREATEDB/g, "")))).toBe(false);
   });
 
-  test("skips CREATE ROLE when the roles already exist, but re-applies grants (idempotent)", async () => {
-    const { sql, runs } = fakeSql(true);
-    await ensureAppRoles(sql, SECRETS);
-    const stmts = runs.map(([, s]) => s);
+  test("every transition routine is created, de-PUBLICed, re-owned and granted, in that order", async () => {
+    const stmts = await batchOf();
+    for (const name of [
+      "claim_command",
+      "complete_command",
+      "reject_command",
+      "acknowledge_finding",
+      "set_cloud_witness",
+    ]) {
+      const create = stmts.findIndex((s) => s.includes(`CREATE OR REPLACE FUNCTION hx.${name}(`));
+      const revoke = stmts.findIndex((s) => s.startsWith(`REVOKE EXECUTE ON FUNCTION hx.${name}(`));
+      const owner = stmts.findIndex((s) => s.startsWith(`ALTER FUNCTION hx.${name}(`));
+      const grant = stmts.findIndex((s) => s.startsWith(`GRANT EXECUTE ON FUNCTION hx.${name}(`));
+      expect(create).toBeGreaterThanOrEqual(0);
+      // Postgres grants EXECUTE to PUBLIC by default, so the REVOKE has to be
+      // the very next thing after the CREATE.
+      expect(revoke).toBe(create + 1);
+      expect(owner).toBeGreaterThan(revoke);
+      expect(grant).toBeGreaterThan(owner);
+      expect(stmts[create]).toContain("SECURITY DEFINER");
+      expect(stmts[create]).toContain("SET search_path = pg_catalog, pg_temp");
+    }
+  });
 
-    expect(stmts.some((s) => s.startsWith("CREATE ROLE"))).toBe(false);
-    // Passwords + grants are re-applied every boot regardless.
-    expect(stmts).toContain("ALTER ROLE hx_app_ro WITH PASSWORD 'ro-pw'");
-    expect(stmts).toContain("ALTER ROLE hx_app_rw WITH PASSWORD 'rw-pw'");
-    expect(stmts).toContain("GRANT USAGE ON SCHEMA hx TO hx_app_rw");
+  test("phases are ordered: blanket GRANTs, then table REVOKEs, then COLUMN GRANTs", async () => {
+    const stmts = await batchOf();
+    const blanket = stmts.findIndex((s) =>
+      s.includes("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA hx TO hx_app_rw"),
+    );
+    const revoke = stmts.findIndex((s) =>
+      s.startsWith("REVOKE INSERT, UPDATE, DELETE ON hx.ingest_control FROM hx_app_rw"),
+    );
+    const columnGrant = stmts.findIndex((s) => s.startsWith("GRANT INSERT (paused_until"));
+    expect(blanket).toBeGreaterThanOrEqual(0);
+    expect(revoke).toBeGreaterThan(blanket);
+    // A table REVOKE also drops that table's COLUMN privileges, so the column
+    // grants have to come last or the daemon cannot arm a pause at all.
+    expect(columnGrant).toBeGreaterThan(revoke);
+    expect(stmts[columnGrant]).not.toContain("row_written_at");
+  });
+
+  test("the console role gets column-level SELECT on sessions, never the transcript text", async () => {
+    const stmts = await batchOf();
+    const grant = stmts.find((s) => s.startsWith("GRANT SELECT (") && s.includes("hx.sessions TO hx_ui"));
+    expect(grant).toBeDefined();
+    expect(grant).toContain("title");
+    expect(grant).toContain("ingest_channel");
+    expect(grant).not.toContain("last_user_text");
+    expect(grant).not.toContain("last_assistant_text");
+    // Any table-level grant would include the excluded columns.
+    expect(stmts).toContain("REVOKE ALL ON hx.sessions FROM hx_ui");
+  });
+
+  test("the write role can neither mint commands nor write the audit tables", async () => {
+    const stmts = await batchOf();
+    expect(stmts).toContain("REVOKE INSERT, UPDATE, DELETE ON hx.console_commands FROM hx_app_rw");
+    expect(stmts).toContain("REVOKE INSERT, UPDATE, DELETE ON hx.admin_audit FROM hx_app_rw");
+    expect(stmts).toContain("REVOKE INSERT, UPDATE, DELETE ON hx.audit_acks FROM hx_app_rw");
+    expect(stmts).toContain("REVOKE INSERT, UPDATE, DELETE ON hx.audit_settings FROM hx_app_rw");
+    // The cloud-served read DSN sees nothing the console owns.
+    for (const role of ["hx_readonly", "hx_app_ro"]) {
+      expect(stmts).toContain(`REVOKE ALL ON hx.console_commands FROM ${role}`);
+      expect(stmts).toContain(`REVOKE ALL ON hx.admin_audit FROM ${role}`);
+    }
+    // The routine owner holds exactly its pinned set — no INSERT on commands.
+    expect(stmts).toContain("GRANT SELECT, UPDATE ON hx.console_commands TO hx_cmd_owner");
+    expect(stmts.some((s) => /GRANT [^;]*INSERT[^;]* ON hx\.console_commands TO hx_cmd_owner/.test(s))).toBe(false);
+  });
+
+  test("a stale overload left by a widened signature is dropped before the CREATEs", async () => {
+    const { sql, batches } = fakeSql(false, () => [
+      { name: "claim_command", args: "uuid, text", rettype: "boolean" },
+    ]);
+    await ensureAppRoles(sql, SECRETS);
+    const stmts = batches[0];
+    const drop = stmts.findIndex((s) => s.startsWith("DROP FUNCTION IF EXISTS hx.claim_command("));
+    const create = stmts.findIndex((s) => s.includes("CREATE OR REPLACE FUNCTION hx.claim_command("));
+    expect(drop).toBeGreaterThanOrEqual(0);
+    expect(drop).toBeLessThan(create);
+  });
+
+  test("the pinned signature is never dropped", async () => {
+    const { sql, batches } = fakeSql(false, () => [
+      { name: "set_cloud_witness", args: "boolean", rettype: "boolean" },
+    ]);
+    await ensureAppRoles(sql, SECRETS);
+    expect(batches[0].some((s) => s.startsWith("DROP FUNCTION"))).toBe(false);
   });
 });

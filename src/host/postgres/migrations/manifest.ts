@@ -20,6 +20,7 @@ import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "t
 import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
 import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { type: "text" };
+import sql0015ConsolePlane from "./0015_console_plane.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -56,4 +57,11 @@ export const migrations: Migration[] = [
   // title-less and show a bare id. Fills only NULL titles (idempotent). NOT
   // gated. Going forward ingestCommit derives titles inline (src/ingest/ingest.ts).
   { name: "0014_backfill_session_titles", sql: sql0014BackfillTitles },
+  // Console/runtime plane: the command queue, the ingest pause, the admin audit
+  // and the two audit tables the SECURITY DEFINER routines write — TABLES ONLY,
+  // plus role-guarded REVOKEs. The routines, their NOLOGIN owner and every
+  // GRANT live in ensureAppRoles instead (see the file header for why). NOT
+  // gated. Numbers 0016-0018 are RESERVED for the roster, audit-engine and
+  // migration-run tables; never edit an applied file, always add a number.
+  { name: "0015_console_plane", sql: sql0015ConsolePlane },
 ];

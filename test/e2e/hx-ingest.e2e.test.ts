@@ -72,6 +72,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("first commit writes the session, turns, tool_calls, device, dimensions and ingest event", async () => {
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c1",
@@ -115,6 +116,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("a second commit accumulates counts and bumps chunk_count", async () => {
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c2",
@@ -136,6 +138,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("a replace commit resets counts and re-indexes the parent lane", async () => {
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c3",
@@ -155,6 +158,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     const before = await session();
     const events = await count("SELECT count(*)::int n FROM hx.ingest_events");
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c3",
@@ -171,6 +175,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("agent commit creates a child lane and indexes its turns", async () => {
     await ingestAgentCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       agentId: "agent-1",

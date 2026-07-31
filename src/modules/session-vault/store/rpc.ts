@@ -12,10 +12,12 @@ import {
   ingestCommit,
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
+import type { HxIngestChannel } from "../../../host/postgres/schema/sessions.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
 import { maxTunnelResultBytes } from "./limits.js";
 import { stripListTitle } from "./session-metadata.js";
 import { storeHeavyTimeoutMs } from "../store.js";
+import { isPauseGated } from "../../../console/pause-gate.js";
 import type {
   ComposeResult,
   SessionKey,
@@ -24,6 +26,11 @@ import type {
   SignedDownload,
   SignedUpload,
 } from "./types.js";
+
+/** Every ingest through this dispatcher arrived over the reverse tunnel — the
+ *  cloud relayed it — which is the only provenance residency disclosure treats
+ *  as eligible to name raw session ids. */
+const TUNNEL_CHANNEL: HxIngestChannel = "tunnel";
 
 /** Shared payload for the two metadata-ingest RPCs the cloud sends after a
  *  commit so the fortress mirrors the session into its own hx schema. The
@@ -303,6 +310,7 @@ export async function handleVaultRpc(
         try {
           await ingestCommit(db, {
             key: req.key,
+            ingestChannel: TUNNEL_CHANNEL,
             chunkId: req.chunkId,
             replace: req.replace === true,
             chunkText: req.chunkText,
@@ -330,6 +338,7 @@ export async function handleVaultRpc(
       if (!db) throw new Error("postgres_not_ready");
       await ingestCommit(db, {
         key: req.key,
+        ingestChannel: TUNNEL_CHANNEL,
         chunkId: req.chunkId,
         replace: req.replace === true,
         chunkText: req.chunkText,
@@ -344,6 +353,7 @@ export async function handleVaultRpc(
       if (!db) throw new Error("postgres_not_ready");
       await ingestAgentCommit(db, {
         key: req.key,
+        ingestChannel: TUNNEL_CHANNEL,
         agentId: req.agentId,
         chunkId: req.chunkId,
         replace: req.replace === true,
@@ -356,6 +366,12 @@ export async function handleVaultRpc(
       return { method: req.method, value: { ok: true } };
     }
     case "deleteSession": {
+      // The ONE enumerated pre-check outside the store gate. Everything else
+      // reaches the gate through the store call itself, but this branch
+      // tombstones the identity and purges Postgres FIRST — both irreversible,
+      // and both would punch a hole in the snapshot a storage migration is
+      // copying. So the gate has to sit ahead of the tombstone, not behind it.
+      if (isPauseGated(store)) store.assertWritable();
       // Tombstone + purge both need Postgres; without it the guard could not
       // hold, so fail typed (the cloud parks the job, no attempt burned).
       if (!db) throw new Error("postgres_not_ready");

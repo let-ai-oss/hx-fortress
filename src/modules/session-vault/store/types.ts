@@ -32,6 +32,14 @@ export interface ComposeResult {
   componentCount: number;
 }
 
+export interface StagingUploadOptions {
+  /** Shorten the signature's lifetime. The quiesce barrier before a storage
+   *  swap has to wait out every signature the bucket will still honour, so a
+   *  drain cuts new ones short instead of waiting the default TTL. Clamped by
+   *  the backend to its own maximum. */
+  ttlSeconds?: number;
+}
+
 export interface AppendOptions {
   /** Overwrite the canonical with this chunk instead of appending. The client
    *  sends this on the first chunk of a from-zero (re)upload so a canonical
@@ -75,7 +83,7 @@ export interface DeleteSessionOptions {
 
 export interface SessionStore {
   /** Mint a signed PUT URL for a staging chunk. The caller PUTs raw NDJSON bytes. */
-  signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload>;
+  signStagingUpload(key: SessionKey, chunkId: string, opts?: StagingUploadOptions): Promise<SignedUpload>;
   /** Read a freshly-uploaded staging chunk as UTF-8 text (used for indexing). */
   readChunkText(key: SessionKey, chunkId: string): Promise<string>;
   /** Append a staging chunk onto the canonical session log; returns new totals.

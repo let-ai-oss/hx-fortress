@@ -23,6 +23,11 @@ import type { SessionKey, SessionStore } from "../modules/session-vault/store/ty
 import { correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
 import { ingestAgentCommit, ingestCommit } from "./ingest";
+import type { HxIngestChannel } from "../host/postgres/schema/sessions";
+
+/** Provenance for a row the reconciler recovered — never 'tunnel', which would
+ *  make an unverified session eligible for raw-id residency disclosure. */
+const RECONCILED_CHANNEL: HxIngestChannel = "reconciled";
 
 const AGENT_LANE = ":a:";
 
@@ -195,6 +200,11 @@ export async function reconcileOrphans(
           deviceId: null,
         },
         recovered: true as const,
+        // The reconciler rebuilds a row from bytes already in the bucket, so it
+        // cannot know which entry point originally wrote them — a DISTINCT
+        // value, sharing the unknown-provenance bucket with NULL rather than
+        // claiming a channel it did not observe.
+        ingestChannel: RECONCILED_CHANNEL,
       };
       if (laneIdx >= 0) {
         // Agent lane → the parent session key + the agentId.

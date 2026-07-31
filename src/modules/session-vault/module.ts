@@ -5,7 +5,8 @@
 import { handleVaultRpc, type VaultAuthz, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials } from "./credentials.js";
-import { buildStore } from "./store.js";
+import { buildStore, type StorePauseHooks } from "./store.js";
+import { isIngestPaused } from "../../console/pause-gate.js";
 import type { HxDb } from "../../host/postgres/db.js";
 import { sanitizeDbError } from "../../host/postgres/sanitize.js";
 import type {
@@ -35,6 +36,9 @@ export interface SessionVaultDeps {
    *  no cgroup kill, so a hard exit would orphan the daemonized postmaster and
    *  the restarted fortress boots Postgres-less. Bounded by the caller. */
   stopEmbeddedPostgres?: () => Promise<void>;
+  /** Compose the store-write pause gate around the store. Omitted in tests and
+   *  wherever no pause plane exists. */
+  pause?: StorePauseHooks;
 }
 
 /** RPC methods that mutate the store — always log completion + duration. The
@@ -66,6 +70,9 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
   let probeTimer: ReturnType<typeof setInterval> | null = null;
   let probeBusy = false;
   let probeFailing = false;
+  // Per-EPISODE pause logging state: one summary line per deadline, then debug.
+  let pauseSummaryAt = 0;
+  let pausedRefusals = 0;
 
   return {
     id: "session_vault",
@@ -80,7 +87,10 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       if (!creds) {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");
       }
-      store = buildStore(creds, context.logger, { beforeExit: deps.stopEmbeddedPostgres });
+      store = buildStore(creds, context.logger, {
+        beforeExit: deps.stopEmbeddedPostgres,
+        pause: deps.pause,
+      });
 
       const { fortressIdentity } = context;
       if (fortressIdentity) {
@@ -166,6 +176,25 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
         // The error string is logged AND returned to the cloud on the wire, so
         // redact any DSN a Postgres/driver error might have echoed (Low).
         const message = sanitizeDbError(err);
+        if (isIngestPaused(err)) {
+          // A pause is a deliberate, time-bounded refusal, and a drain can
+          // refuse thousands of RPCs. Error-level per request would bury the
+          // reason it was armed under its own noise — so one summary per pause
+          // episode, and the individual refusals at info.
+          if (pauseSummaryAt !== err.pausedUntil.getTime()) {
+            pauseSummaryAt = err.pausedUntil.getTime();
+            pausedRefusals = 0;
+            logger?.info("ingest paused — refusing store writes until the deadline", {
+              pausedUntil: err.pausedUntil.toISOString(),
+            });
+          }
+          pausedRefusals += 1;
+          logger?.debug("vault RPC refused: ingest paused", {
+            method: req.method,
+            refusals: pausedRefusals,
+          });
+          return { ok: false, error: message };
+        }
         logger?.error("vault RPC failed", {
           method: req.method,
           error: message,

@@ -42,6 +42,7 @@ import type {
   SessionStore,
   SignedDownload,
   SignedUpload,
+  StagingUploadOptions,
 } from "./types.js";
 import {
   metadataFromCanonicalObjectName,
@@ -56,7 +57,7 @@ import {
   sessionDeletePrefixes,
   stagingObject,
 } from "./keys.js";
-import { maxCanonicalBytes } from "./limits.js";
+import { clampStagingTtl, maxCanonicalBytes } from "./limits.js";
 import { randomUUID } from "node:crypto";
 
 export interface S3StoreConfig {
@@ -70,7 +71,6 @@ export interface S3StoreConfig {
   forcePathStyle?: boolean;
 }
 
-const STAGING_PUT_TTL_S = 15 * 60;
 const CANONICAL_GET_TTL_S = 5 * 60;
 const MULTIPART_MIN_PART = 5 * 1024 * 1024; // S3: non-last parts must be ≥ 5 MiB
 const NDJSON = "application/x-ndjson";
@@ -98,17 +98,25 @@ export class S3Store implements SessionStore {
     this.bucket = cfg.bucketName;
   }
 
-  async signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
+  async signStagingUpload(
+    key: SessionKey,
+    chunkId: string,
+    opts?: StagingUploadOptions,
+  ): Promise<SignedUpload> {
     const objectName = stagingObject(key, chunkId);
+    // A caller may shorten the signature but never extend it: the quiesce
+    // barrier waits out every signature still outstanding, so a longer one
+    // would push a storage swap arbitrarily far into the future.
+    const ttl = clampStagingTtl(opts?.ttlSeconds);
     const url = await getSignedUrl(
       this.s3,
       new PutObjectCommand({ Bucket: this.bucket, Key: objectName, ContentType: NDJSON }),
-      { expiresIn: STAGING_PUT_TTL_S },
+      { expiresIn: ttl },
     );
     return {
       url,
       objectName,
-      expiresAt: new Date(Date.now() + STAGING_PUT_TTL_S * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + ttl * 1000).toISOString(),
     };
   }
 
