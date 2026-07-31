@@ -1,8 +1,10 @@
 import { startFortress, statusFortress, stopFortress } from "./cli-lifecycle";
 import { setFortressCredential } from "./cli-credentials";
+import { runUiCommand, type UiCommandDeps } from "./cli-ui";
 import {
   createProductionLogsDeps,
   logsCommand,
+  parseLogsArgs,
   type LogsOptions,
 } from "./cli-logs";
 import { FileConfigStore } from "./host/config";
@@ -25,6 +27,7 @@ import {
 } from "./update";
 
 type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
+type RunUi = (args: readonly string[], deps: UiCommandDeps) => Promise<number>;
 type RunEnrollWizard = (options: WizardEntryOpts) => Promise<void>;
 type RunTui = () => Promise<number>;
 type RunUpdate = (opts: { downloadBaseUrl: string; binPath?: string; log?: (msg: string) => void; onProgress?: (ev: UpdateProgress) => void }) => Promise<UpdateResult>;
@@ -35,6 +38,7 @@ interface CliDependencies {
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
   runTui?: RunTui;
+  runUi?: RunUi;
   runUpdate?: RunUpdate;
   writeLine?: (line: string) => void;
   /** Override the Fortress root directory — used in tests to supply a temp config. */
@@ -104,11 +108,7 @@ export async function runCli(
         return 0;
       case "logs": {
         const paths = fortressPaths();
-        const rest = args.slice(1);
-        const moduleFilter = rest.find((a) => !a.startsWith("--"));
-        const linesIdx = rest.indexOf("--lines");
-        const linesArg = linesIdx >= 0 ? Number(rest[linesIdx + 1]) : NaN;
-        const linesBack = Number.isFinite(linesArg) && linesArg >= 0 ? linesArg : 50;
+        const { moduleFilter, linesBack, follow } = parseLogsArgs(args.slice(1));
         const runLogs =
           dependencies.runLogs ??
           ((opts: Omit<LogsOptions, "follow" | "signal">) => {
@@ -116,7 +116,7 @@ export async function runCli(
             const onSig = () => ac.abort();
             process.once("SIGINT", onSig);
             return logsCommand(
-              { ...opts, follow: true, signal: ac.signal },
+              { ...opts, follow, signal: ac.signal },
               createProductionLogsDeps(),
             ).finally(() => process.removeListener("SIGINT", onSig));
           });
@@ -223,6 +223,8 @@ export async function runCli(
         writeLine(`hx-fortress version: ${result.remoteVersion ?? result.localVersion}`);
         return 0;
       }
+      case "ui":
+        return await (dependencies.runUi ?? runUiCommand)(args.slice(1), { writeLine });
       case "help":
       case "--help":
         printHelp(writeLine);
@@ -239,7 +241,7 @@ export async function runCli(
 
 function printHelp(writeLine: (line: string) => void): void {
   writeLine("hx-fortress");
-  writeLine("commands: enroll credentials start stop status logs update");
+  writeLine("commands: enroll credentials start stop status logs ui update");
 }
 
 if (import.meta.main) {

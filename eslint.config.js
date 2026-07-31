@@ -4,7 +4,15 @@ import security from "eslint-plugin-security";
 
 export default tseslint.config(
   {
-    ignores: ["coverage/**", "dist/**", "node_modules/**"],
+    // ui/ is its own Vite/React workspace with its own toolchain and tsconfig;
+    // the generated asset map is machine-written and carries @ts-nocheck.
+    ignores: [
+      "coverage/**",
+      "dist/**",
+      "node_modules/**",
+      "ui/**",
+      "src/ui-assets.gen.ts",
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

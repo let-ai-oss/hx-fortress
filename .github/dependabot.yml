@@ -33,6 +33,20 @@ updates:
       dev-dependencies: # tooling bumps in one tidy PR
         dependency-type: "development"
 
+  # The console workspace has its own package.json + bun.lock and its own
+  # toolchain (Vite/React), so it needs its own updater. Grouped whole: React,
+  # its types and the Vite plugin move together or the ui build breaks.
+  - package-ecosystem: "bun"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      console-ui:
+        patterns:
+          - "*"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

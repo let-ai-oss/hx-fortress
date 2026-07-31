@@ -4,9 +4,23 @@ The administration console `hx-fortress ui` serves. Vite + React + TypeScript,
 no backend: every number, name and log line is demo data in `src/data.ts`.
 
 ```sh
-pnpm install && pnpm dev     # http://localhost:5641
-pnpm build                   # typecheck + bundle to dist/
+bun install && bun run dev   # http://localhost:5641
+bun run build                # typecheck + bundle to dist/
 ```
+
+Bun, like the fortress itself — one toolchain, one lockfile format, one
+`--frozen-lockfile` gate in CI and in the image build. TypeScript is pinned to
+an exact version here rather than tracking the root pin: this workspace
+typechecks against the DOM and React JSX libs, so it moves on its own schedule.
+
+`bun run build` writes `dist/`, and the repo root turns that into the binary:
+`bun run gen:ui` maps every built file into `src/ui-assets.gen.ts`, and
+`bun build --compile` embeds them. CI builds the ui twice and compares the
+asset hash, so what ships is provably what these sources produce.
+
+Fonts are vendored under `public/fonts` (OFL, see `OFL.txt`). Nothing here may
+load a resource from another origin: the console runs on appliances with no
+egress, and the CSP it is served under would block it anyway.
 
 ## URLs
 
@@ -58,8 +72,10 @@ dismisses whatever dialog is open, so overlays never pile up in later URLs.
 Unknown paths rewrite themselves to `/`.
 
 **Serving this:** it is a single-page app, so the host must return `index.html`
-for any unmatched path (Vite's dev server and `vite preview` already do). Serve
-`dist/` with a history fallback or every deep link 404s on refresh.
+for any unmatched path (Vite's dev server and `vite preview` already do).
+`hx-fortress ui` does the same from the embedded map: an unmatched path that
+does not name a file gets the shell, an unmatched path that does gets a 404, and
+`/ui/api/*` is reserved for the console's own API.
 
 ## Changing where transcripts rest
 

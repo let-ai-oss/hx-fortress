@@ -22,6 +22,24 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # A broken console build must fail the PR, not the release. The rebuild
+      # comparison proves the embedded assets are the ones this commit's sources
+      # produce — a stale ui/dist lying in a tree can never ride along.
+      - name: Build the console and verify an independent rebuild
+        run: |
+          set -euo pipefail
+          bun run build:ui
+          first="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          rm -rf ui/dist
+          bun run build:ui
+          second="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          if [[ "$first" != "$second" ]]; then
+            echo "console assets are not reproducible: $first != $second" >&2
+            exit 1
+          fi
+          echo "console assets sha256 $first"
+          bun run gen:ui
+
       - name: Typecheck
         run: bun run typecheck
 

@@ -19,6 +19,17 @@ describe("dev-build workflow", () => {
     expect(workflow).toContain("dist/hx-fortress-version");
   });
 
+  test("builds and embeds the console before the compile", () => {
+    expect(workflow).toContain("bun run build:ui");
+    expect(workflow).toContain("bun run gen:ui");
+    expect(workflow.indexOf("bun run gen:ui")).toBeLessThan(
+      workflow.indexOf("Compile darwin/linux binaries"),
+    );
+    // A dev build carries the ui step only — the rebuild comparison is a
+    // release and PR gate, not a per-branch one.
+    expect(workflow).not.toContain("--print-hash");
+  });
+
   test("publishes an overwriting per-branch dev release", () => {
     expect(workflow).toContain('tag="dev/hx-fortress-${slug}"');
     expect(workflow).toContain("gh release delete");

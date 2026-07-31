@@ -4,7 +4,13 @@ FROM oven/bun:1.3.14 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
+# The console workspace is installed from its manifests alone, before the
+# sources land, so editing app code does not re-resolve its dependency tree.
+COPY ui/package.json ui/bun.lock ui/
+RUN cd ui && bun install --frozen-lockfile
 COPY . .
+# build:ui -> gen:ui -> compile, the same pipeline the workflows run, so the
+# image embeds assets built from these sources rather than anything copied in.
 RUN bun run build            # produces ./dist/hx-fortress (compiled)
 
 # TODO(prod): pin the base image by digest — oven/bun:1.3.14-slim@sha256:<digest>.

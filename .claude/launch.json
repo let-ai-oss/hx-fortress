@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "fortress-ui",
-      "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "ui", "dev"],
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "--cwd", "ui", "dev"],
       "port": 5641
     }
   ]

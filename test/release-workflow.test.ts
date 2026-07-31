@@ -25,6 +25,22 @@ describe("release workflow", () => {
     expect(workflow).toContain("dist/hx-fortress-version");
   });
 
+  test("builds the console before the compile and refuses an irreproducible rebuild", () => {
+    expect(workflow).toContain("bun run build:ui");
+    expect(workflow).toContain("scripts/gen-ui-assets.ts --print-hash");
+    expect(workflow).toContain('if [[ "$first" != "$second" ]]; then');
+    expect(workflow).toContain("bun run gen:ui");
+    // Order is load-bearing: the compile embeds whatever gen:ui wrote.
+    expect(workflow.indexOf("bun run gen:ui")).toBeLessThan(
+      workflow.indexOf("Compile darwin/linux binaries"),
+    );
+  });
+
+  test("a console-only change triggers the release", () => {
+    expect(workflow).toContain('- "ui/**"');
+    expect(workflow).toContain('- "scripts/**"');
+  });
+
   test("publishes rolling releases and immutable releases on manual dispatch", () => {
     expect(workflow).toContain("contents: write");
     expect(workflow).toContain('gh release create "$tag" dist/hx-fortress-*');

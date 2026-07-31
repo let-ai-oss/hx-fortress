@@ -33,7 +33,7 @@ describe("runCli", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(lines).toContain("commands: enroll credentials start stop status logs update");
+    expect(lines).toContain("commands: enroll credentials start stop status logs ui update");
   });
 
   test("dispatches enroll with the token and cloud URL", async () => {
