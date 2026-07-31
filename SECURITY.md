@@ -178,10 +178,18 @@ The console's role, `hx_ui`, is the only one that may `INSERT` there. The
 daemon's role, `hx_app_rw`, is the one every cloud-reachable path runs as — the
 tunnel, the gateway, each ingest entry point — and it holds no `INSERT`, no
 `UPDATE` and no `DELETE` on that table at all. The same revoke covers
-`hx.admin_audit`, `hx.audit_acks`, `hx.audit_settings` and `hx.ingest_control`.
-An adversary who reaches that role over the network therefore cannot ask this
-host to update itself, rotate a credential, move its storage or acknowledge a
-residency finding: the row that would carry the request is one it cannot write.
+`hx.admin_audit`, `hx.audit_acks` and `hx.audit_settings`. An adversary who
+reaches that role over the network therefore cannot ask this host to update
+itself, rotate a credential, move its storage or acknowledge a residency
+finding: the row that would carry the request is one it cannot write.
+
+`hx.ingest_control` is revoked with them and then handed back exactly what
+pausing ingest needs, at column level: `paused_until`, `reason` and `armed_by` on
+insert, `paused_until`, `reason` and `resumed_at` on update. `row_written_at` is
+not among them — it anchors how long a pause may hold the write gate closed, so
+the role that arms a pause must not be able to set it. `DELETE` stays revoked
+permanently, because delete-then-reinsert would mint a fresh anchor and restore
+the unbounded pause the clamp exists to bound.
 
 The daemon still has to move rows it did not mint — claim one, finish it, reject
 it — and it does that through five `SECURITY DEFINER` routines:

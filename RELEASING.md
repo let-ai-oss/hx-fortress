@@ -58,7 +58,7 @@ is no way to land them quietly first: pushing them **is** the release.
 | 4 | Confirm `MIN_FORTRESS_CONSOLE_VERSION` in the hub equals the version this release will publish. | Read it in the deployed hub, not in the branch that set it. |
 | 5 | Push `hx-fortress` `main`: the version bump and the protocol re-pin. **This is the release build.** | The release workflow ran for that SHA, and `git rev-parse builds/hx-fortress-<version>` equals it. Record that commit — later rungs compare against it. |
 | 6 | Publish the immutable release: `workflow_dispatch` on the **tag** `builds/hx-fortress-<version>`, never a branch. | **Pre-dispatch:** `git rev-parse builds/hx-fortress-<version>` still equals the commit recorded at rung 5. **Post:** `releases/hx-fortress-<version>` exists and its `target_commitish` is that same commit. |
-| 7 | Freeze: no further push to `main` touching `src/`, `ui/`, `scripts/`, `Dockerfile`, `package.json` or `bun.lock` until rung 6 has been verified. | Any such push re-runs the rolling step and force-moves the build tag. |
+| 7 | Freeze: no further push to `main` touching `src/`, `ui/`, `scripts/`, `Dockerfile`, `package.json`, `bun.lock` **or `.github/workflows/release.yml`** until rung 6 has been verified. | Those are `release.yml`'s own `on.push.paths`. Any push touching one re-runs the rolling step and force-moves the build tag — including rung 12's edit to the workflow file itself, which is why that is a release of its own. |
 | 8 | Bake the production signing anchors into `src/host/trust/signing-keys.ts`, keeping the current and next public halves. This release still publishes **unsigned**. | `hasProductionAnchor()` is true for the shipped build; the release assets still carry no `.sig`. |
 | 9 | Bake the let.ai **root** anchors: the production root alongside the development one. | Both keyids are present in `LETAI_ROOT_KEYS`, and a fortress on this build verifies a key proof signed by either. |
 | 10 | **Fleet-verification gate.** Every fortress row in workbench-admin → HX Fortresses reports at least this version. | Rows reading OFFLINE count as **not** verified. A row offline for more than 30 days may be waived — listed by organization id, in writing. |
@@ -105,9 +105,13 @@ redeploying is the equivalent act.
 
 An older binary re-grants the daemon's write role full DML on its first boot,
 through the blanket schema grant it issues before it knows better. So for as long
-as a downgraded binary was running, four tables were writable by a role that
+as a downgraded binary was running, five tables were writable by a role that
 should not have reached them: `hx.admin_audit`, `hx.console_commands`,
-`hx.audit_acks` and `hx.audit_settings`.
+`hx.audit_acks`, `hx.audit_settings` and `hx.ingest_control`.
+
+The fifth is the one that is easy to miss. A blanket re-grant restores `DELETE`
+on `hx.ingest_control`, and delete-then-reinsert mints a fresh pause anchor —
+which is exactly the unbounded pause the clamp exists to bound.
 
 A command row planted in that window is rejected by the boot fence of the binary
 that comes back — it is never executed. The rows written in the window are still

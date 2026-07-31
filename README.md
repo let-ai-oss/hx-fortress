@@ -152,13 +152,13 @@ next request.
 
 | Surface | Path | What it answers | Where the figures come from |
 | --- | --- | --- | --- |
-| Overview | `/` | is this fortress healthy right now | the daemon's `status.json` and `metrics.json` heartbeat files; session and byte totals from Postgres; bucket versioning and lifecycle read live from the provider |
+| Overview | `/` | is this fortress healthy right now | the daemon's `status.json` and `metrics.json` heartbeat files; session and byte totals from Postgres; the bucket the storage credential names |
 | Sessions | `/sessions` | what has arrived, from whom, and when | Postgres metadata only, never transcript text; *Verify* additionally stats the object in the bucket |
 | Adoption | `/people` | who in the organization is covered | the roster let.ai sent, and this host's own session rows — kept apart, never blended |
 | Residency | `/residency` | does this host hold what it is supposed to | an audit the daemon runs; routing posture from the cached answer to let.ai |
 | Posture & Audit | `/compliance` | where data enters and leaves, and who did what | data paths computed from the effective configuration; the admin trail from Postgres, falling back to the on-disk spool |
 | Postgres | `/postgres` | is the database up, and how large | the daemon's status file, and Postgres itself |
-| Object storage | `/storage` | which bucket, versioned how, under what lifecycle — and every storage migration this host has run | the resolved storage credential and live provider calls; migration runs from Postgres |
+| Object storage | `/storage` | which bucket this fortress writes to, and every storage migration it has run | the bucket the storage credential names, and migration runs from Postgres. The console builds no store handle of its own, so versioning and lifecycle report as unreadable rather than guessed |
 | Embeddings | `/embeddings` | how much is embedded, under which model | Postgres row counts; the vector column is never selected |
 | Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the release origin for the version check |
 | Logs | `/logs` | what the daemon is saying | a live tail of the daemon's structured log file |
@@ -265,11 +265,12 @@ the fenced routine so they land in it.
 
 ### Asking the daemon to do something
 
-The console holds no vault credential, no signing key and no store handle. Work
-that needs one is a **request**: a row in the command queue that the daemon
-claims, performs and records. Eight kinds exist — apply an update, rotate a
-credential, run a storage migration, run a checkup, run a self-test, run the
-residency audit, toggle the cloud witness, acknowledge a finding.
+The console does not perform privileged work itself. Anything that needs the
+daemon's credentials, its engines or its database authority is a **request**: a
+row in the command queue that the daemon claims, performs and records. Eight
+kinds exist — apply an update, rotate a credential, run a storage migration, run
+a checkup, run a self-test, run the residency audit, toggle the cloud witness,
+acknowledge a finding.
 
 Service control is the exception. Start, stop and restart run in the console
 process, because the thing being controlled is the daemon and a stopped daemon
@@ -280,10 +281,6 @@ accepted. A terminal outcome that no daemon-written record corroborates renders
 as *Reported (unconfirmed)*; one a record contradicts renders as *Disputed*,
 names which way the disagreement runs, links the trail entry and gives the
 remediation. Neither is ever rendered as success.
-
-Where a build carries no release signing anchor, the console says so at the
-update control: the download is checked against its published checksum, which
-proves the bytes are intact and not who produced them.
 
 ### Moving the fortress to another bucket
 
@@ -297,11 +294,14 @@ A storage migration is driven from Object storage, in three gestures:
 
 Arm first, and leave it armed as long as you like — ingest keeps running
 throughout and nothing is held. Repeated delta passes narrow what has changed
-since the bulk copy, so the work remaining when you cut approaches zero. Supply
-the target bucket's credentials with the arm; they travel to a single-use `0600`
-file and never into the command row, and the daemon reads and unlinks them in
-one step. A target whose credentials name a different bucket than the one you
-asked for is refused.
+since the bulk copy, so the work remaining when you cut approaches zero.
+
+The target bucket's credentials accompany **each** gesture that touches it — arm
+and swap alike. They travel to a single-use `0600` file and never into the
+command row, and the daemon reads and unlinks them in one step, so a reference is
+spent once and the next gesture mints its own. Credentials naming a different
+bucket than the request asked for are refused: a run whose record disagrees with
+what it actually wrote is a record nobody can audit.
 
 Swap when ready. It first drains outstanding presigned uploads — a presigned PUT
 lands in the bucket directly, invisible to this process, so a pause cannot stop
@@ -329,10 +329,11 @@ migration that moved it would be undone by the next redeploy.
 ### Configuring the console
 
 Settings live in `$FORTRESS_ROOT/ui/ui.json` — mode `0600`, in a `0700`
-directory, beside the account store and the audit spool. The console and the
-`hx-fortress ui` verbs are its only writers; the browser can narrow the
-configuration (`sso` off) and never widen it. `hx-fortress ui config` prints the
-effective value of every key and where that value came from.
+directory, beside the account store and the audit spool. The `hx-fortress ui`
+verbs are its only writers — no browser path writes it, under any spelling.
+`hx-fortress ui config` prints the stored settings, the fortress root they belong
+to, which address the sign-in limits are actually keyed on, and, where the
+environment is what turned the console on, says so.
 
 | Variable | Purpose |
 | --- | --- |
@@ -344,9 +345,11 @@ effective value of every key and where that value came from.
 | `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume with its setup link printed to the container log. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
 | `FORTRESS_CONTAINER` | `0` disables container detection entirely, as `--no-container` does on the command line. |
 
-For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and a
-command-line flag wins over the environment. `FORTRESS_UI_ENABLE` is the
-exception: it is OR-ed, never authoritative in both directions.
+For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and
+`--port` and `--bind` win over the environment in turn. `--url` changes only the
+URL the console prints — not where it binds, not the `Host` allowlist and not
+what is advertised to let.ai. `FORTRESS_UI_ENABLE` is the exception to all of
+it: it is OR-ed, never authoritative in both directions.
 
 | `ui.json` key | Default | Written by |
 | --- | --- | --- |
@@ -468,7 +471,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_PUBLIC_URL` | yes | Public URL of the ingest gateway; also enables the gateway. |
 | `FORTRESS_GATEWAY_PORT` | no | Gateway listen port (default `8787`). |
 | `FORTRESS_ENROLL_TOKEN` | first boot | One-time enrollment token from the let.ai hub. |
-| `FORTRESS_CLOUD_URL` | first boot | WebSocket URL of the hub, e.g. `wss://let.ai/api/fortress/tunnel`. |
+| `FORTRESS_CLOUD_URL` | first boot | WebSocket URL of the hub. Production is `wss://let.ai/_api/hx-gateway/vault-tunnel`; the self-update origin is derived from it by replacing the trailing `/vault-tunnel`. |
 | `FORTRESS_STORAGE_BUCKET` | yes | Bucket that holds session transcripts. |
 | `FORTRESS_STORAGE_KIND` | no | `gcs` (default) or `s3`. |
 | `FORTRESS_STORAGE_REGION` | no | Bucket location / region. |
