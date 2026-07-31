@@ -30,6 +30,7 @@ import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
 import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { type: "text" };
 import sql0015ConsolePlane from "./0015_console_plane.sql" with { type: "text" };
+import sql0017AuditEngine from "./0017_audit_engine.sql" with { type: "text" };
 import sql0016AuditRefFile from "./0016_audit_ref_file.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
@@ -78,4 +79,9 @@ export const migrations: Migration[] = [
   // reference to its intent, so a pair split by a spool rotation still resolves.
   // NOT gated.
   { name: "0016_audit_ref_file", sql: sql0016AuditRefFile },
+  // The residency audit's own record: runs and findings. The acknowledgement
+  // and cloud-witness tables are NOT here (0015 owns them, with their fences) —
+  // a run is re-derivable by running the audit again, and an acknowledgement is
+  // not. NOT gated.
+  { name: "0017_audit_engine", sql: sql0017AuditEngine },
 ];

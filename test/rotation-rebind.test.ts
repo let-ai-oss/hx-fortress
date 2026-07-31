@@ -431,6 +431,11 @@ function executorDeps(overrides: {
       }),
     status: async () => null,
     embeddingEndpoint: () => null,
+    runAudit: async () => {
+      throw new Error("not wired");
+    },
+    setCloudWitness: async () => {},
+    acknowledgeFinding: async () => {},
     onBinarySwapped: () => {},
   };
 }

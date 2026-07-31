@@ -1,7 +1,17 @@
 import React from "react";
 
 import { api } from "../api";
-import { FactRow, Loaded, Panel, Stat } from "../components";
+import {
+  FactRow,
+  Loaded,
+  MutationControl,
+  Panel,
+  ResultLine,
+  Stat,
+  useConfirm,
+  useResultLine,
+} from "../components";
+import { COMMAND_REQUEST_NOTE, NO_POLLER_REFUSAL } from "../../../src/ui/copy";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
@@ -102,6 +112,8 @@ export default function Residency(): React.ReactElement {
         </Loaded>
       </Panel>
 
+      <AuditPanel daemonRunning={posture.data !== null} />
+
       {page.data?.rows[0] ? (
         <VerifyResidencyPanel
           family={page.data.rows[0].family}
@@ -161,5 +173,123 @@ export default function Residency(): React.ReactElement {
         </div>
       </Panel>
     </section>
+  );
+}
+
+/**
+ * The audit itself, asked for from here.
+ *
+ * Two controls, and the second one is an EGRESS switch: with the witness on,
+ * the session ids of cloud-relayed sessions are sent to let.ai so it can say
+ * whether it still holds a copy. With it off nothing leaves the box and every
+ * eligible session reports the witness as unavailable — which is a different
+ * answer from "let.ai holds no copy", and the run says so.
+ */
+function AuditPanel(props: { daemonRunning: boolean }): React.ReactElement {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [busy, setBusy] = React.useState(false);
+  const reason = props.daemonRunning ? undefined : NO_POLLER_REFUSAL;
+
+  const submit = async (
+    kind: string,
+    params: Record<string, unknown>,
+    confirm: { title: string; body: string; confirmLabel: string; danger?: boolean },
+    done: string,
+  ): Promise<void> => {
+    if (!(await ask(confirm))) return;
+    setBusy(true);
+    try {
+      await api.submitCommand(kind, params);
+      showResult(done);
+    } catch (error) {
+      showResult(error instanceof Error ? error.message : String(error), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Panel
+      title="Run the audit"
+      sub="The daemon lists the bucket, checks every session this fortress claims against what is actually there, and records a run you can come back to."
+    >
+      {dialog}
+      <div className="facts wide">
+        <FactRow
+          k="Residency audit"
+          v="On demand"
+          vs={COMMAND_REQUEST_NOTE}
+          action={
+            <MutationControl
+              label="Run audit"
+              small
+              disabled={busy || reason !== undefined}
+              {...(reason ? { reason } : {})}
+              onClick={() =>
+                void submit(
+                  "run_audit",
+                  { scope: "console" },
+                  {
+                    title: "Run the residency audit?",
+                    body: "The daemon lists this organization's bucket and checks every session against it. Large fortresses take a while; the run is paced so it cannot become an outage.",
+                    confirmLabel: "Run it",
+                  },
+                  "Asked the daemon to run it. Its verdict appears under Commands.",
+                )
+              }
+            />
+          }
+        />
+        <FactRow
+          k="Ask let.ai"
+          v="Cloud witness"
+          vs="With it on, the ids of cloud-relayed sessions are sent to let.ai during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
+          action={
+            <span style={{ display: "inline-flex", gap: 8 }}>
+              <MutationControl
+                label="Turn on"
+                small
+                disabled={busy || reason !== undefined}
+                {...(reason ? { reason } : {})}
+                onClick={() =>
+                  void submit(
+                    "witness_toggle",
+                    { enabled: true },
+                    {
+                      title: "Send session ids to let.ai during an audit?",
+                      body: "Only for sessions that reached this fortress THROUGH let.ai — it has already seen those ids. Nothing else is sent, and no transcript ever is.",
+                      confirmLabel: "Turn it on",
+                    },
+                    "Asked the daemon to turn the cloud witness on.",
+                  )
+                }
+              />
+              <MutationControl
+                label="Turn off"
+                small
+                danger
+                disabled={busy || reason !== undefined}
+                {...(reason ? { reason } : {})}
+                onClick={() =>
+                  void submit(
+                    "witness_toggle",
+                    { enabled: false },
+                    {
+                      title: "Stop asking let.ai?",
+                      body: "No session id leaves this host from then on. Every eligible session will report the witness as unavailable, which is not the same as let.ai reporting no copy — and the run will say so.",
+                      confirmLabel: "Turn it off",
+                      danger: true,
+                    },
+                    "Asked the daemon to turn the cloud witness off.",
+                  )
+                }
+              />
+            </span>
+          }
+        />
+      </div>
+      <ResultLine state={result} />
+    </Panel>
   );
 }

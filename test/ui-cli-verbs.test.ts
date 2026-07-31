@@ -434,7 +434,13 @@ describe("--force-unlock", () => {
 
 describe("the help registry", () => {
   test("covers every verb group the console offers", () => {
-    expect(CLI_HELP.map((s) => s.name)).toEqual(["fortress", "console", "console users", "console sso"]);
+    expect(CLI_HELP.map((s) => s.name)).toEqual([
+      "fortress",
+      "console",
+      "residency audit",
+      "console users",
+      "console sso",
+    ]);
     const usages = helpEntries().map((e) => e.usage);
     for (const verb of [
       "hx-fortress ui config set <key> <value>",

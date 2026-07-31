@@ -7,6 +7,7 @@ import {
   updateDivergenceRefusal,
 } from "./cli-lifecycle";
 import { CliAudit } from "./cli-audit";
+import { runAuditVerb } from "./cli-audit-verbs";
 import { AUDIT_ACTIONS } from "./console/audit-actions";
 import { ensureUiUnit } from "./cli-ui-service";
 import {
@@ -54,6 +55,7 @@ interface CliDependencies {
   getUiServiceControl?: () => UiServiceControl;
   restartUiUnit?: (options: { platform?: string; uid?: number }) => void;
   ensureUiUnit?: typeof ensureUiUnit;
+  runAuditVerb?: typeof runAuditVerb;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
@@ -294,6 +296,11 @@ export async function runCli(
         writeLine(`hx-fortress version: ${result.remoteVersion ?? result.localVersion}`);
         return 0;
       }
+      case "audit":
+        return await (dependencies.runAuditVerb ?? runAuditVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
       case "ui":
         return await (dependencies.runUi ?? runUiCommand)(args.slice(1), {
           writeLine,

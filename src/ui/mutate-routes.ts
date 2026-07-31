@@ -43,6 +43,9 @@ export const OFFERED_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
   "self_test",
   "rotate_credentials",
   "run_checkup",
+  "run_audit",
+  "witness_toggle",
+  "acknowledge_finding",
 ];
 
 export const SERVICE_ACTIONS = ["start", "stop", "restart"] as const;

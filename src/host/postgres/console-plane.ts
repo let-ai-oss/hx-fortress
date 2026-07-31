@@ -59,6 +59,8 @@ export const CONSOLE_TABLES = [
   "admin_audit",
   "audit_acks",
   "audit_settings",
+  "audit_runs",
+  "audit_findings",
 ] as const;
 
 /** ingest_control columns hx_app_rw may write. `row_written_at` is EXCLUDED:
@@ -165,6 +167,10 @@ export const UI_TABLE_GRANTS: ReadonlyArray<{ table: string; privileges: readonl
   { table: "ingest_control", privileges: ["SELECT"] },
   { table: "audit_acks", privileges: ["SELECT"] },
   { table: "audit_settings", privileges: ["SELECT"] },
+  // The audit engine's own record. The console renders the history and every
+  // finding in it; the daemon writes both, so hx_ui reads and never writes.
+  { table: "audit_runs", privileges: ["SELECT"] },
+  { table: "audit_findings", privileges: ["SELECT"] },
   // The console's own read surface: sessions are column-level (below), and
   // everything the session rows point AT is metadata the console renders by
   // name — a person, a device, a repository, a project.

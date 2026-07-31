@@ -12,6 +12,9 @@
 // been validated against the per-kind shape.
 
 import { consumeCredentialRef } from "./cmd-creds";
+import { failingFindings, type AuditRunResult } from "./audit-engine";
+import { finishAuditRun, recordFindings, startAuditRun } from "./audit-store";
+import type { RollUpCounts } from "./audit-verdicts";
 import { runCheckup, summarizeCheckup, type CheckupDeps } from "./checkup";
 import { readCurrentEpisode } from "./ingest-control-db";
 import {
@@ -55,6 +58,13 @@ export interface ExecutorDeps {
   setCloudCredential: (credential: string) => Promise<CloudCredential>;
   status: () => Promise<HostStatusSnapshot | null>;
   embeddingEndpoint: () => string | null;
+  /** One residency audit pass, already wired to this fortress's store, its
+   *  witness and its acknowledgements. */
+  runAudit: () => Promise<AuditRunResult>;
+  /** Flip the egress toggle through the fenced routine. */
+  setCloudWitness: (enabled: boolean) => Promise<void>;
+  /** Write one acknowledgement through the fenced routine. */
+  acknowledgeFinding: (args: { org: string; sessionId: string; reason: string | null }) => Promise<void>;
   /** Called once a new binary is in place. The restart it schedules must happen
    *  AFTER the outcome record is durable, so it is a signal rather than an act:
    *  a daemon that restarted itself here would die before the record it is
@@ -71,6 +81,17 @@ function notCarried(kind: string): CommandExecutor {
     throw new Error(`this build does not run ${kind}`);
   };
 }
+
+const EMPTY_COUNTS: RollUpCounts = {
+  sessionsChecked: 0,
+  confirmed: 0,
+  alsoAtLetai: 0,
+  alsoAtLetaiAcknowledged: 0,
+  notDeliveredHere: 0,
+  noRecord: 0,
+  unknownProvenance: 0,
+  notApplicable: 0,
+};
 
 /** A pause is armed and unexpired — the state a storage migration holds the
  *  write gate in. Refusing here, by name, keeps a gated self-test from being
@@ -178,8 +199,53 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
       await assertNotMigrating(deps);
       return summarizeCheckup(await runCheckup(checkupDeps(deps)));
     },
-    run_audit: notCarried("run_audit"),
-    witness_toggle: notCarried("witness_toggle"),
-    acknowledge_finding: notCarried("acknowledge_finding"),
+    run_audit: async (ctx) => {
+      const db = deps.db();
+      if (!db) throw new Error("the fortress database is not available, so an audit cannot be recorded");
+      const run = await startAuditRun(db, {
+        trigger: typeof ctx.params.scope === "string" ? ctx.params.scope : "console",
+        requestedBy: null,
+      });
+      try {
+        const result = await deps.runAudit();
+        await recordFindings(db, run.id, result.findings);
+        await finishAuditRun(db, run.id, {
+          counts: result.counts,
+          qualification: result.qualification,
+          error: null,
+        });
+        const failing = failingFindings(result.findings).length;
+        return (
+          `${result.verdict}: ${result.qualification} ` +
+          `(${result.counts.sessionsChecked} checked, ${failing} failing` +
+          `${result.truncated ? ", stopped at this run's budget" : ""})`
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await finishAuditRun(db, run.id, {
+          counts: EMPTY_COUNTS,
+          qualification: "the run did not finish",
+          error: message,
+        }).catch(() => {});
+        throw error;
+      }
+    },
+
+    witness_toggle: async (ctx) => {
+      await deps.setCloudWitness(ctx.params.enabled === true);
+      return ctx.params.enabled === true
+        ? "let.ai is asked about eligible sessions again"
+        : "let.ai is no longer asked; every eligible session reports the witness as unavailable";
+    },
+
+    acknowledge_finding: async (ctx) => {
+      const org = String(ctx.params.org);
+      const sessionId = String(ctx.params.sessionId);
+      const reason = typeof ctx.params.reason === "string" ? ctx.params.reason : null;
+      await deps.acknowledgeFinding({ org, sessionId, reason });
+      // Acknowledging says WHY a copy exists elsewhere. It never says a missing
+      // object is present, which is why only the weaker finding can be cleared.
+      return `acknowledged for ${sessionId}; later runs inherit it`;
+    },
   };
 }

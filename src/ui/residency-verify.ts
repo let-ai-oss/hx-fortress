@@ -12,6 +12,13 @@
 // printed the same five reassuring lines whatever it managed to do would be the
 // green tick with nothing behind it, which is worse than no dialog at all.
 
+import {
+  sessionCheckPasses,
+  verdictFor,
+  VERDICT_CAUSE,
+  VERDICT_HEADLINE,
+} from "../console/audit-verdicts";
+
 export type VerifyVerdict = "healthy" | "missing" | "mismatch" | "orphan" | "witness-unavailable";
 
 export type CheckState = "passed" | "failed" | "not-checked";
@@ -34,6 +41,14 @@ export interface VerifyInput {
   stagingOrphans?: number;
   /** Why the store could not be asked, when it could not. */
   storeUnavailable?: string;
+  /** What the residency audit established about let.ai for this session.
+   *  ABSENT means nobody asked, which is the state this dialog reports when the
+   *  witness is switched off, unreachable, or the session is not eligible. */
+  witness?: {
+    letaiCopy: boolean;
+    anyDestinationRecord: boolean;
+    acknowledged: boolean;
+  };
 }
 
 export interface VerifyResult {
@@ -117,7 +132,28 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
         : { name: "Staging chunks", state: "passed", detail: "none left behind" },
   );
 
-  checks.push({ name: "let.ai copy", state: "not-checked", detail: WITNESS_NOT_CHECKED });
+  // The ATTESTED arm. Present only when a run actually asked; every other case
+  // still says the absence is a scope rather than a result.
+  const attested = input.witness
+    ? verdictFor({
+        fortressPresent: input.canonicalBytes !== null && input.canonicalBytes !== undefined,
+        letaiCopy: input.witness.letaiCopy,
+        anyDestinationRecord: input.witness.anyDestinationRecord,
+        ingestChannel: input.row?.ingestChannel ?? null,
+        acknowledged: input.witness.acknowledged,
+      })
+    : null;
+  checks.push(
+    attested
+      ? {
+          name: "let.ai copy",
+          state: sessionCheckPasses(attested, input.witness?.acknowledged ?? false)
+            ? "passed"
+            : "failed",
+          detail: `${VERDICT_HEADLINE[attested]} - ${VERDICT_CAUSE[attested]}`,
+        }
+      : { name: "let.ai copy", state: "not-checked", detail: WITNESS_NOT_CHECKED },
+  );
 
   const verdict = verdictOf(input, asked);
   return {

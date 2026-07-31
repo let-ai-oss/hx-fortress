@@ -69,6 +69,7 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
   "cli.update": ["binPath", "asset", "version"],
   "system.": ["engine", "kind", "count", "reason", "from", "to"],
+  "console.command.submit.acknowledge": ["org", "sessionId", "reason"],
 };
 
 /** Key names that never reach the spool whatever an action declares. The

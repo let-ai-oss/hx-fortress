@@ -54,6 +54,16 @@ export const CLI_HELP: readonly HelpSection[] = [
     ],
   },
   {
+    name: "residency audit",
+    blurb: "The check that this fortress holds what it is supposed to hold.",
+    entries: [
+      { usage: "hx-fortress audit witness show", summary: "report whether session ids are sent to let.ai during an audit" },
+      { usage: "hx-fortress audit witness on|off", summary: "turn that off, or back on" },
+      { usage: "hx-fortress audit acks reconcile", summary: "list acknowledgements with no matching record in this host's trail" },
+      { usage: "hx-fortress audit acks reconcile --re-confirm", summary: "write those acknowledgements again, through the fenced routine" },
+    ],
+  },
+  {
     name: "console users",
     blurb: "Who may sign in. No password is ever typed here.",
     entries: [

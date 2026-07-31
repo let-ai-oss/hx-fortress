@@ -61,6 +61,15 @@ import { getServiceManager } from "../service";
 import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-control";
 import { downloadBaseFromCloudUrl } from "../update";
 import { readConsoleAdvertisement } from "../ui/advertise";
+import { runAuditForFortress } from "../console/audit-runner";
+import { readAcknowledgements } from "../console/audit-store";
+import {
+  clearWitnessIntent,
+  publishAcks,
+  publishAuditSettings,
+  readWitnessIntent,
+} from "../console/witness-signal";
+import { sql as sqlTag } from "drizzle-orm";
 import { DaemonAudit } from "../console/daemon-audit";
 import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
 import { sweepCmdCreds } from "../console/cmd-creds";
@@ -634,6 +643,39 @@ export async function runFortressHost(
     },
     status: () => new FileStatusReader(paths.status).read().catch(() => null),
     embeddingEndpoint: () => (embedConfig.enabled ? embedConfig.baseUrl : null),
+    runAudit: () =>
+      runAuditForFortress({
+        db: () => (postgres.isReady() ? resolveHxDb() : null),
+        store: () => vaultModule.getStore(),
+        // No witness client on this build's tunnel yet: the engine reports the
+        // witness as unavailable by name, which is the honest answer and never
+        // reads as "let.ai holds no copy".
+        askWitness: null,
+        postureFresh: async () => false,
+        publish: (acks) =>
+          publishAcks(
+            paths.runtimeRoot,
+            acks.map((ack) => ({
+              org: ack.org,
+              sessionId: ack.sessionId,
+              acknowledgedAt: ack.acknowledgedAt,
+              acknowledgedBy: ack.acknowledgedBy,
+              reason: ack.reason,
+            })),
+          ),
+      }),
+    setCloudWitness: (enabled) => applyCloudWitness(enabled),
+    acknowledgeFinding: async ({ org, sessionId, reason }) => {
+      const db = postgres.isReady() ? resolveHxDb() : null;
+      if (!db) throw new Error("the fortress database is not available");
+      // Through the fenced routine, never a direct INSERT: an acknowledgement is
+      // not re-derivable, and one INSERT ... SELECT would acknowledge every
+      // residency finding this organization has, permanently.
+      await db.execute(
+        sqlTag`SELECT hx.acknowledge_finding(${org}, ${sessionId}, ${"console operator"}, ${reason})`,
+      );
+      await publishAcksFromDb();
+    },
     downloadBaseUrl: async () => {
       const loaded = await new FileConfigStore(paths).load().catch(() => null);
       if (!loaded?.cloud.url) return null;
@@ -689,6 +731,62 @@ export async function runFortressHost(
       });
     }
   }
+
+  /** Flip the egress toggle through the fenced routine, then republish it for
+   *  `hx-fortress audit witness show` — which has no database credential and
+   *  must not be given one. */
+  async function applyCloudWitness(enabled: boolean): Promise<void> {
+    const db = postgres.isReady() ? resolveHxDb() : null;
+    if (!db) throw new Error("the fortress database is not available");
+    await db.execute(sqlTag`SELECT hx.set_cloud_witness(${enabled})`);
+    await publishAuditSettings(paths.runtimeRoot, enabled);
+  }
+
+  async function publishAcksFromDb(): Promise<void> {
+    const db = postgres.isReady() ? resolveHxDb() : null;
+    if (!db) return;
+    const acks = await readAcknowledgements(db).catch(() => []);
+    await publishAcks(paths.runtimeRoot, acks);
+  }
+
+  /**
+   * The terminal's half of `audit witness on|off`, and of the corrective
+   * re-confirmation pass.
+   *
+   * The CLI writes its intent and signals; the daemon is what holds the database
+   * and what executes the fenced routine. That split is what keeps hx_ui the
+   * console process alone rather than every shell on this host.
+   */
+  async function applyWitnessIntent(): Promise<void> {
+    const intent = await readWitnessIntent(paths.runtimeRoot).catch(() => null);
+    if (!intent) return;
+    try {
+      await daemonAudit.run(
+        "system.audit_witness",
+        { engine: "audit witness", kind: intent.enabled ? "on" : "off" },
+        async () => {
+          await applyCloudWitness(intent.enabled);
+          for (const row of intent.reconfirm ?? []) {
+            const db = postgres.isReady() ? resolveHxDb() : null;
+            if (!db) break;
+            await db.execute(
+              sqlTag`SELECT hx.acknowledge_finding(${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason})`,
+            );
+          }
+          await publishAcksFromDb();
+          return { enabled: intent.enabled };
+        },
+      );
+    } catch (err) {
+      consoleLog.error("could not apply the audit witness intent", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    await clearWitnessIntent(paths.runtimeRoot).catch(() => {});
+  }
+
+  process.on("SIGUSR2", () => void applyWitnessIntent());
 
   const commandTimer = setInterval(() => void pollConsolePlane(), 1_000);
   (commandTimer as { unref?: () => void }).unref?.();
