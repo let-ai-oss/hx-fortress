@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { runCli } from "../src/cli";
 import { runUiCommand, type UiCommandDeps } from "../src/cli-ui";
@@ -10,6 +13,18 @@ const ASSETS: UiAssets = {
   inlineScriptHashes: [],
   manifest: { hash: "a".repeat(64), files: 16, bytes: 1_500_000 },
 };
+
+// The serving verb takes a root-scoped instance lock before it binds, so every
+// run needs a root of its own.
+let root: string;
+
+beforeAll(async () => {
+  root = await mkdtemp(path.join(os.tmpdir(), "hx-ui-verb-"));
+});
+
+afterAll(async () => {
+  await rm(root, { recursive: true, force: true });
+});
 
 interface Run {
   code: number;
@@ -28,6 +43,7 @@ async function runUi(
   const code = await runUiCommand(args, {
     writeLine: (line) => lines.push(line),
     env,
+    fortressRoot: await mkdtemp(path.join(root, "run-")),
     platform: "linux",
     hostName: "fortress-1",
     loadAssets: async () => ASSETS,
@@ -55,7 +71,7 @@ describe("hx-fortress ui", () => {
 
     const help: string[] = [];
     await runCli(["help"], { writeLine: (line) => help.push(line) });
-    expect(help.join("\n")).toContain(" ui ");
+    expect(help.join("\n")).toContain("hx-fortress ui ");
   });
 
   test("binds loopback by default and prints the URL plus the SSH forward", async () => {

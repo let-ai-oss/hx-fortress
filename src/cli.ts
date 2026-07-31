@@ -1,6 +1,7 @@
 import { startFortress, statusFortress, stopFortress } from "./cli-lifecycle";
 import { setFortressCredential } from "./cli-credentials";
 import { runUiCommand, type UiCommandDeps } from "./cli-ui";
+import { renderHelp } from "./ui/help";
 import {
   createProductionLogsDeps,
   logsCommand,
@@ -224,7 +225,10 @@ export async function runCli(
         return 0;
       }
       case "ui":
-        return await (dependencies.runUi ?? runUiCommand)(args.slice(1), { writeLine });
+        return await (dependencies.runUi ?? runUiCommand)(args.slice(1), {
+          writeLine,
+          fortressRoot: dependencies.fortressRoot,
+        });
       case "help":
       case "--help":
         printHelp(writeLine);
@@ -239,9 +243,10 @@ export async function runCli(
   }
 }
 
+/** One registry, rendered here and in the console's Command Line panel — the two
+ *  drifted when they were separate lists. */
 function printHelp(writeLine: (line: string) => void): void {
-  writeLine("hx-fortress");
-  writeLine("commands: enroll credentials start stop status logs ui update");
+  for (const line of renderHelp()) writeLine(line);
 }
 
 if (import.meta.main) {

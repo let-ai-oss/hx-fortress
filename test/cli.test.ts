@@ -33,7 +33,12 @@ describe("runCli", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(lines).toContain("commands: enroll credentials start stop status logs ui update");
+    // Rendered from the one help registry the console's Command Line panel also
+    // reads, so a verb can never exist in only one of the two.
+    const help = lines.join("\n");
+    for (const verb of ["enroll", "credentials set", "start", "stop", "status", "logs", "ui", "update"]) {
+      expect(help).toContain(`hx-fortress ${verb}`);
+    }
   });
 
   test("dispatches enroll with the token and cloud URL", async () => {

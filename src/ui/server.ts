@@ -14,16 +14,28 @@
 //   GET  /assets/*    → embedded static files
 //   GET  /fonts/*     → embedded static files
 //   GET  /healthz     → 200, empty    (platform health checks)
+//   GET  /ui/api/instance → the identity handshake, loopback peers only
 //   /ui/api/*         → 404 until a route claims it — an API namespace must
 //                       never answer a fetch with the HTML shell
+//
+// The Host allowlist is enforced in the serve shell rather than here, because it
+// re-reads ui.json per request and this handler is deliberately synchronous and
+// stateless. /healthz and the instance handshake are exempt: both answer before
+// any name for this console exists.
 
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
+import { normalizeAddress } from "./remote-key";
+import { INSTANCE_PROBE_IDENTITY } from "./routes";
+import type { UiRuntime } from "./runtime";
 
 export interface UiServerCtx {
   assets: UiAssets;
   /** The bound port — echoed nowhere, held for the checks that arrive with auth. */
   port: number;
+  /** Sessions, buckets, and the live view of ui.json. Absent in the asset-only
+   *  unit tests, which is why every use below is guarded. */
+  runtime?: UiRuntime;
 }
 
 // script-src carries exact hashes of any inline script in the shell instead of
@@ -40,11 +52,14 @@ export function cspFor(inlineScriptHashes: string[]): string {
   );
 }
 
-function finish(res: Response, cache: string, csp: string): Response {
+function finish(res: Response, cache: string, csp: string, hsts = false): Response {
   res.headers.set("content-security-policy", csp);
   res.headers.set("x-content-type-options", "nosniff");
   res.headers.set("referrer-policy", "no-referrer");
   res.headers.set("cache-control", cache);
+  // Sent only where the request actually arrived over https. Asserting it on a
+  // plain-http console would pin a browser to a scheme that console cannot serve.
+  if (hsts) res.headers.set("strict-transport-security", "max-age=31536000");
   return res;
 }
 
@@ -100,7 +115,22 @@ export function looksLikeAsset(pathname: string): boolean {
 /** Reserved for the console's own API; never served from the asset map. */
 const API_PREFIX = "/ui/api/";
 
-export function handleUiRequest(req: Request, ctx: UiServerCtx): Response {
+/** The identity handshake. Enumerated in the public route set, never audited. */
+export const INSTANCE_PROBE_PATH = "/ui/api/instance";
+
+/** The handshake and the health probe answer before this console has a name, so
+ *  neither can be gated on the Host allowlist. */
+export const HOST_EXEMPT_PATHS: ReadonlySet<string> = new Set(["/healthz", INSTANCE_PROBE_PATH]);
+
+const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/** Fail CLOSED on an unknown peer: without an address there is no proof the
+ *  caller is local, and the handshake exists only for a local caller. */
+export function isLoopbackPeer(peer: string | undefined): boolean {
+  return peer !== undefined && LOOPBACK_PEERS.has(normalizeAddress(peer));
+}
+
+export function handleUiRequest(req: Request, ctx: UiServerCtx, peer?: string): Response {
   const url = new URL(req.url);
   const path = url.pathname;
   const csp = cspFor(ctx.assets.inlineScriptHashes);
@@ -124,6 +154,22 @@ export function handleUiRequest(req: Request, ctx: UiServerCtx): Response {
 
   if (req.method !== "GET" && req.method !== "HEAD") {
     return finish(new Response("Method not allowed", { status: 405 }), "no-store", csp);
+  }
+
+  // An identity handshake and nothing else: no version, no org, no token, and no
+  // reissue of anything. It exists so a console refusing a busy port can say
+  // whether the occupant is another console or a stranger.
+  if (path === INSTANCE_PROBE_PATH) {
+    if (!isLoopbackPeer(peer)) {
+      return finish(new Response("Not found", { status: 404 }), "no-store", csp);
+    }
+    return finish(
+      new Response(`${JSON.stringify(INSTANCE_PROBE_IDENTITY)}\n`, {
+        headers: { "content-type": "application/json" },
+      }),
+      "no-store",
+      csp,
+    );
   }
 
   // Map lookup only — a request path is never joined onto the filesystem, and
@@ -161,18 +207,40 @@ export function handleUiRequest(req: Request, ctx: UiServerCtx): Response {
  * Bind and serve. `hostname` is 127.0.0.1 unless the bind rule widened it; a
  * container without IPv6 cannot bind "::", so that retries as IPv4-only rather
  * than leaving the console down.
+ *
+ * The Host allowlist is checked HERE, per request, against a live re-read of
+ * ui.json — so `ui config set publicUrl` lands on a running unit with no restart,
+ * and so a name nobody configured never reaches a handler. Without it, an
+ * attacker who points a hostname of their own at this address gets a same-origin
+ * page in a victim's browser, and same-origin policy is on their side.
  */
 export function startUiServer(
   ctx: UiServerCtx,
   hostname: string,
   fallbackHostname?: string,
 ): Server<undefined> {
+  const csp = cspFor(ctx.assets.inlineScriptHashes);
+  const answer = async (req: Request, peer: string | undefined): Promise<Response> => {
+    const runtime = ctx.runtime;
+    const path = new URL(req.url).pathname;
+    if (!runtime || HOST_EXEMPT_PATHS.has(path)) return handleUiRequest(req, ctx, peer);
+    const config = await runtime.readConfig();
+    const host = runtime.hostCheck(req, config, ctx.port);
+    if (!host.ok) {
+      return finish(new Response(host.reason, { status: 400 }), "no-store", csp);
+    }
+    const response = handleUiRequest(req, ctx, peer);
+    if (host.scheme === "https") {
+      response.headers.set("strict-transport-security", "max-age=31536000");
+    }
+    return response;
+  };
   const serveOn = (host: string): Server<undefined> => {
     try {
       return Bun.serve({
         hostname: host,
         port: ctx.port,
-        fetch: (req) => handleUiRequest(req, ctx),
+        fetch: (req, server) => answer(req, server.requestIP(req)?.address),
       });
     } catch (err) {
       if (fallbackHostname && host !== fallbackHostname) return serveOn(fallbackHostname);
