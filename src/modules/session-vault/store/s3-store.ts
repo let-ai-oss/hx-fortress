@@ -30,9 +30,13 @@ import {
   ListObjectVersionsCommand,
   DeleteObjectsCommand,
   type S3ClientConfig,
+  GetBucketVersioningCommand,
+  GetBucketLifecycleConfigurationCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { BUCKET_CONFIG_UNAVAILABLE } from "./types.js";
 import type {
+  BucketConfigFact,
   AppendOptions,
   ComposeResult,
   DeleteSessionOptions,
@@ -329,6 +333,36 @@ export class S3Store implements SessionStore {
    *  the old pool (S3Client owns its handler, unlike GCS's shared agent). */
   destroyClient(): void {
     this.s3.destroy();
+  }
+
+  /** s3:GetBucketVersioning. The fortress key is provisioned for objects, so
+   *  this is expected to be refused on most deployments - which is a fact the
+   *  report states rather than a failure it hides. */
+  async getBucketVersioning(): Promise<BucketConfigFact> {
+    try {
+      const res = await this.s3.send(new GetBucketVersioningCommand({ Bucket: this.bucket }));
+      return res.Status ?? "Unversioned";
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
+  }
+
+  /** s3:GetLifecycleConfiguration. A bucket with no rules answers with an error
+   *  rather than an empty list, so "none" cannot be distinguished from "not
+   *  permitted" here - and claiming either would be an invention. */
+  async getLifecycle(): Promise<BucketConfigFact> {
+    try {
+      const res = await this.s3.send(
+        new GetBucketLifecycleConfigurationCommand({ Bucket: this.bucket }),
+      );
+      const rules = res.Rules ?? [];
+      if (rules.length === 0) return "no lifecycle rules";
+      return rules
+        .map((r) => `${r.ID ?? "(unnamed)"}: ${r.Status ?? "unknown"}`)
+        .join("; ");
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
   }
 
   async selfTest(): Promise<void> {

@@ -12,8 +12,10 @@
 // bucket AND a customer's bucket inside a self-hosted vault.
 
 import { Storage, type StorageOptions, type Bucket } from "@google-cloud/storage";
+import { BUCKET_CONFIG_UNAVAILABLE } from "./types.js";
 import type {
   AppendOptions,
+  BucketConfigFact,
   ComposeResult,
   DeleteSessionOptions,
   DeleteSessionResult,
@@ -313,6 +315,32 @@ export class GcsStore implements SessionStore {
       }
     }
     return { complete: true, deleted };
+  }
+
+  /** storage.buckets.get. Refused for an object-scoped key, which is the
+   *  common case and an answer in itself. */
+  async getBucketVersioning(): Promise<BucketConfigFact> {
+    try {
+      const [metadata] = await this.bucket().getMetadata();
+      return metadata.versioning?.enabled ? "Enabled" : "Unversioned";
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
+  }
+
+  /** The bucket's lifecycle rules, as the provider reports them. An empty rule
+   *  set IS distinguishable here, unlike on S3, so it is reported as such. */
+  async getLifecycle(): Promise<BucketConfigFact> {
+    try {
+      const [metadata] = await this.bucket().getMetadata();
+      const rules = metadata.lifecycle?.rule ?? [];
+      if (rules.length === 0) return "no lifecycle rules";
+      return rules
+        .map((r) => `${r.action?.type ?? "unknown"} after ${r.condition?.age ?? "?"} days`)
+        .join("; ");
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
   }
 
   async selfTest(): Promise<void> {

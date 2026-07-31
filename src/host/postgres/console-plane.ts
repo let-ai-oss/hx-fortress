@@ -115,6 +115,38 @@ export const UI_SESSION_COLUMNS = [
   "deleted_at",
 ] as const;
 
+/** hx.embeddings columns the console may read. The VECTOR is excluded, and so
+ *  is `content_hash`: an embedding is a lossy encoding of the transcript it was
+ *  computed from, and a hash of that text is a membership oracle over it. The
+ *  console renders coverage — how many turns are embedded, under which model —
+ *  and coverage needs neither. */
+export const UI_EMBEDDING_COLUMNS = [
+  "id",
+  "owner_kind",
+  "owner_id",
+  "model",
+  "dim",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+] as const;
+
+/** The dimension and fact tables the console reads whole. Every one of them is
+ *  metadata by construction — names, ids, counts, timestamps — so a table-level
+ *  SELECT discloses nothing a column grant would withhold. hx.turns,
+ *  hx.tool_calls and hx.session_agents are absent, and stay absent: those ARE
+ *  the transcript. */
+export const UI_READ_TABLES = [
+  "users",
+  "orgs",
+  "projects",
+  "repos",
+  "devices",
+  "models",
+  "session_facts",
+  "deleted_sessions",
+] as const;
+
 /** Views hx_ui may read. EMPTY by construction: hx.v_turn_search is an
  *  owner-rights view over transcript turns, which would hand the console
  *  exactly the text the column-level grant above withholds. Any future view
@@ -133,6 +165,10 @@ export const UI_TABLE_GRANTS: ReadonlyArray<{ table: string; privileges: readonl
   { table: "ingest_control", privileges: ["SELECT"] },
   { table: "audit_acks", privileges: ["SELECT"] },
   { table: "audit_settings", privileges: ["SELECT"] },
+  // The console's own read surface: sessions are column-level (below), and
+  // everything the session rows point AT is metadata the console renders by
+  // name — a person, a device, a repository, a project.
+  ...UI_READ_TABLES.map((table) => ({ table, privileges: ["SELECT"] as readonly string[] })),
 ];
 
 // ── The five SECURITY DEFINER routines ───────────────────────────────────────
@@ -413,8 +449,10 @@ export function revokeStatements(uiExtras: readonly string[] = [], views: readon
     }
   }
   // Clear any table-level SELECT on hx.sessions before the column grants below —
-  // a table-level grant would include the two transcript-text columns.
+  // a table-level grant would include the two transcript-text columns. Same for
+  // hx.embeddings, whose vector column encodes the text those columns hold.
   out.push(`REVOKE ALL ON ${PG_SCHEMA}.sessions FROM ${PG_UI_ROLE}`);
+  out.push(`REVOKE ALL ON ${PG_SCHEMA}.embeddings FROM ${PG_UI_ROLE}`);
   // Views are owner-rights and can read straight past a column grant, so the
   // console is denied every one that is not deliberately allowlisted.
   for (const view of views) {
@@ -438,6 +476,7 @@ export function columnGrantStatements(): string[] {
     `GRANT INSERT (${INGEST_CONTROL_INSERT_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.ingest_control TO ${PG_APP_RW_ROLE}`,
     `GRANT UPDATE (${INGEST_CONTROL_UPDATE_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.ingest_control TO ${PG_APP_RW_ROLE}`,
     `GRANT SELECT (${UI_SESSION_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.sessions TO ${PG_UI_ROLE}`,
+    `GRANT SELECT (${UI_EMBEDDING_COLUMNS.join(", ")}) ON ${PG_SCHEMA}.embeddings TO ${PG_UI_ROLE}`,
   ];
 }
 
@@ -524,7 +563,7 @@ export interface Preflight {
  *  not cover — the enumerate-extras-to-revoke sweep. information_schema is used
  *  ONLY here; every assertion uses the inheritance-aware has_*_privilege(). */
 export function uiExtraGrantsQuery(): string {
-  const allowed = [...UI_TABLE_GRANTS.map((g) => g.table), "sessions"]
+  const allowed = [...UI_TABLE_GRANTS.map((g) => g.table), "sessions", "embeddings"]
     .map((t) => `'${t}'`)
     .join(", ");
   return `SELECT DISTINCT table_name AS name

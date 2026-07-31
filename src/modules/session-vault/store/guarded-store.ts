@@ -17,6 +17,7 @@
 
 import type {
   AppendOptions,
+  BucketConfigFact,
   ComposeResult,
   DeleteSessionOptions,
   DeleteSessionResult,
@@ -222,6 +223,12 @@ export class GuardedStore implements SessionStore {
   }
   listAllCanonicalKeys(): Promise<SessionKey[]> {
     return this.guard("listAllCanonicalKeys", this.scanTimeoutMs, (s) => s.listAllCanonicalKeys());
+  }
+  getBucketVersioning(): Promise<BucketConfigFact> {
+    return this.guard("getBucketVersioning", this.opTimeoutMs, (s) => s.getBucketVersioning());
+  }
+  getLifecycle(): Promise<BucketConfigFact> {
+    return this.guard("getLifecycle", this.opTimeoutMs, (s) => s.getLifecycle());
   }
   selfTest(): Promise<void> {
     return this.guard("selfTest", this.opTimeoutMs, (s) => s.selfTest());

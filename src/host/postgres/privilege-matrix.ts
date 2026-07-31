@@ -17,6 +17,7 @@ import {
   CONSOLE_ROUTINES,
   INGEST_CONTROL_ANCHOR_COLUMN,
   PG_UI_ROLE,
+  UI_READ_TABLES,
   routineSignature,
 } from "./console-plane";
 
@@ -55,8 +56,19 @@ const TABLE_EXPECTATIONS: readonly TableExpectation[] = [
     ),
   ),
   // Transcript text is column-level for the console, so the TABLE grant is
-  // absent — has_table_privilege returns FALSE for a column-only grant.
+  // absent — has_table_privilege returns FALSE for a column-only grant. Same
+  // for embeddings, whose vector encodes that text.
   { role: PG_UI_ROLE, table: "sessions", granted: [] },
+  { role: PG_UI_ROLE, table: "embeddings", granted: [] },
+  // Read-only, and only read: the console renders these, it never writes them.
+  ...UI_READ_TABLES.map((table) => ({ role: PG_UI_ROLE, table, granted: ["SELECT"] as readonly string[] })),
+  // The transcript itself, at every spelling. The extras sweep would revoke a
+  // stray grant; asserting it means a boot that failed to sweep says so.
+  ...["turns", "tool_calls", "session_agents"].map((table) => ({
+    role: PG_UI_ROLE,
+    table,
+    granted: [] as readonly string[],
+  })),
 ];
 
 interface ColumnExpectation {
@@ -82,6 +94,11 @@ const COLUMN_EXPECTATIONS: readonly ColumnExpectation[] = [
   { role: PG_UI_ROLE, table: "sessions", column: "ingest_channel", privilege: "SELECT", expected: true },
   { role: PG_UI_ROLE, table: "sessions", column: "last_user_text", privilege: "SELECT", expected: false },
   { role: PG_UI_ROLE, table: "sessions", column: "last_assistant_text", privilege: "SELECT", expected: false },
+  // Coverage is countable; the vector and the content hash are not readable.
+  { role: PG_UI_ROLE, table: "embeddings", column: "owner_kind", privilege: "SELECT", expected: true },
+  { role: PG_UI_ROLE, table: "embeddings", column: "model", privilege: "SELECT", expected: true },
+  { role: PG_UI_ROLE, table: "embeddings", column: "embedding", privilege: "SELECT", expected: false },
+  { role: PG_UI_ROLE, table: "embeddings", column: "content_hash", privilege: "SELECT", expected: false },
 ];
 
 /** EXECUTE on the transition routines: the daemon by necessity (it IS the

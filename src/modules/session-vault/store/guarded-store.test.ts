@@ -4,6 +4,7 @@
 // a wedged write path, and stale clients must not charge fresh ones.
 import { describe, expect, it } from "bun:test";
 import { GuardedStore, StoreDeadlineError, type GuardedStoreOptions } from "./guarded-store.js";
+import { BUCKET_CONFIG_UNAVAILABLE } from "./types.js";
 import type { SessionStore } from "./types.js";
 
 const KEY = { userId: "u", family: "claude-cli", sessionId: "s" };
@@ -17,6 +18,8 @@ function stubStore(delays: { read?: number; write?: number }, onBuild?: () => vo
   return {
     statCanonical: () => after(delays.read ?? 0, 1),
     selfTest: () => after(delays.write ?? 0, undefined) as Promise<void>,
+    getBucketVersioning: async () => BUCKET_CONFIG_UNAVAILABLE,
+    getLifecycle: async () => BUCKET_CONFIG_UNAVAILABLE,
     listAllCanonicalKeys: () => after(delays.read ?? 0, []),
     appendChunkToCanonical: () => Promise.reject(new Error("backend_says_no")),
     signStagingUpload: never,

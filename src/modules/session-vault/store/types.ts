@@ -81,6 +81,22 @@ export interface DeleteSessionOptions {
   batchLimit?: number;
 }
 
+/**
+ * The one honest answer when the bucket's configuration cannot be read.
+ *
+ * The fortress key is provisioned for OBJECT access. Reading a bucket's
+ * versioning or lifecycle policy is a bucket-level permission the customer never
+ * granted, and asking for it would widen the credential to make a compliance
+ * report prettier. So the report says what is true - it could not check - rather
+ * than "versioning: off", which is a claim about the bucket the fortress is in
+ * no position to make.
+ */
+export const BUCKET_CONFIG_UNAVAILABLE =
+  "unavailable - the fortress key cannot read bucket configuration";
+
+/** A provider-read bucket fact: the value, or the honest unavailable string. */
+export type BucketConfigFact = string;
+
 export interface SessionStore {
   /** Mint a signed PUT URL for a staging chunk. The caller PUTs raw NDJSON bytes. */
   signStagingUpload(key: SessionKey, chunkId: string, opts?: StagingUploadOptions): Promise<SignedUpload>;
@@ -116,6 +132,14 @@ export interface SessionStore {
    *  the G reconciler's orphan anti-join. Whole-bucket scan; agent lanes appear
    *  as their `:a:` composite sessionId. */
   listAllCanonicalKeys(): Promise<SessionKey[]>;
+  /** Whether the bucket keeps noncurrent versions, as the provider reports it.
+   *  Read rather than assumed: the compliance report's residency line turns on
+   *  it, and both provisioners enable versioning, so an assumption would be
+   *  right until somebody pointed the fortress at a bucket they made by hand. */
+  getBucketVersioning(): Promise<BucketConfigFact>;
+  /** The bucket's lifecycle policy, as the provider reports it. Objects under an
+   *  expiring rule are objects that will leave without anybody deleting them. */
+  getLifecycle(): Promise<BucketConfigFact>;
   /** Prove the bucket + credentials actually work: write→read→delete a
    *  throwaway probe object. Throws on any failure. Run at enroll time (so a
    *  bad bucket/permission surfaces immediately, not at the first session) and

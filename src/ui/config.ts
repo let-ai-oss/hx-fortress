@@ -28,6 +28,7 @@ import { stat } from "node:fs/promises";
 
 import { detectContainer, type ContainerVerdict } from "./container";
 import { DEFAULT_UI_PORT, LOOPBACK_BIND, parsePublicUrl, resolveUiBind } from "./bind";
+import { remoteKeySourceLine } from "./remote-key";
 import { JsonCasStore, StoreCorruptError, type LockReclaim } from "./store-lock";
 
 export interface UiConfig {
@@ -410,7 +411,11 @@ export function printableUiConfig(config: UiConfig): Array<[string, string]> {
     ["bind", config.bind],
     ["port", String(config.port)],
     ["publicUrl", config.publicUrl ?? "(unset)"],
-    ["trustedProxies", config.trustedProxies.length ? config.trustedProxies.join(", ") : "(none — X-Forwarded-For ignored)"],
+    ["trustedProxies", config.trustedProxies.length ? config.trustedProxies.join(", ") : "(none)"],
+    // The same sentence the data-paths inventory renders: whether XFF is honored
+    // is the difference between per-principal rate limits and one shared bucket,
+    // and its default is a silent failure behind any proxy.
+    ["remote-key source", remoteKeySourceLine(config.trustedProxies)],
     ["sso", String(config.sso)],
     ["sessionTtlHours", String(config.sessionTtlHours)],
     ["sessionIdleMinutes", String(config.sessionIdleMinutes)],

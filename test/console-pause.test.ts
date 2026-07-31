@@ -197,6 +197,14 @@ class RecordingStore implements SessionStore {
     this.calls.push("listSessionMetadata");
     return Promise.resolve([]);
   }
+  getBucketVersioning(): Promise<string> {
+    this.calls.push("getBucketVersioning");
+    return Promise.resolve("Enabled");
+  }
+  getLifecycle(): Promise<string> {
+    this.calls.push("getLifecycle");
+    return Promise.resolve("no lifecycle rules");
+  }
   listAllCanonicalKeys(): Promise<SessionKey[]> {
     this.calls.push("listAllCanonicalKeys");
     return Promise.resolve([]);

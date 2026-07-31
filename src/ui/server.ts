@@ -26,6 +26,7 @@
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
 import { handleAuthRoute } from "./auth-routes";
+import { handleReadRoute, type ConsoleExportAudit, type ConsoleReadPort } from "./read-routes";
 import { normalizeAddress } from "./remote-key";
 import { INSTANCE_PROBE_IDENTITY } from "./routes";
 import type { UiRuntime } from "./runtime";
@@ -37,6 +38,10 @@ export interface UiServerCtx {
   /** Sessions, buckets, and the live view of ui.json. Absent in the asset-only
    *  unit tests, which is why every use below is guarded. */
   runtime?: UiRuntime;
+  /** The console's read surface. Absent until the daemon plane is wired, in
+   *  which case those paths answer 404 to a signed-in caller and 401 to
+   *  everyone else - never the app shell. */
+  read?: { port: ConsoleReadPort; audit: ConsoleExportAudit };
 }
 
 // script-src carries exact hashes of any inline script in the shell instead of
@@ -258,6 +263,22 @@ export function startUiServer(
       remoteAddr: peer ?? "",
     });
     if (authenticated) return finish(authenticated, "no-store", csp, hsts);
+
+    if (ctx.read && verdict.session) {
+      const read = await handleReadRoute(req, {
+        port: ctx.read.port,
+        audit: ctx.read.audit,
+        actor: verdict.session.userLogin,
+        sessionId: verdict.session.id,
+        streams: runtime.streams,
+      });
+      // An event stream is a live body: finish() would set cache headers on a
+      // response that is already flowing, and the CSP belongs to documents.
+      if (read) {
+        if (read.headers.get("content-type") === "text/event-stream") return read;
+        return finish(read, "no-store", csp, hsts);
+      }
+    }
 
     const response = handleUiRequest(req, ctx, peer);
     if (hsts) response.headers.set("strict-transport-security", "max-age=31536000");

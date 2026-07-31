@@ -54,6 +54,8 @@ function claudeCanonical(aiTitle: string): string {
 function memStore(canonicals: Map<string, string>): SessionStore {
   return {
     signStagingUpload: async () => ({ url: "", objectName: "", expiresAt: "" }),
+    getBucketVersioning: async () => "Enabled",
+    getLifecycle: async () => "no lifecycle rules",
     readChunkText: async () => "",
     appendChunkToCanonical: async () => ({ totalBytes: 0, componentCount: 1 }),
     statCanonical: async () => null,

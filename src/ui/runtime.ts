@@ -20,6 +20,8 @@ import { LiveUiConfig, effectiveUiEnabled, type UiConfig } from "./config";
 import { buildHostAllowlist, checkHost, checkOrigin, type HostCheck } from "./origin";
 import { RateLimiter, LockoutTable, type LockoutSnapshot } from "./rate-limit";
 import { remoteKeyFor, normalizeAddress } from "./remote-key";
+import { EventStreamRegistry } from "./events";
+import { READ_ROUTES } from "./read-routes";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
 import { SESSION_HEADER, SessionTable, type SessionPolicy, type UiSession } from "./sessions";
 import {
@@ -57,6 +59,7 @@ export class UiRuntime {
   readonly lockouts = new LockoutTable();
   readonly argon = new ArgonGate();
   readonly routes = new RouteRegistry();
+  readonly streams = new EventStreamRegistry();
   readonly config: LiveUiConfig;
   readonly users: UsersStore;
   private readonly live: LiveUsers;
@@ -68,6 +71,15 @@ export class UiRuntime {
     this.config = new LiveUiConfig(options.uiConfigFile, options.onWarn);
     this.users = new UsersStore(path.join(options.uiRoot, "users.json"));
     this.live = new LiveUsers(this.users);
+    // Classified whether or not anything is wired to serve them. An
+    // unclassified path falls to `mutate`, which answers an unauthenticated
+    // caller with 401 - but it would answer a READONLY signed-in one with 403,
+    // and a read surface that refuses its own auditors is a bug nobody would
+    // find until a compliance review.
+    for (const route of READ_ROUTES) this.routes.register(route);
+    // A session that stops existing takes its open streams with it. Registered
+    // here rather than at each open, so no future caller can forget it.
+    this.streams.attachRevocation((listener) => this.sessions.onDrop((session) => listener(session)));
   }
 
   private now(): number {

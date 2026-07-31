@@ -10,6 +10,7 @@
 
 import { PauseState } from "./ingest-control";
 import type {
+  BucketConfigFact,
   AppendOptions,
   ComposeResult,
   DeleteSessionOptions,
@@ -216,6 +217,15 @@ export class PauseGatedStore implements SessionStore {
   }
   readArtifactText(key: SessionKey, name: string): Promise<string | null> {
     return this.inner.readArtifactText(key, name);
+  }
+  // Bucket-configuration reads. Ungated on purpose: the pause exists to hold the
+  // OBJECT SET still while a migration copies it, and reading a policy neither
+  // moves an object nor lengthens the barrier.
+  getBucketVersioning(): Promise<BucketConfigFact> {
+    return this.inner.getBucketVersioning();
+  }
+  getLifecycle(): Promise<BucketConfigFact> {
+    return this.inner.getLifecycle();
   }
   listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
     return this.inner.listSessionMetadata(userId);

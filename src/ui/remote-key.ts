@@ -132,3 +132,32 @@ export function remoteKeyFor(inputs: RemoteKeyInputs): string {
   }
   return peer;
 }
+
+
+/**
+ * Which address the sign-in limits are actually keyed on.
+ *
+ * Printed by `hx-fortress ui config` and rendered in the Console-listener row of
+ * the data-paths inventory, from ONE function, because the default is a silent
+ * failure otherwise: behind a platform proxy with no trustedProxies configured,
+ * every request arrives from the same peer, every rate and lockout key collapses
+ * onto it, and one attacker locks out the organization. Nothing fails, nothing
+ * logs, and the value that fixes it is one the corpus never said how to obtain.
+ */
+export function remoteKeySourceLine(
+  trustedProxies: readonly string[],
+  observedPeer?: string,
+): string {
+  if (trustedProxies.length === 0) {
+    const keyedOn = observedPeer ? observedPeer : "the socket peer address";
+    return (
+      `X-Forwarded-For ignored - all sign-in limits keyed on ${keyedOn}. ` +
+      "Behind a proxy or a platform edge, set `hx-fortress ui config set trustedProxies <csv>` or every " +
+      "key collapses onto that one address."
+    );
+  }
+  return (
+    `X-Forwarded-For honored via trustedProxies (${trustedProxies.join(", ")}) - the walk is rightmost ` +
+    "to left, skipping trusted entries, so a client-supplied prefix cannot change the key."
+  );
+}

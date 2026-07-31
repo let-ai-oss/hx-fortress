@@ -68,9 +68,44 @@ function digestsEqual(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/** Why a session stopped existing. Handed to every drop listener so a reader
+ *  being closed can say which of them happened. */
+export type SessionDropReason = SessionRefusal | "revoked" | "logout" | "shutdown";
+
+export type SessionDropListener = (session: UiSession, reason: SessionDropReason) => void;
+
 export class SessionTable {
   /** Keyed by token digest, so a table dump is not a set of live tokens. */
   private readonly byDigest = new Map<string, UiSession>();
+  private readonly dropListeners = new Set<SessionDropListener>();
+
+  /**
+   * Be told when a session goes away.
+   *
+   * Sessions are the only revocation channel there is - a disable, a delete, a
+   * password change and a logout all land here as a delete from the map - so
+   * anything holding an open connection on a session's behalf has to learn about
+   * it from this table. Without the seam, a long-lived reader would keep
+   * streaming to a principal whose account was disabled minutes ago, and the
+   * only bound would be its own idle timeout.
+   */
+  onDrop(listener: SessionDropListener): () => void {
+    this.dropListeners.add(listener);
+    return () => this.dropListeners.delete(listener);
+  }
+
+  /** The ONE removal path. Every deletion goes through it so no future edit can
+   *  drop a session without telling the readers attached to it. */
+  private drop(key: string, session: UiSession, reason: SessionDropReason): void {
+    this.byDigest.delete(key);
+    for (const listener of this.dropListeners) {
+      try {
+        listener(session, reason);
+      } catch {
+        // A listener that throws must not keep a revocation from completing.
+      }
+    }
+  }
 
   issue(args: {
     user: UiUser;
@@ -122,29 +157,29 @@ export class SessionTable {
     if (!session || !key) return { ok: false, reason: "unknown-session" };
 
     if (now - session.createdAt >= policy.ttlHours * 3_600_000) {
-      this.byDigest.delete(key);
+      this.drop(key, session, "expired");
       return { ok: false, reason: "expired" };
     }
     if (now - session.lastSeenAt >= policy.idleMinutes * 60_000) {
-      this.byDigest.delete(key);
+      this.drop(key, session, "idle");
       return { ok: false, reason: "idle" };
     }
     if (session.sessionEpoch < file.sessionEpoch) {
-      this.byDigest.delete(key);
+      this.drop(key, session, "revoked");
       return { ok: false, reason: "revoked" };
     }
 
     const user = file.users.find((u) => u.login === session.userLogin);
     if (!user || user.deletedAt) {
-      this.byDigest.delete(key);
+      this.drop(key, session, "user-gone");
       return { ok: false, reason: "user-gone" };
     }
     if (user.disabledAt) {
-      this.byDigest.delete(key);
+      this.drop(key, session, "user-disabled");
       return { ok: false, reason: "user-disabled" };
     }
     if (user.credentialEpoch > session.credentialEpoch || user.pwdVersion > session.pwdVersion) {
-      this.byDigest.delete(key);
+      this.drop(key, session, "credentials-changed");
       return { ok: false, reason: "credentials-changed" };
     }
 
@@ -159,10 +194,10 @@ export class SessionTable {
     return [...this.byDigest.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   }
 
-  revoke(id: string): boolean {
+  revoke(id: string, reason: SessionDropReason = "revoked"): boolean {
     for (const [digest, session] of this.byDigest) {
       if (session.id === id) {
-        this.byDigest.delete(digest);
+        this.drop(digest, session, reason);
         return true;
       }
     }
@@ -173,16 +208,19 @@ export class SessionTable {
     let revoked = 0;
     for (const [digest, session] of this.byDigest) {
       if (session.userLogin === login) {
-        this.byDigest.delete(digest);
+        this.drop(digest, session, "revoked");
         revoked += 1;
       }
     }
     return revoked;
   }
 
-  revokeAll(): number {
-    const count = this.byDigest.size;
-    this.byDigest.clear();
+  revokeAll(reason: SessionDropReason = "revoked"): number {
+    let count = 0;
+    for (const [digest, session] of this.byDigest) {
+      this.drop(digest, session, reason);
+      count += 1;
+    }
     return count;
   }
 
@@ -194,7 +232,7 @@ export class SessionTable {
       const expired = now - session.createdAt >= policy.ttlHours * 3_600_000;
       const idle = now - session.lastSeenAt >= policy.idleMinutes * 60_000;
       if (expired || idle) {
-        this.byDigest.delete(digest);
+        this.drop(digest, session, expired ? "expired" : "idle");
         dropped += 1;
       }
     }
