@@ -216,6 +216,9 @@ export class GuardedStore implements SessionStore {
   readArtifactText(key: SessionKey, name: string): Promise<string | null> {
     return this.guard("readArtifactText", this.opTimeoutMs, (s) => s.readArtifactText(key, name));
   }
+  listSessionArtifacts(key: SessionKey): Promise<string[]> {
+    return this.guard("listSessionArtifacts", this.opTimeoutMs, (s) => s.listSessionArtifacts(key));
+  }
   listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
     // Scan class: one sequential metadata read per session — a few thousand
     // sessions on a direct-gateway list legitimately exceeds the heavy budget.

@@ -54,10 +54,7 @@ export type MigrationPhase =
   | "done"
   | "aborted";
 
-/** The sidecar names a session can carry. Copied alongside the canonical: an
- *  object that exists in the source and not in the target after the cut is a
- *  loss, whatever its name. */
-export const MIGRATION_ARTIFACTS: readonly string[] = ["session.json", "tasks.json", "plan.json"];
+
 
 /** How long the pause is armed for the cut. Deliberately far inside the daemon's
  *  own pause cap: this is a barrier plus a final delta, not a maintenance
@@ -136,7 +133,6 @@ export interface MigrationDeps {
   onEvent?: (event: MigrationEvent) => void;
   clock?: () => Date;
   sleep?: (ms: number) => Promise<void>;
-  artifacts?: readonly string[];
   swapPauseMs?: number;
   barrierMs?: number;
   maxDeltaPasses?: number;
@@ -158,12 +154,17 @@ function sha256(text: string): string {
  * else, is exactly the failure a migration must not carry forward. A mismatch
  * throws, and the run aborts rather than continuing over a target it can no
  * longer trust.
+ *
+ * THE SIDECARS ARE ENUMERATED, never listed by name. `workflow-<runId>.json` is
+ * an unbounded class of reachable writes, so any fixed list of names is a list
+ * that silently leaves objects in the bucket this fortress is moving away from.
+ * A read that fails after the listing offered the name is an ERROR rather than
+ * an absence — dropping it is the loss this whole function exists to prevent.
  */
 export async function copySession(
   source: SessionStore,
   target: SessionStore,
   key: SessionKey,
-  artifacts: readonly string[] = MIGRATION_ARTIFACTS,
 ): Promise<CopiedObject> {
   const text = await source.readCanonicalText(key);
   await target.writeCanonicalText(key, text);
@@ -174,8 +175,10 @@ export async function copySession(
       `checksum mismatch after copying ${sessionRef(key)} — the target holds different bytes`,
     );
   }
-  for (const name of artifacts) {
-    const artifact = await source.readArtifactText(key, name).catch(() => null);
+  for (const name of await source.listSessionArtifacts(key)) {
+    const artifact = await source.readArtifactText(key, name);
+    // Null only where a delete landed between the listing and the read; there is
+    // nothing left to carry, and the tombstone replay is what agrees with it.
     if (artifact === null) continue;
     await target.writeArtifact(key, name, artifact);
   }
@@ -192,7 +195,7 @@ export async function copySession(
 export async function runStorageMigration(deps: MigrationDeps): Promise<MigrationResult> {
   const clock = deps.clock ?? ((): Date => new Date());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const artifacts = deps.artifacts ?? MIGRATION_ARTIFACTS;
+
   const emit = (event: MigrationEvent): void => deps.onEvent?.(event);
 
   const result: MigrationResult = {
@@ -233,7 +236,7 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
         const bytes = await deps.target.statCanonical(key);
         if (bytes !== null) continue;
       }
-      const object = await copySession(deps.source, deps.target, key, artifacts);
+      const object = await copySession(deps.source, deps.target, key);
       done.add(ref);
       copied += 1;
       result.sessionsCopied += 1;
@@ -355,9 +358,8 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
         // The swap already happened, so this is a report and not a rollback: the
         // source is untouched and still holds everything, which is what makes
         // going back a credentials change rather than a recovery.
-        result.aborted = `${missing.length} session(s) are not readable in the new bucket: ${missing
+        result.aborted = `${missing.length} object(s) are not readable in the new bucket: ${missing
           .slice(0, 5)
-          .map(sessionRef)
           .join(", ")}`;
       }
       result.phase = "done";
@@ -395,14 +397,30 @@ async function replayTombstones(
   return removed;
 }
 
-/** Everything the source holds that the new binding cannot read. Re-listed
- *  rather than taken from the run's own counters: the question is what the
- *  fortress can serve now, and only the bucket can answer it. */
-async function verifyTarget(deps: MigrationDeps): Promise<SessionKey[]> {
+/**
+ * Every OBJECT the source holds that the new binding cannot read.
+ *
+ * Re-listed rather than taken from the run's own counters: the question is what
+ * the fortress can serve now, and only the bucket can answer it. Object SETS
+ * rather than canonicals — a verification that compared one object per session
+ * would report a clean switch over a target missing every sidecar, which is the
+ * shape the loss took when the copy walked three fixed names.
+ */
+async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
   const keys = await deps.source.listAllCanonicalKeys();
-  const missing: SessionKey[] = [];
+  const missing: string[] = [];
   for (const key of keys) {
-    if ((await deps.target.statCanonical(key)) === null) missing.push(key);
+    const ref = sessionRef(key);
+    if ((await deps.target.statCanonical(key)) === null) {
+      // The session itself is gone; naming each of its sidecars as well would
+      // say the same thing several times.
+      missing.push(ref);
+      continue;
+    }
+    const landed = new Set(await deps.target.listSessionArtifacts(key));
+    for (const name of await deps.source.listSessionArtifacts(key)) {
+      if (!landed.has(name)) missing.push(`${ref}/${name}`);
+    }
   }
   return missing;
 }

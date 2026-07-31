@@ -58,7 +58,9 @@ import {
   canonicalObject,
   listPrefix,
   parseCanonicalKey,
+  sessionArtifactNames,
   sessionDeletePrefixes,
+  sessionPrefix,
   stagingObject,
 } from "./keys.js";
 import { clampStagingTtl, maxCanonicalBytes } from "./limits.js";
@@ -273,6 +275,20 @@ export class S3Store implements SessionStore {
       if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
     }
     return out;
+  }
+
+  async listSessionArtifacts(key: SessionKey): Promise<string[]> {
+    const prefix = `${sessionPrefix(key)}/`;
+    const names: string[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(
+        new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: token }),
+      );
+      for (const obj of page.Contents ?? []) names.push(obj.Key ?? "");
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    return sessionArtifactNames(names, prefix);
   }
 
   async listAllCanonicalKeys(): Promise<SessionKey[]> {

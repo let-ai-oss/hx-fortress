@@ -68,6 +68,7 @@ function memStore(canonicals: Map<string, string>): SessionStore {
     writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => null,
+    listSessionArtifacts: async () => [],
     listSessionMetadata: async () => [],
     selfTest: async () => {},
     deleteSession: async () => ({ complete: true, deleted: 0 }),

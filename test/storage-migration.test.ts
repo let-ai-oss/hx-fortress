@@ -15,7 +15,6 @@ import type { SQL } from "drizzle-orm";
 
 import {
   FENCE_MARGIN_MS,
-  MIGRATION_ARTIFACTS,
   copySession,
   runStorageMigration,
   sessionRef,
@@ -123,6 +122,15 @@ class MemoryStore implements SessionStore {
   }
   readArtifactText(k: SessionKey, name: string): Promise<string | null> {
     return Promise.resolve(this.artifacts.get(`${this.ref(k)}/${name}`) ?? null);
+  }
+  listSessionArtifacts(k: SessionKey): Promise<string[]> {
+    const prefix = `${this.ref(k)}/`;
+    return Promise.resolve(
+      [...this.artifacts.keys()]
+        .filter((name) => name.startsWith(prefix))
+        .map((name) => name.slice(prefix.length))
+        .sort(),
+    );
   }
   listSessionMetadata(): Promise<SessionMetadata[]> {
     return Promise.resolve([]);
@@ -447,16 +455,38 @@ describe("what the source is never asked to do", () => {
 });
 
 describe("one session", () => {
-  test("carries its sidecars, and skips the ones it has none of", async () => {
+  test("carries every sidecar it HAS, enumerated rather than named", async () => {
     const source = seeded(1);
+    // `workflow-<runId>.json` is an unbounded class of reachable writes: no fixed
+    // list of names can hold it, and a copy loop built on one leaves it behind.
+    source.artifacts.set(`${sessionRef(key(0))}/workflow-run-42.json`, '{"run":"42"}');
+    source.artifacts.set(`${sessionRef(key(0))}/plan.json`, '{"plan":1}');
     const target = new MemoryStore("target");
     const copied = await copySession(source, target, key(0));
     expect(copied.checksum).toHaveLength(64);
     expect(copied.bytes).toBeGreaterThan(0);
-    for (const name of MIGRATION_ARTIFACTS) {
-      const present = await target.readArtifactText(key(0), name);
-      expect(present === null || name === "session.json").toBe(true);
-    }
+    expect(await target.listSessionArtifacts(key(0))).toEqual([
+      "plan.json",
+      "session.json",
+      "workflow-run-42.json",
+    ]);
+    // Nothing is invented for a sidecar this session never had.
+    expect(await target.readArtifactText(key(0), "tasks.json")).toBeNull();
+  });
+
+  test("a sidecar the target lacks fails verification instead of reading as a clean cut", async () => {
+    const source = seeded(1);
+    source.artifacts.set(`${sessionRef(key(0))}/workflow-run-42.json`, "{}");
+    const target = new MemoryStore("target");
+    const h = harness({ source, target });
+    // Something removes it from the target after the copy but before the cut.
+    h.deps.rebindStore = async (): Promise<void> => {
+      target.artifacts.delete(`${sessionRef(key(0))}/workflow-run-42.json`);
+      h.trace.push("rebind");
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.switched).toBe(true);
+    expect(result.aborted).toContain("workflow-run-42.json");
   });
 });
 

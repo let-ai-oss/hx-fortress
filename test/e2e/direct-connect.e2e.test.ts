@@ -79,6 +79,7 @@ describe("hx → Fortress gateway → bucket", () => {
         },
         writeArtifact: async () => { },
         readArtifactText: async () => null,
+        listSessionArtifacts: async () => [],
         listSessionMetadata: async () => [],
         selfTest: async () => { },
         deleteSession: async () => ({ complete: true, deleted: 0 }),
@@ -152,6 +153,7 @@ describe("hx → Fortress gateway → bucket", () => {
         writeCanonicalText: async () => { },
         writeArtifact: async () => { },
         readArtifactText: async () => null,
+        listSessionArtifacts: async () => [],
         listSessionMetadata: async () => [
           {
             family: "codex-cli",

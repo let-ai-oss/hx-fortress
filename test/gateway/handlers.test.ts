@@ -43,6 +43,7 @@ function fakeStore(overrides: Partial<SessionStore> = {}): SessionStore {
     writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => null,
+    listSessionArtifacts: async () => [],
     listSessionMetadata: async () => SAMPLE_METADATA,
     selfTest: async () => {},
     getBucketVersioning: async () => BUCKET_CONFIG_UNAVAILABLE,

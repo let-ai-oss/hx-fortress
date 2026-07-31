@@ -29,6 +29,7 @@ function stubStore(delays: { read?: number; write?: number }, onBuild?: () => vo
     writeCanonicalText: never,
     writeArtifact: never,
     readArtifactText: never,
+    listSessionArtifacts: never,
     listSessionMetadata: never,
     deleteSession: never,
   } as SessionStore;

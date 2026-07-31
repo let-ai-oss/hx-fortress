@@ -36,6 +36,7 @@ import {
   canonicalObject,
   listPrefix,
   parseCanonicalKey,
+  sessionArtifactNames,
   sessionDeletePrefixes,
   sessionPrefix,
   stagingObject,
@@ -260,6 +261,15 @@ export class GcsStore implements SessionStore {
       if (!seen.has(`${fallback.family}/${fallback.sessionId}`)) out.push(fallback);
     }
     return out;
+  }
+
+  async listSessionArtifacts(key: SessionKey): Promise<string[]> {
+    const prefix = `${sessionPrefix(key)}/`;
+    const [files] = await this.bucket().getFiles({ prefix });
+    return sessionArtifactNames(
+      files.map((file) => file.name),
+      prefix,
+    );
   }
 
   async listAllCanonicalKeys(): Promise<SessionKey[]> {

@@ -77,6 +77,7 @@ function createMockStore(overrides: Partial<SessionStore> = {}): SessionStore {
     writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => "artifact-text-content",
+    listSessionArtifacts: async () => ["plan.json"],
     listSessionMetadata: async () => [],
     selfTest: async () => {},
     deleteSession: async () => ({ complete: true, deleted: 0 }),

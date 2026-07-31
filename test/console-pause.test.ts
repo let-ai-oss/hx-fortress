@@ -193,6 +193,10 @@ class RecordingStore implements SessionStore {
     this.calls.push("readArtifactText");
     return Promise.resolve("{}");
   }
+  listSessionArtifacts(): Promise<string[]> {
+    this.calls.push("listSessionArtifacts");
+    return Promise.resolve([]);
+  }
   listSessionMetadata(): Promise<SessionMetadata[]> {
     this.calls.push("listSessionMetadata");
     return Promise.resolve([]);

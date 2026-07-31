@@ -124,6 +124,13 @@ export interface SessionStore {
   writeArtifact(key: SessionKey, name: string, text: string): Promise<void>;
   /** Read a sidecar artifact as UTF-8 text, or null if it doesn't exist. */
   readArtifactText(key: SessionKey, name: string): Promise<string | null>;
+  /** The sidecar artifacts this session actually HAS, by name — the objects
+   *  directly under its prefix, minus the canonical log and the internal
+   *  `.staging/` chunks. Asked rather than assumed: `workflow-<runId>.json` is an
+   *  unbounded class, so no fixed list of names describes a session's objects,
+   *  and a storage migration that copied a fixed list would leave the rest in the
+   *  bucket it is moving away from. */
+  listSessionArtifacts(key: SessionKey): Promise<string[]>;
   /** List lightweight session metadata for one user without reading every
    *  canonical transcript. */
   listSessionMetadata(userId: string): Promise<SessionMetadata[]>;
