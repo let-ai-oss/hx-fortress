@@ -1074,20 +1074,30 @@ describe("the browser surface is strictly narrower than the terminal's", () => {
     }
   });
 
-  test("the offered command kinds are a proper subset of the plane's own", () => {
+  test("the browser mints no kind the plane does not know, and none without a control", () => {
     for (const kind of OFFERED_COMMAND_KINDS) {
       expect([kind, (CONSOLE_COMMAND_KINDS as readonly string[]).includes(kind)]).toEqual([kind, true]);
     }
+    // Every kind the plane defines now has a control that submits it, so the two
+    // sets coincide. That is the converged state, not a widening: the narrowing
+    // that matters is the write surface itself - two routes and one
+    // acknowledgement - and the verbs the terminal keeps for itself, both pinned
+    // by their own tests here. This assertion is what guards the next kind: one
+    // added to the plane WITHOUT a control makes it red at the definition,
+    // before any route is reached.
     const withheld = CONSOLE_COMMAND_KINDS.filter(
       (kind) => !(OFFERED_COMMAND_KINDS as readonly string[]).includes(kind),
     );
-    expect(withheld).toEqual(["run_migration"]);
+    expect(withheld).toEqual([]);
   });
 
-  test("a kind with no control is refused by name, and never becomes a row", async () => {
+  test("a kind the plane never defined is refused by name, and never becomes a row", async () => {
+    // The known-but-unoffered case would answer 404 here; no kind is in that
+    // state any more, and the assertion above is what keeps it that way. What
+    // remains reachable is a name the plane never defined at all.
     const cases: Array<[string, number]> = [
-      ["run_migration", 404],
       ["revoke_session", 400],
+      ["run_migration_", 400],
       ["", 400],
     ];
     for (const [kind, status] of cases) {
