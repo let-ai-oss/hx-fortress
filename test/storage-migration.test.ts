@@ -34,7 +34,20 @@ import { IngestQuiesce } from "../src/console/pause-gate";
 import { MIGRATION_PHASES, validateCommandParams } from "../src/console/command-params";
 import { createCommandExecutors } from "../src/console/executors";
 import { envManagedRefusal } from "../src/console/rotation";
-import { OFFERED_COMMAND_KINDS } from "../src/ui/mutate-routes";
+import { AuditSpool } from "../src/console/audit-spool";
+import { ConsoleAudit } from "../src/ui/audit-writer";
+import {
+  handleMutateRoute,
+  MUTATE_PATHS,
+  OFFERED_COMMAND_KINDS,
+  type ConsoleWritePort,
+} from "../src/ui/mutate-routes";
+import {
+  handleReadRoute,
+  READ_PATHS,
+  READ_ROUTES,
+  type ConsoleReadPort,
+} from "../src/ui/read-routes";
 import { CONSOLE_TABLES, UI_TABLE_GRANTS } from "../src/host/postgres/console-plane";
 import { expectedPrivilegeMatrix } from "../src/host/postgres/privilege-matrix";
 import { migrations } from "../src/host/postgres/migrations/manifest";
@@ -920,10 +933,86 @@ describe("the command surface", () => {
     ).rejects.toThrow(/does not run a teleport migration step/);
   });
 
-  test("the console offers no control for it until one exists to submit", () => {
-    // The kind is executable; a control that could mint the row is a surface of
-    // its own, and a kind offered without one queues work nothing drives.
-    expect(OFFERED_COMMAND_KINDS).not.toContain("run_migration");
+  test("the console offers the kind, so the control it ships can mint the row", () => {
+    // Offered and controlled are one decision: a kind missing from this list
+    // 404s at the mint, and the whole engine behind it is unreachable code.
+    expect(OFFERED_COMMAND_KINDS).toContain("run_migration");
+  });
+
+  test("the control mints a row that names the bucket and a reference to its key", async () => {
+    const dir = path.join(home, "spool");
+    const audit = new ConsoleAudit(new AuditSpool({ dir, writer: "ui" }));
+    const minted: unknown[] = [];
+    const submitted: Array<Record<string, unknown>> = [];
+    const port: ConsoleWritePort = {
+      serviceRefusal: () => null,
+      service: async () => ({ action: "start", manager: "m", pid: 1, copy: "" }),
+      heartbeatAt: async () => new Date().toISOString(),
+      offered: () => OFFERED_COMMAND_KINDS,
+      async mintCredential(payload) {
+        minted.push(payload);
+        return "a".repeat(32);
+      },
+      async submit(_kind, params) {
+        submitted.push(params);
+        return { id: "id-1" };
+      },
+    };
+    const secret = { store: "s3", bucket: TARGET_CREDS.bucket, region: "us-east-1" };
+    const res = await handleMutateRoute(
+      new Request(`http://console.local${MUTATE_PATHS.commands}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "run_migration",
+          params: { phase: "arm", target: TARGET_CREDS.bucket },
+          secret,
+        }),
+      }),
+      { port, audit, actor: "op", sessionId: "s1" },
+    );
+    expect(res?.status).toBe(202);
+    // The key goes to a 0600 single-use file; the row carries its reference and
+    // the bucket NAME, which is what makes the run record auditable at all.
+    expect(minted).toEqual([secret]);
+    expect(submitted).toEqual([
+      { phase: "arm", target: TARGET_CREDS.bucket, credentialRef: "a".repeat(32) },
+    ]);
+  });
+
+  test("a read route renders the runs, and asks for no write to do it", async () => {
+    const run = {
+      id: "run-1",
+      startedAt: "2026-07-31T12:00:00.000Z",
+      finishedAt: null,
+      mode: "copy",
+      status: "running",
+      phase: "copying",
+      sourceBucket: "old",
+      targetBucket: "new",
+      sessionsTotal: 4,
+      sessionsCopied: 2,
+      bytesCopied: 2048,
+      deltaPasses: 1,
+      switchedAt: null,
+      error: null,
+    };
+    const res = await handleReadRoute(
+      new Request(`http://console.local${READ_PATHS.migrations}`),
+      {
+        port: { migrations: async () => [run] } as unknown as ConsoleReadPort,
+        audit: {
+          recordExport: async () => {
+            throw new Error("a plain read must not reach the audit spool");
+          },
+        },
+        actor: "op",
+        sessionId: "s1",
+      },
+    );
+    expect(res?.status).toBe(200);
+    expect(await res?.json()).toEqual({ migrations: [run] });
+    expect(READ_ROUTES.find((r) => r.path === READ_PATHS.migrations)?.cls).toBe("read");
   });
 });
 

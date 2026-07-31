@@ -246,6 +246,7 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
     dataPaths: async () => ({ title: EGRESS_TITLE, rows: [] }),
     version: async () => ({ kind: "unavailable", reason: "offline", checkedAt: "", cached: false }),
     commands: async () => ({ rows: [], records: [], externalPostgres: false }),
+    migrations: async () => [],
     audit: async () => ({ rows: [] }),
     auditExport: async () => ({ rows: [], truncated: false }),
     spoolTail: async () => [],

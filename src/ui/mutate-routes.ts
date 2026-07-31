@@ -42,6 +42,7 @@ export const OFFERED_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
   "update_apply",
   "self_test",
   "rotate_credentials",
+  "run_migration",
   "run_checkup",
   "run_audit",
   "witness_toggle",

@@ -38,6 +38,7 @@ export const API = {
   dataPaths: "/ui/api/data-paths",
   version: "/ui/api/version",
   commands: "/ui/api/commands",
+  migrations: "/ui/api/migrations",
   audit: "/ui/api/audit",
   spool: "/ui/api/spool",
   verify: "/ui/api/sessions/verify",
@@ -373,6 +374,25 @@ export type RemoteVersion =
   | { kind: "available"; version: string; checkedAt: string; cached: boolean }
   | { kind: "unavailable"; reason: string; checkedAt: string; cached: boolean };
 
+/** One storage-migration run, as the daemon recorded it. Buckets and counts; no
+ *  keys, and nothing that binds this fortress to either bucket. */
+export interface MigrationRunView {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  mode: string;
+  status: string;
+  phase: string;
+  sourceBucket: string;
+  targetBucket: string;
+  sessionsTotal: number;
+  sessionsCopied: number;
+  bytesCopied: number;
+  deltaPasses: number;
+  switchedAt: string | null;
+  error: string | null;
+}
+
 export interface CommandView {
   id: string;
   kind: string;
@@ -507,10 +527,14 @@ export const api = {
     }),
   /** A command that carries material the row must never hold. The secret goes
    *  to a 0600 single-use file on the fortress; the row gets its reference. */
-  submitCommandWithSecret: (kind: string, secret: Record<string, unknown>) =>
+  submitCommandWithSecret: (
+    kind: string,
+    secret: Record<string, unknown>,
+    params: Record<string, unknown> = {},
+  ) =>
     getJson<{ id: string; kind: string; status: string }>(API.commands, {
       method: "POST",
-      body: { kind, params: {}, secret },
+      body: { kind, params, secret },
     }),
   sessions: (query: Record<string, string>) =>
     getJson<SessionsPage>(`${API.sessions}?${new URLSearchParams(query).toString()}`),
@@ -524,6 +548,7 @@ export const api = {
   dataPaths: () => getJson<{ title: string; rows: DataPathRow[] }>(API.dataPaths),
   version: () => getJson<RemoteVersion>(API.version),
   commands: () => getJson<{ commands: CommandView[] }>(API.commands),
+  migrations: () => getJson<{ migrations: MigrationRunView[] }>(API.migrations),
   posture: () => getJson<PostureView>(API.posture),
   audit: (query: Record<string, string>) =>
     getJson<{ rows: AuditRow[]; nextCursor?: string }>(

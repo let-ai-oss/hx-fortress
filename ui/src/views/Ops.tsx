@@ -6,7 +6,14 @@ import {
   CONTAINER_SERVICE_REFUSAL,
   NO_POLLER_REFUSAL,
 } from "../../../src/ui/copy";
-import { api, ApiError, NO_ANSWER, type CommandView, type StatusView } from "../api";
+import {
+  api,
+  ApiError,
+  NO_ANSWER,
+  type CommandView,
+  type MigrationRunView,
+  type StatusView,
+} from "../api";
 import {
   Empty,
   FactRow,
@@ -36,6 +43,7 @@ export default function Ops(): React.ReactElement {
   const identity = useResource(() => api.identity(), [], { pollMs: 60_000, active });
   const version = useResource(() => api.version(), [], { pollMs: 300_000, active });
   const commands = useResource(() => api.commands(), [], { pollMs: 10_000, active });
+  const migrations = useResource(() => api.migrations(), [], { pollMs: 10_000, active });
 
   const principal = app.auth.kind === "signed-in" ? app.auth.principal : null;
   const container = status.data?.serviceManager === "container";
@@ -111,6 +119,15 @@ export default function Ops(): React.ReactElement {
       />
 
       <RotationPanel daemon={status.data?.daemon ?? null} onSubmitted={() => commands.reload()} />
+
+      <MigrationPanel
+        daemon={status.data?.daemon ?? null}
+        onSubmitted={() => {
+          commands.reload();
+          migrations.reload();
+        }}
+        runs={migrations}
+      />
 
       <Panel title="Version">
         <Loaded resource={version}>
@@ -489,6 +506,220 @@ function CheckupPanel(props: {
       </div>
       <ResultLine state={result} />
     </Panel>
+  );
+}
+
+/** The three steps an operator drives a bucket move in, and what each one costs
+ *  the people uploading to this fortress. */
+const MIGRATION_STEPS = [
+  {
+    key: "arm",
+    label: "Copy into the target",
+    hint: "Copies every object and its sidecars, then narrows the difference. Nothing is paused and nothing is switched — uploads run at full speed throughout.",
+    confirm: {
+      title: "Copy this fortress into the target bucket?",
+      body: "The daemon proves the target accepts a write, copies every session and reads each one back to check it. Ingest is untouched. At the end new staging signatures are cut short, so the swap afterwards is seconds rather than the whole signature lifetime.",
+      confirmLabel: "Start copying",
+    },
+    needsTarget: true,
+  },
+  {
+    key: "swap",
+    label: "Cut over",
+    hint: "Holds uploads, copies the last difference, points credentials.json at the target and rebinds the running store. Refused unless the write gate proves the pause is in force.",
+    confirm: {
+      title: "Point this fortress at the target bucket?",
+      body: "Uploads are held for the length of the cut and their senders retry. The daemon waits for its own write gate to confirm the pause, replays deletes onto the target, then swaps credentials.json and rebinds. The source bucket is never deleted from — it is the way back.",
+      confirmLabel: "Cut over",
+      danger: true,
+    },
+    needsTarget: true,
+  },
+  {
+    key: "resume",
+    label: "Resume ingest",
+    hint: "Releases the pause and returns staging signatures to their normal lifetime. The way out of a run that stopped halfway.",
+    confirm: {
+      title: "Resume ingest?",
+      body: "Uploads are accepted again and staging signatures go back to their normal lifetime. Nothing about the buckets changes.",
+      confirmLabel: "Resume",
+    },
+    needsTarget: false,
+  },
+] as const;
+
+const MIGRATION_STATUS_TONE: Record<string, string> = {
+  done: "ok",
+  running: "fortress",
+  aborted: "warn",
+  switched_unverified: "danger",
+  failed: "danger",
+};
+
+/** What a status means, where the word alone would not say it. */
+const MIGRATION_STATUS_COPY: Record<string, string> = {
+  switched_unverified:
+    "this fortress is serving from the target, and objects the source holds were not readable there",
+  aborted: "nothing was switched; the fortress still serves from the source bucket",
+};
+
+/**
+ * Moving this fortress's objects to another bucket, from the browser.
+ *
+ * The target's credentials are typed here and never reach the command row: they
+ * go to a 0600 single-use file the daemon unlinks as it reads, exactly like a
+ * rotation. The row carries the bucket NAME so the run record can be audited,
+ * and the daemon refuses when the name and the credential disagree.
+ *
+ * The cut is the daemon's to make. It holds the credentials file's lock and the
+ * store handle; this page asks, and reports what it answered.
+ */
+function MigrationPanel(props: {
+  daemon: string | null;
+  runs: { data: { migrations: MigrationRunView[] } | null; error: string | null; reload: () => void };
+  onSubmitted: () => void;
+}): React.ReactElement {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [step, setStep] = React.useState<(typeof MIGRATION_STEPS)[number]["key"]>("arm");
+  const [material, setMaterial] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const chosen = MIGRATION_STEPS.find((s) => s.key === step) ?? MIGRATION_STEPS[0];
+  const reason = props.daemon !== "running" ? NO_POLLER_REFUSAL : undefined;
+  const missingTarget = chosen.needsTarget && material.trim().length === 0;
+
+  const submit = async (): Promise<void> => {
+    let credentials: { bucket?: unknown } = {};
+    if (chosen.needsTarget) {
+      try {
+        credentials = JSON.parse(material) as { bucket?: unknown };
+      } catch {
+        showResult("that is not valid JSON — paste the target's storage block exactly as the wizard wrote it", true);
+        return;
+      }
+      if (typeof credentials.bucket !== "string" || credentials.bucket.length === 0) {
+        showResult("that storage block names no bucket, so the run record could not say where it went", true);
+        return;
+      }
+    }
+    if (!(await ask(chosen.confirm))) return;
+    setBusy(true);
+    try {
+      if (chosen.needsTarget) {
+        await api.submitCommandWithSecret("run_migration", credentials as Record<string, unknown>, {
+          phase: chosen.key,
+          target: credentials.bucket as string,
+        });
+        // Cleared immediately: this console keeps no credential, before or after.
+        setMaterial("");
+      } else {
+        await api.submitCommand("run_migration", { phase: chosen.key });
+      }
+      showResult("Handed it to the daemon. Its answer appears under Commands, and the run below.");
+    } catch (error) {
+      showResult(error instanceof Error ? error.message : String(error), true);
+    } finally {
+      setBusy(false);
+      props.onSubmitted();
+    }
+  };
+
+  const runs = props.runs.data?.migrations ?? [];
+  return (
+    <Panel
+      title="Storage migration"
+      sub="Move this fortress to another bucket. The copy runs while ingest does; only the cut holds uploads, and the source bucket is never deleted from."
+    >
+      {dialog}
+      <div className="facts wide">
+        <FactRow
+          k="Step"
+          v={
+            <select
+              className="rotatein"
+              value={step}
+              onChange={(e) => setStep(e.target.value as typeof step)}
+            >
+              {MIGRATION_STEPS.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          }
+          vs={chosen.hint}
+        />
+        {chosen.needsTarget ? (
+          <FactRow
+            k="Target bucket"
+            v={
+              <input
+                className="rotatein"
+                type="password"
+                autoComplete="off"
+                placeholder='{"store":"s3","bucket":"…","region":"…","s3":{"accessKeyId":"…","secretAccessKey":"…"}}'
+                value={material}
+                onChange={(e) => setMaterial(e.target.value)}
+              />
+            }
+            vs={`The whole storage block for the NEW bucket, as JSON. It goes to a single-use file the daemon deletes as it reads. ${COMMAND_REQUEST_NOTE}`}
+          />
+        ) : null}
+        <FactRow
+          k="Run it"
+          v={chosen.label}
+          vs={COMMAND_REQUEST_NOTE}
+          action={
+            <MutationControl
+              label={chosen.label}
+              small
+              danger={step === "swap"}
+              disabled={busy || missingTarget || reason !== undefined}
+              {...(reason ? { reason } : {})}
+              onClick={() => void submit()}
+            />
+          }
+        />
+      </div>
+      <ResultLine state={result} />
+      {runs.length === 0 ? (
+        <Empty>This fortress has not been moved between buckets.</Empty>
+      ) : (
+        <div className="rowlist ops">
+          {runs.map((run) => (
+            <MigrationLine key={run.id} run={run} />
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function MigrationLine({ run }: { run: MigrationRunView }): React.ReactElement {
+  const tone = MIGRATION_STATUS_TONE[run.status] ?? "warn";
+  return (
+    <div className="row" style={{ alignItems: "start" }}>
+      <span className={tone === "ok" ? "dot" : tone === "fortress" ? "dot warn" : "dot bad"}></span>
+      <div className="who">
+        <b>
+          {run.sourceBucket} → {run.targetBucket}
+        </b>
+        <div className="sub">
+          {run.phase} · {fmt.int(run.sessionsCopied)} of {fmt.int(run.sessionsTotal)}{" "}
+          {fmt.plural(run.sessionsTotal, "session")} copied · {fmt.bytes(run.bytesCopied)} ·{" "}
+          {fmt.int(run.deltaPasses)} {fmt.plural(run.deltaPasses, "delta pass", "delta passes")}
+          {run.switchedAt ? ` · cut over ${fmt.when(run.switchedAt)}` : ""}
+        </div>
+        {MIGRATION_STATUS_COPY[run.status] ? (
+          <div className="sub">{MIGRATION_STATUS_COPY[run.status]}</div>
+        ) : null}
+        {run.error ? <p className="saidby">{run.error}</p> : null}
+      </div>
+      <div>
+        <span className={`pill pc ${tone}`}>{run.status.replace(/_/g, " ")}</span>
+      </div>
+      <div className="m">{fmt.ago(run.finishedAt ?? run.startedAt)}</div>
+    </div>
   );
 }
 

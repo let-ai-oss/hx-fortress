@@ -26,6 +26,7 @@ import {
   UNSIGNED_BUILD_WARNING,
 } from "../src/host/trust/verify";
 import { hasProductionAnchor, PRODUCTION_KEYID_PREFIX } from "../src/host/trust/signing-keys";
+import type { ConsoleCommandKind } from "../src/host/postgres/console-plane";
 import type { UpdateResult } from "../src/update";
 import type { ServiceManager, ServiceState, ServiceUnit } from "../src/service/types";
 import type { UiServiceControl } from "../src/ui/service-control";
@@ -280,12 +281,17 @@ describe("the console's write surface", () => {
     await withAudit(async (audit) => {
       const port = fakePort();
       const ctx = { port, audit, actor: "op", sessionId: "s1" };
-      expect(OFFERED_COMMAND_KINDS).not.toContain("run_migration");
+      // A build whose console has no control for a kind refuses it BY NAME
+      // rather than queueing a row for an executor nothing would drive. Every
+      // shipped kind is offered today, so the narrowed port is what exercises
+      // the branch — the guard is the contract, not the current list.
+      const narrowed = fakePort({ offered: ["update_apply"] });
       const unoffered = await handleMutateRoute(
         post(MUTATE_PATHS.commands, { kind: "run_migration", params: { phase: "arm" } }),
-        ctx,
+        { ...ctx, port: narrowed },
       );
       expect(unoffered?.status).toBe(404);
+      expect(narrowed.submitted).toEqual([]);
       const invalid = await handleMutateRoute(
         post(MUTATE_PATHS.commands, { kind: "update_apply", params: { nope: 1 } }),
         ctx,
@@ -337,7 +343,13 @@ interface FakePort extends ConsoleWritePort {
   submitted: Array<[string, string]>;
 }
 
-function fakePort(options: { refusal?: string; heartbeat?: string | null } = {}): FakePort {
+function fakePort(
+  options: {
+    refusal?: string;
+    heartbeat?: string | null;
+    offered?: readonly ConsoleCommandKind[];
+  } = {},
+): FakePort {
   return {
     actions: [],
     submitted: [],
@@ -349,7 +361,7 @@ function fakePort(options: { refusal?: string; heartbeat?: string | null } = {})
     async heartbeatAt() {
       return options.heartbeat === undefined ? new Date().toISOString() : options.heartbeat;
     },
-    offered: () => OFFERED_COMMAND_KINDS,
+    offered: () => options.offered ?? OFFERED_COMMAND_KINDS,
     async mintCredential() {
       return "0".repeat(32);
     },

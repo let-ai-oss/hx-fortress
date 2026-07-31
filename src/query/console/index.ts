@@ -4,6 +4,7 @@
 export * from "./audit";
 export * from "./columns";
 export * from "./inventory";
+export * from "./migrations";
 export * from "./roster";
 export * from "./sessions";
 export * from "./universe";

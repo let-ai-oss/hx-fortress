@@ -41,6 +41,7 @@ import type { RemoteVersion } from "./version-check";
 import type { MetricsSnapshot } from "../console/metrics";
 import type { DaemonState } from "../daemon-state";
 import type { AuditRow, CommandRowView } from "../query/console/audit";
+import type { MigrationRunView } from "../query/console/migrations";
 import type {
   ConsoleDeviceRow,
   ConsoleGrowthRow,
@@ -68,6 +69,9 @@ export const READ_PATHS = {
   dataPaths: "/ui/api/data-paths",
   version: "/ui/api/version",
   commands: "/ui/api/commands",
+  /** Storage-migration runs. A read: the daemon owns these rows and this only
+   *  says what it recorded. */
+  migrations: "/ui/api/migrations",
   audit: "/ui/api/audit",
   spool: "/ui/api/spool",
   /** One session's residency proof. A read: it asks Postgres and the object
@@ -200,6 +204,7 @@ export interface ConsoleReadPort {
   dataPaths(): Promise<{ title: string; rows: DataPathRow[] }>;
   version(): Promise<RemoteVersion>;
   commands(): Promise<{ rows: CommandRowView[]; records: CommandOutcomeRecord[]; externalPostgres: boolean }>;
+  migrations(): Promise<MigrationRunView[]>;
   audit(range: ExportRange & { limit?: number; cursor?: string }): Promise<{ rows: AuditRow[]; nextCursor?: string }>;
   auditExport(range: ExportRange): Promise<{ rows: AuditRow[]; truncated: boolean }>;
   spoolTail(limit: number): Promise<unknown[]>;
@@ -329,6 +334,8 @@ export async function handleReadRoute(
         const { rows, records, externalPostgres } = await port.commands();
         return json({ commands: rows.map((row) => decorate(row, records, externalPostgres)) });
       }
+      case READ_PATHS.migrations:
+        return json({ migrations: await port.migrations() });
       case READ_PATHS.audit: {
         const parsed = parseExportRange(url.searchParams);
         if (!parsed.ok) return refusal(parsed.reason);

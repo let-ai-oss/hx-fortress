@@ -62,6 +62,7 @@ import {
   type ConsolePersonRow,
   type ConsolePostgresFacts,
 } from "../query/console/inventory";
+import { migrationRunsQuery, type MigrationRunView } from "../query/console/migrations";
 import {
   consoleAdoptionCountsQuery,
   consoleRosterQuery,
@@ -400,6 +401,19 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         records,
         externalPostgres: database.kind === "ready" && database.mode === "external",
       };
+    },
+
+    async migrations() {
+      const found = await query<MigrationRunView>(() => migrationRunsQuery());
+      // bytea-sized counters come back as strings on some drivers, and a page
+      // that formatted "1024" as bytes and "1024" as a string reads differently.
+      return found.map((run) => ({
+        ...run,
+        sessionsTotal: Number(run.sessionsTotal ?? 0),
+        sessionsCopied: Number(run.sessionsCopied ?? 0),
+        bytesCopied: Number(run.bytesCopied ?? 0),
+        deltaPasses: Number(run.deltaPasses ?? 0),
+      }));
     },
 
     async audit(range) {
