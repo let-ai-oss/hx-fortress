@@ -33,7 +33,14 @@
 // The same read is what stops a disabled console from being respawned after it
 // exits, which is the difference between "disabled" and "restarting forever".
 
-import { identify, signalIfStillOurs, spawnFortress, type ChildIdentity, type SupervisedChild } from "./container-children";
+import {
+  identify,
+  signalIfStillOurs,
+  spawnFortress,
+  stopChildren,
+  type ChildIdentity,
+  type SupervisedChild,
+} from "./container-children";
 import { fortressPaths } from "./host/paths";
 import { LiveUiConfig, effectiveUiEnabled } from "./ui/config";
 import { proveIdentity, type IdentityVerdict, type InstanceLockRecord } from "./ui/instance";
@@ -224,41 +231,16 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
     }
   }
 
-  await shutdown({
-    daemon: daemon.identity,
-    console: ui.identity,
-    writeLine: deps.writeLine,
+  // Console first, daemon last: the console reads the daemon's status and
+  // database, and stopping the watched before the watcher turns an ordinary
+  // shutdown into a page full of connection errors.
+  deps.writeLine("stopping");
+  await stopChildren([ui.identity, daemon.identity], {
+    graceMs: SHUTDOWN_GRACE_MS,
     sleep,
     prove,
   });
   return exitCode;
-}
-
-/**
- * Stop both children and wait for them.
- *
- * The console goes first and the daemon last: the console reads the daemon's
- * status and database, and stopping the thing being watched before the watcher
- * turns an ordinary shutdown into a page full of connection errors.
- */
-async function shutdown(args: {
-  daemon: ChildIdentity | null;
-  console: ChildIdentity | null;
-  writeLine: (line: string) => void;
-  sleep: (ms: number) => Promise<void>;
-  prove: (record: InstanceLockRecord) => IdentityVerdict;
-}): Promise<void> {
-  args.writeLine("stopping");
-  const waits: Promise<unknown>[] = [];
-  for (const identity of [args.console, args.daemon]) {
-    if (!identity) continue;
-    if (signalIfStillOurs(identity, "SIGTERM", args.prove)) waits.push(identity.child.exited);
-  }
-  if (waits.length === 0) return;
-  // Bounded: the runtime's own grace period is next, and a supervisor still
-  // waiting when it expires is SIGKILLed together with everything it was
-  // waiting for.
-  await Promise.race([Promise.all(waits), args.sleep(SHUTDOWN_GRACE_MS)]);
 }
 
 function errorText(error: unknown): string {

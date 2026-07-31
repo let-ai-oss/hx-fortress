@@ -79,6 +79,31 @@ export function signalIfStillOurs(
   }
 }
 
+/**
+ * Signal these children, in the order given, and wait for them.
+ *
+ * BOUNDED: the runtime's own grace period is next, and a supervisor still
+ * waiting when it expires is SIGKILLed together with everything it was waiting
+ * for. Order is the caller's — it is supervision policy, not a property of a
+ * child.
+ */
+export async function stopChildren(
+  children: readonly (ChildIdentity | null)[],
+  args: {
+    graceMs: number;
+    sleep: (ms: number) => Promise<void>;
+    prove?: (record: InstanceLockRecord) => IdentityVerdict;
+  },
+): Promise<void> {
+  const waits: Promise<unknown>[] = [];
+  for (const identity of children) {
+    if (!identity) continue;
+    if (signalIfStillOurs(identity, "SIGTERM", args.prove)) waits.push(identity.child.exited);
+  }
+  if (waits.length === 0) return;
+  await Promise.race([Promise.all(waits), args.sleep(args.graceMs)]);
+}
+
 /** The production child factory: this very binary, re-invoked with a verb. Argv
  *  rather than a shell line — nothing here is interpolated into a command. */
 export function spawnFortress(argv0: string): (args: readonly string[]) => SupervisedChild {

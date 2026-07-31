@@ -190,11 +190,20 @@ a specific reason.
 The image's entrypoint is `hx-fortress container-run`, not `hx-fortress host`.
 The console is a separate process from the daemon — a stopped daemon cannot
 serve its own Start button — and an image has one entrypoint, so `container-run`
-starts both and keeps them up. It **refuses to run anywhere it is not pid 1**:
-pid 1 is what receives the runtime's `SIGTERM`, and a daemon killed by the grace
-timeout never writes its last status, never drains its audit spool and never
-stops its Postgres cleanly. `hx-fortress host` remains the way to run only the
-daemon.
+starts both. It **refuses to run anywhere it is not pid 1**: pid 1 is what
+receives the runtime's `SIGTERM`, and a daemon killed by the grace timeout never
+writes its last status, never drains its audit spool and never stops its
+Postgres cleanly. `hx-fortress host` remains the way to run only the daemon.
+
+**The daemon's exit is the container's exit**, with its exit code. Restarting it
+is your orchestrator's decision, not this supervisor's: a fortress that never
+boots has to be visible as a crash loop, and the postmaster the daemon
+daemonizes is re-parented to pid 1 when it dies, so a second daemon in the same
+container cannot start a cluster that is already running. Set a restart policy
+(compose `restart:`, a Kubernetes `restartPolicy`) — the same one
+`FORTRESS_STORE_EXIT_ON_WEDGE` already assumes. The console is the process this
+supervisor does restart, with backoff, and it stops for good when
+`hx-fortress ui disable` flips the setting.
 
 | Variable | Purpose |
 | --- | --- |
@@ -207,8 +216,8 @@ daemon.
 `credentials.json` lives under `$HOME/.let/session-vault/`. An image whose HOME
 was elsewhere kept the organization's bucket keys in the container's writable
 layer, and `VOLUME ["/data"]` does not cover that layer, so a plain image
-upgrade discards them. The daemon checks the older locations once at boot and
-adopts what it finds, so upgrading does not lose an enrollment — but only where
+upgrade discards them. Both processes check the older locations once at boot and
+adopt what they find, so upgrading does not lose an enrollment — but only where
 a volume actually covers the old path.
 
 **Publish the console to the host's loopback**, and reach it over an SSH
