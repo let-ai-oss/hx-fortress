@@ -25,6 +25,7 @@ import {
   witnessEligible,
   type ResidencyVerdict,
   type RollUpCounts,
+  type WitnessState,
 } from "./audit-verdicts";
 
 /** The engine's budget, as daemon config states it. Tunable because a fortress
@@ -96,6 +97,9 @@ export interface AuditRunResult {
   findings: AuditFinding[];
   verdict: ReturnType<typeof rollUp>["verdict"];
   qualification: string;
+  /** Whether let.ai was asked, and if not, why. Recorded so the run's own
+   *  history can say which of the two silences this was. */
+  witness: WitnessState;
   /** Store operations actually spent. Asserted against the budget. */
   opsSpent: number;
   /** True when the run stopped at its per-run budget rather than at the end. */
@@ -122,6 +126,9 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
 
   const eligible = rows.filter((r) => witnessEligible(r.ingestChannel));
   const witness = deps.askWitness ? await deps.askWitness(eligible.map((r) => r.sessionId)) : null;
+  // Off (nobody asked) and unavailable (asked, unanswered) are different facts
+  // about this organization, and the run reports which one it was.
+  const witnessState: WitnessState = witness ? "attested" : deps.askWitness ? "unavailable" : "off";
   const acknowledged = await deps.acknowledged();
 
   const findings: AuditFinding[] = [];
@@ -178,12 +185,13 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   // A run that could not ask let.ai has established nothing about let.ai, so its
   // posture cannot be fresh however recent the cache is.
   const fresh = witness !== null && (await deps.postureFresh());
-  const summary = rollUp(counts, { fresh });
+  const summary = rollUp(counts, { fresh, witness: witnessState });
   return {
     counts,
     findings,
     verdict: summary.verdict,
     qualification: summary.qualification,
+    witness: witnessState,
     opsSpent: pace.spent,
     truncated,
   };

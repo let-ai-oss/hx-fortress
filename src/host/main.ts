@@ -62,6 +62,13 @@ import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-contro
 import { downloadBaseFromCloudUrl } from "../update";
 import { readConsoleAdvertisement } from "../ui/advertise";
 import { runAuditForFortress } from "../console/audit-runner";
+import { createWitnessClient } from "../console/audit-witness";
+import {
+  postureFreshness,
+  POSTURE_REFRESH_MS,
+  RoutingPostureCache,
+  routingPosturePath,
+} from "../cloud/fortress-query";
 import { readAcknowledgements } from "../console/audit-store";
 import {
   clearWitnessIntent,
@@ -377,6 +384,9 @@ export async function runFortressHost(
       // and returning connections (credential already existed on disk).
       const cred = await credentialStore.load().catch(() => null);
       registry.setFortressIdentity(cred);
+      // The hub is reachable as of now — ask for its view of this organization
+      // immediately instead of waiting out the refresh interval.
+      void refreshPosture();
     },
   });
 
@@ -612,6 +622,38 @@ export async function runFortressHost(
   const pauseTimer = setInterval(() => void refreshPause(), 5_000);
   (pauseTimer as { unref?: () => void }).unref?.();
 
+  // The two questions only the hub can answer, and the one transport there is to
+  // ask them over. A connection that cannot ask (no tunnel, a test double) leaves
+  // `askHub` undefined, and both callers below degrade to "unavailable" — which
+  // the console renders as NOT CHECKED, never as a clean answer.
+  const askHub = connection.request?.bind(connection);
+  const postureCache = new RoutingPostureCache(routingPosturePath(paths.runtimeRoot));
+  const askWitness = createWitnessClient({
+    request: askHub,
+    onUnavailable: (reason) =>
+      consoleLog.info("the residency audit could not ask let.ai about this run", { reason }),
+  });
+  const refreshPosture = async (): Promise<void> => {
+    if (!askHub) return;
+    try {
+      const result = await askHub({ kind: "routingPosture" });
+      const data = result.kind === "routingPosture" ? result.routingPosture : undefined;
+      if (!data) {
+        await postureCache.recordUnavailable("the hub answered without a routing posture");
+        return;
+      }
+      await postureCache.write({ fetchedAt: new Date().toISOString(), data });
+    } catch (err) {
+      // Recorded WITH its timestamp rather than left alone: a snapshot that stops
+      // being refreshed would otherwise keep reading as current forever.
+      await postureCache
+        .recordUnavailable(err instanceof Error ? err.message : String(err))
+        .catch(() => {});
+    }
+  };
+  const postureTimer = setInterval(() => void refreshPosture(), POSTURE_REFRESH_MS);
+  (postureTimer as { unref?: () => void }).unref?.();
+
   /** Boot order: role provisioning (inside postgres.start) → FENCE → any poll.
    *  Fence-first is unachievable under the embedded apparatus — ensureAppRoles
    *  is what CREATES hx.reject_command, and Postgres resolves the function at
@@ -647,11 +689,12 @@ export async function runFortressHost(
       runAuditForFortress({
         db: () => (postgres.isReady() ? resolveHxDb() : null),
         store: () => vaultModule.getStore(),
-        // No witness client on this build's tunnel yet: the engine reports the
-        // witness as unavailable by name, which is the honest answer and never
-        // reads as "let.ai holds no copy".
-        askWitness: null,
-        postureFresh: async () => false,
+        // The fortress asks and the hub answers. A timeout, a dead socket or a
+        // hub too old to know the frame all come back as no answer at all, which
+        // the run reports as an unasked witness by name.
+        askWitness,
+        postureFresh: async () =>
+          postureFreshness(await postureCache.read(), Date.now()) === "fresh",
         publish: (acks) =>
           publishAcks(
             paths.runtimeRoot,
@@ -824,6 +867,7 @@ export async function runFortressHost(
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     clearInterval(pauseTimer);
+    clearInterval(postureTimer);
     clearInterval(commandTimer);
     metricsPublisher.stop();
     gatewayHandle?.stop();

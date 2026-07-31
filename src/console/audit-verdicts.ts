@@ -124,6 +124,19 @@ export interface RollUpCounts {
 
 export type FleetVerdict = "clean" | "qualified" | "failed";
 
+/** Whether let.ai was asked about this run's eligible sessions at all. The three
+ *  states are different facts and the roll-up says which one it was: an operator
+ *  who switched the witness off knows why nothing was checked, and one whose hub
+ *  is unreachable must not be told the same thing. */
+export type WitnessState = "attested" | "off" | "unavailable";
+
+/** Why no let.ai copy was checked, named. Never "no copy was found": nothing was
+ *  asked, and the two read identically only to someone who was not there. */
+export const WITNESS_UNCHECKED_NOTE: Record<Exclude<WitnessState, "attested">, string> = {
+  off: "the cloud witness is switched off, so no session id left this host and no let.ai copy was checked",
+  unavailable: "let.ai could not be asked for this run, so no let.ai copy was checked",
+};
+
 /**
  * The fleet roll-up, TRI-STATE and never clean without a fresh posture.
  *
@@ -133,7 +146,7 @@ export type FleetVerdict = "clean" | "qualified" | "failed";
  */
 export function rollUp(
   counts: RollUpCounts,
-  posture: { fresh: boolean },
+  context: { fresh: boolean; witness?: WitnessState },
 ): { verdict: FleetVerdict; qualification: string } {
   if (counts.notDeliveredHere > 0) {
     return {
@@ -163,7 +176,13 @@ export function rollUp(
   if (counts.noRecord > 0) {
     notes.push(`${counts.noRecord} predating per-destination tracking`);
   }
-  if (!posture.fresh) {
+  const witness = context.witness ?? "attested";
+  if (witness !== "attested") {
+    // One reason, not two. An unasked witness is ALSO why the posture cannot be
+    // fresh for this run, and printing both would read as two independent
+    // failures where there is one.
+    notes.push(WITNESS_UNCHECKED_NOTE[witness]);
+  } else if (!context.fresh) {
     notes.push("let.ai's own view of this organization could not be refreshed for this run");
   }
   if (notes.length === 0) {

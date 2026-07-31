@@ -159,6 +159,16 @@ export interface RoutingPostureSnapshot {
  *  freshness verdict they cannot. */
 export const POSTURE_STALE_AFTER_MS = 15 * 60_000;
 
+/** How often the daemon re-asks. Comfortably inside the staleness window, so a
+ *  single lost answer never ages the snapshot out. */
+export const POSTURE_REFRESH_MS = 5 * 60_000;
+
+/** The one place the snapshot lives. Under runtime/, which the daemon owns and
+ *  the console only reads. */
+export function routingPosturePath(runtimeRoot: string): string {
+  return path.join(runtimeRoot, "routing-posture.json");
+}
+
 export type PostureFreshness = "fresh" | "stale" | "unavailable" | "never-fetched";
 
 export function postureFreshness(

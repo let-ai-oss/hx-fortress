@@ -19,6 +19,7 @@ import {
   postureFreshness,
   postureQualification,
   RoutingPostureCache,
+  routingPosturePath,
 } from "../cloud/fortress-query";
 import type { CloudCredential } from "../cloud/credentials";
 import { daemonState, DAEMON_STATE_COPY, compareRoots } from "../daemon-state";
@@ -138,7 +139,7 @@ interface ClockSkewFile {
 export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPort {
   const now = deps.now ?? ((): Date => new Date());
   const env = deps.env ?? process.env;
-  const postureCache = new RoutingPostureCache(path.join(deps.paths.runtimeRoot, "routing-posture.json"));
+  const postureCache = new RoutingPostureCache(routingPosturePath(deps.paths.runtimeRoot));
 
   const query = async <T>(build: () => unknown): Promise<T[]> => {
     const db = deps.db();

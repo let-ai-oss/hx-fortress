@@ -13,6 +13,8 @@ import {
   runResidencyAudit,
   type AuditSessionRow,
 } from "../src/console/audit-engine";
+import { createWitnessClient, WITNESS_BATCH_SIZE } from "../src/console/audit-witness";
+import { FortressQueryUnavailable } from "../src/cloud/fortress-query";
 import {
   acknowledgeable,
   rollUp,
@@ -219,6 +221,148 @@ describe("one audit run", () => {
       expect(result.verdict).toBe("qualified");
       expect(result.qualification).toContain("acknowledged");
     }
+  });
+});
+
+describe("the witness client", () => {
+  const answer = (ids: readonly string[]) => ({
+    kind: "residencyWitness" as const,
+    residencyWitness: ids.map((sessionId) => ({
+      sessionId,
+      fortressPresent: true,
+      letaiCopy: sessionId === "copied",
+      anyDestinationRecord: true,
+    })),
+  });
+
+  test("asks in bounded batches, one at a time", async () => {
+    const batches: number[] = [];
+    let inFlight = 0;
+    const ask = createWitnessClient({
+      request: async (query) => {
+        inFlight += 1;
+        expect(inFlight).toBe(1);
+        const ids = query.sessionIds ?? [];
+        batches.push(ids.length);
+        await new Promise((r) => setTimeout(r, 0));
+        inFlight -= 1;
+        return answer(ids);
+      },
+    });
+    const ids = Array.from({ length: WITNESS_BATCH_SIZE + 3 }, (_, i) => `s${i}`);
+    const result = await ask(ids);
+    expect(batches).toEqual([WITNESS_BATCH_SIZE, 3]);
+    expect(result?.known.size).toBe(ids.length);
+  });
+
+  test("a timeout is no answer at all — never an empty one", async () => {
+    const reasons: string[] = [];
+    const ask = createWitnessClient({
+      request: async () => {
+        throw new FortressQueryUnavailable("timeout");
+      },
+      onUnavailable: (reason) => reasons.push(reason),
+    });
+    expect(await ask(["s1"])).toBeNull();
+    expect(reasons[0]).toContain("timeout");
+  });
+
+  test("a hub too old to answer, and a hub that answered something else, both read as unavailable", async () => {
+    // The old hub never replies; the transport times the question out for it.
+    const silent = createWitnessClient({
+      request: () => new Promise(() => {}) as never,
+      batchSize: 2,
+    });
+    expect(await Promise.race([silent(["s1"]), Promise.resolve("pending")])).toBe("pending");
+
+    const wrongShape = createWitnessClient({
+      request: async () => ({ kind: "routingPosture" as const }),
+    });
+    expect(await wrongShape(["s1"])).toBeNull();
+  });
+
+  test("one failed batch abandons the whole answer", async () => {
+    let calls = 0;
+    const ask = createWitnessClient({
+      batchSize: 1,
+      request: async (query) => {
+        calls += 1;
+        if (calls === 2) throw new FortressQueryUnavailable("offline");
+        return answer(query.sessionIds ?? []);
+      },
+    });
+    // The first batch DID come back — returning it would report the second
+    // batch's sessions as having no copy, which nobody established.
+    expect(await ask(["copied", "s2"])).toBeNull();
+  });
+
+  test("a transport that cannot ask says so, and nothing else", async () => {
+    const ask = createWitnessClient({});
+    expect(await ask(["s1"])).toBeNull();
+    // Nothing eligible is a complete answer about nothing.
+    expect(await createWitnessClient({ request: async () => answer([]) })([])).toEqual({
+      copies: new Set(),
+      known: new Set(),
+    });
+  });
+
+  test("maps the two booleans the engine reads", async () => {
+    const ask = createWitnessClient({ request: async (q) => answer(q.sessionIds ?? []) });
+    const result = await ask(["copied", "plain"]);
+    expect([...(result?.copies ?? [])]).toEqual(["copied"]);
+    expect(result?.known.size).toBe(2);
+  });
+});
+
+describe("an unasked witness is named", () => {
+  const base = {
+    sessions: async () => [row()],
+    listCanonical: async () => new Set([canonicalKeyOf(row())]),
+    headCanonical: async () => true,
+    acknowledged: async () => new Set<string>(),
+    postureFresh: async () => true,
+    sleep: async () => {},
+  };
+
+  test("unreachable and switched off are different sentences, and neither says 'no copy'", async () => {
+    const unreachable = await runResidencyAudit({
+      ...base,
+      askWitness: createWitnessClient({
+        request: async () => {
+          throw new FortressQueryUnavailable("timeout");
+        },
+      }),
+    });
+    expect(unreachable.witness).toBe("unavailable");
+    expect(unreachable.verdict).toBe("qualified");
+    expect(unreachable.qualification).toContain("let.ai could not be asked");
+
+    const off = await runResidencyAudit({ ...base, askWitness: null });
+    expect(off.witness).toBe("off");
+    expect(off.qualification).toContain("switched off");
+    for (const run of [unreachable, off]) {
+      expect(run.qualification).not.toContain("no copy was found");
+      expect(run.verdict).not.toBe("clean");
+    }
+  });
+
+  test("an answered witness leaves the run able to be clean", async () => {
+    const run = await runResidencyAudit({
+      ...base,
+      askWitness: createWitnessClient({
+        request: async (q) => ({
+          kind: "residencyWitness" as const,
+          residencyWitness: (q.sessionIds ?? []).map((sessionId) => ({
+            sessionId,
+            fortressPresent: true,
+            letaiCopy: false,
+            anyDestinationRecord: true,
+          })),
+        }),
+      }),
+    });
+    expect(run.witness).toBe("attested");
+    expect(run.verdict).toBe("clean");
   });
 });
 
