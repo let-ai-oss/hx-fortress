@@ -28,6 +28,7 @@ import {
 } from "./cli-logs";
 import { FileConfigStore } from "./host/config";
 import { runFortressHost } from "./host/main";
+import { runContainerCommand } from "./container-run";
 import { fortressPaths } from "./host/paths";
 import {
   runEnrollWizard,
@@ -57,6 +58,7 @@ interface CliDependencies {
   restartUiUnit?: (options: { platform?: string; uid?: number }) => void;
   ensureUiUnit?: typeof ensureUiUnit;
   runAuditVerb?: typeof runAuditVerb;
+  runContainer?: typeof runContainerCommand;
   runRosterVerb?: typeof runRosterVerb;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
@@ -146,6 +148,14 @@ export async function runCli(
       case "host":
         await (dependencies.runFortressHost ?? runFortressHost)();
         return 0;
+      // The container entrypoint: one image, two long-running processes. It
+      // refuses anywhere it is not pid 1, so typing it on a host is a diagnostic
+      // rather than a second, weaker supervisor.
+      case "container-run":
+        return await (dependencies.runContainer ?? runContainerCommand)({
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
       case "logs": {
         const paths = fortressPaths();
         const { moduleFilter, linesBack, follow } = parseLogsArgs(args.slice(1));

@@ -66,6 +66,12 @@ export const ENV_ENABLED_DISABLE_REFUSAL =
   "Writing `enabled: false` here would change nothing: the environment wins, and the " +
   "supervisor would keep the console up.";
 
+/** `ui disable` inside a container, where the console is a supervisor CHILD.
+ *  There is no unit to stop and no terminal to Ctrl-C — the supervisor re-reads
+ *  the setting and stops it, which is why the flip is the whole act here. */
+export const CONTAINER_DISABLE_NOTE =
+  "The container supervisor stops the console within a few seconds and will not restart it.";
+
 /** What `ui disable` prints once it has actually done it. */
 export const DISABLE_PROPAGATION_NOTE =
   "The workbench button disappears on the next tunnel reconnect (or daemon restart).";

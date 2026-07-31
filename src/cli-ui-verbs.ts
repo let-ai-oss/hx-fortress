@@ -45,6 +45,7 @@ import {
 } from "./ui/config";
 import { detectContainer } from "./ui/container";
 import {
+  CONTAINER_DISABLE_NOTE,
   DISABLE_PROPAGATION_NOTE,
   ENV_ENABLED_DISABLE_REFUSAL,
   foregroundDisableRefusal,
@@ -289,21 +290,27 @@ async function enableVerb(ctx: Ctx): Promise<number> {
 /**
  * Flip the setting, stop the service, and revoke every live session.
  *
- * Three arms, because there are three things that can be running the console and
- * only one of them takes orders from this file:
+ * Four arms, because there are four things that can be running the console and
+ * only two of them take orders from this file:
  *
  *   • enabled by FORTRESS_UI_ENABLE — a file write changes nothing, so refuse and
  *     name what would;
- *   • a foreground `hx-fortress ui` — no unit to stop and no supervisor to
- *     signal, so refuse and name the pid rather than silently doing nothing;
- *   • a unit or a container supervisor — flip, stop, and revoke.
+ *   • a unit — flip, stop, and revoke;
+ *   • a CONTAINER — flip and revoke. There is no unit to stop, and the running
+ *     console is the supervisor's child, not something this shell may kill: the
+ *     supervisor re-reads this setting before every respawn and stops the child
+ *     when it flips, so writing the file IS the act. Killing the pid here would
+ *     be undone by the next respawn;
+ *   • a foreground `hx-fortress ui` — no unit, no supervisor, nothing to notice
+ *     the flip, so refuse and name the pid rather than silently doing nothing.
  */
 async function disableVerb(ctx: Ctx): Promise<number> {
   if (uiEnabledFromEnv(ctx.env)) {
     throw new Error(ENV_ENABLED_DISABLE_REFUSAL);
   }
   const unitInstalled = await ctx.service.installed();
-  if (!unitInstalled) {
+  const container = detectContainer({ env: ctx.env, platform: ctx.platform });
+  if (!unitInstalled && !container.container) {
     const holder = await readInstanceLock(ctx.instanceLock);
     if (holder && holderAlive(holder)) {
       throw new Error(foregroundDisableRefusal(holder.pid));
@@ -316,6 +323,7 @@ async function disableVerb(ctx: Ctx): Promise<number> {
   if (unitInstalled) await ctx.service.stopAndDisable();
   ctx.write("Console disabled.");
   ctx.write(`Live sessions revoked (session epoch ${users.sessionEpoch}).`);
+  if (!unitInstalled && container.container) ctx.write(CONTAINER_DISABLE_NOTE);
   ctx.write(DISABLE_PROPAGATION_NOTE);
   return 0;
 }

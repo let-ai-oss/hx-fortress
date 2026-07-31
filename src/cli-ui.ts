@@ -38,6 +38,11 @@ import { getServiceManager } from "./service";
 import { FileCredentialStore } from "./cloud/credentials";
 import { FileSigningKeyStore } from "./gateway/signing-key-store";
 import { writeClockSkew } from "./ui/clock-skew";
+import {
+  applyBootstrapUser,
+  bootstrapRequestPath,
+  consumeBootstrapRequest,
+} from "./ui/bootstrap-user";
 
 type WriteLine = (line: string) => void;
 
@@ -321,6 +326,22 @@ export async function runUiCommand(
   for (const note of [...url.notes, ...bind.notes]) write(`  ${note}`);
   if (flags.supervised) {
     write("  supervised: it stops when `hx-fortress ui disable` flips the setting");
+  }
+
+  // The container's first account, if one was staged. AFTER the URL is printed,
+  // because the setup link is built on it — and consumed as it is read, so a
+  // respawned console prints nothing and mints nothing.
+  const staged = await consumeBootstrapRequest(bootstrapRequestPath(paths.uiRoot));
+  if (staged) {
+    const applied = await applyBootstrapUser({
+      request: staged,
+      users: runtime.users,
+      base: url.base,
+    }).catch((error: unknown) => ({
+      created: false,
+      lines: [`could not apply FORTRESS_UI_BOOTSTRAP_USER: ${error instanceof Error ? error.message : String(error)}`],
+    }));
+    for (const line of applied.lines) write(`  ${line}`);
   }
   return 0;
 }

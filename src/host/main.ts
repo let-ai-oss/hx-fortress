@@ -18,6 +18,7 @@ import {
   type VaultCredentials,
 } from "../modules/session-vault/credentials.js";
 import { applyHeadlessBootstrap } from "./headless-bootstrap";
+import { adoptDaemonHome } from "./daemon-home";
 import {
   DEFAULT_GATEWAY_PUBLIC_URL,
   ensureCoreModulesEnabled,
@@ -145,6 +146,12 @@ export async function runFortressHost(
   const root = dependencies.root;
   const version = dependencies.version ?? packageJson.version;
   const paths = fortressPaths(root);
+  // ONCE, and before anything reads or writes a credential — the bootstrap
+  // below rebuilds credentials.json, and a home adopted after that write would
+  // leave the file the fortress is serving from and the one it just wrote in two
+  // different places. Never inside readVaultCredentials: that is a pure read the
+  // console's read class reaches, and re-homing a process is an effect.
+  const homeResolution = adoptDaemonHome({});
   // On a non-interactive host (the Railway cloud service — no TTY) tee every
   // record to stdout as well, so the platform's log capture actually shows
   // fortress activity + connection errors. File-only leaves logs in
@@ -249,6 +256,16 @@ export async function runFortressHost(
     // the scope-bound tunnel-MCP read path passes true) — forward it unchanged.
     return verifyGrant(token, key, orgId, opts);
   };
+
+  if (homeResolution.adopted) {
+    // Said out loud, with what was looked at: an operator comparing this against
+    // the volume they think they mounted is the only way a home that moved
+    // between image versions ever gets noticed.
+    bus.scopeFor("fortress").info("serving from an adopted fortress home", {
+      home: homeResolution.home,
+      searched: homeResolution.searched,
+    });
+  }
 
   // Cloud-service run mode: materialize storage credentials + a pending
   // enrollment from the environment before reading them off disk, so a fresh

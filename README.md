@@ -68,10 +68,12 @@ manager. It is not intended for direct user invocation.
 `hx-fortress host` also runs headless as a let.ai cloud service — no TUI, no
 interactive enroll wizard. A container started with only environment variables
 and an empty mounted volume enrolls into the hub on first boot and serves the
-gateway. The Dockerfile sets `FORTRESS_ROOT=/data` and `ENTRYPOINT
-["hx-fortress", "host"]`; mount a volume at `/data` so `config.json`,
+gateway. The Dockerfile sets `FORTRESS_ROOT=/data`, `HOME=/data` and `ENTRYPOINT
+["hx-fortress", "container-run"]`; mount a volume at `/data` so `config.json`,
 `credentials.json`, and the signing key persist across restarts (restarts
-re-`hello` with the saved credential instead of re-enrolling).
+re-`hello` with the saved credential instead of re-enrolling). See
+[Containers, Railway and Kubernetes](#containers-railway-and-kubernetes) for the
+console's own variables and for what host networking changes.
 
 ### Environment contract
 
@@ -182,6 +184,54 @@ root, and no prompts. On first boot it downloads a pinned Postgres build, runs
 external Postgres instead. Readiness (`/readyz` and `hx-fortress status`) reflects
 Postgres availability; a failed or unreachable database holds readiness down with
 a specific reason.
+
+### Containers, Railway and Kubernetes
+
+The image's entrypoint is `hx-fortress container-run`, not `hx-fortress host`.
+The console is a separate process from the daemon — a stopped daemon cannot
+serve its own Start button — and an image has one entrypoint, so `container-run`
+starts both and keeps them up. It **refuses to run anywhere it is not pid 1**:
+pid 1 is what receives the runtime's `SIGTERM`, and a daemon killed by the grace
+timeout never writes its last status, never drains its audit spool and never
+stops its Postgres cleanly. `hx-fortress host` remains the way to run only the
+daemon.
+
+| Variable | Purpose |
+| --- | --- |
+| `FORTRESS_UI_ENABLE` | `1` turns the console on. `hx-fortress ui disable` cannot switch this off — the environment wins; unset it and redeploy. |
+| `FORTRESS_UI_PORT` | Console port (default `8788`). |
+| `FORTRESS_UI_PUBLIC_URL` | The https origin the console is reached on, when an ingress terminates TLS in front of it. |
+| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume with its setup link printed to the container log. A login that already exists is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
+
+`HOME=/data` in the image, beside `FORTRESS_ROOT=/data`, because
+`credentials.json` lives under `$HOME/.let/session-vault/`. An image whose HOME
+was elsewhere kept the organization's bucket keys in the container's writable
+layer, and `VOLUME ["/data"]` does not cover that layer, so a plain image
+upgrade discards them. The daemon checks the older locations once at boot and
+adopts what it finds, so upgrading does not lose an enrollment — but only where
+a volume actually covers the old path.
+
+**Publish the console to the host's loopback**, and reach it over an SSH
+forward or put an ingress in front of it:
+
+```sh
+docker run -p 127.0.0.1:8787:8787 -p 127.0.0.1:8788:8788 -v hx-data:/data …
+```
+
+Inside a Docker-class container (Docker, Podman, Kubernetes, Railway) the
+console binds the dual-stack wildcard once `FORTRESS_UI_ENABLE` is set. That is
+safe **because the publish is the boundary**: the container's network namespace
+is reached only through the port you published, the Service you declared or the
+domain Railway attached.
+
+**`--network host` (Docker) and `hostNetwork: true` (Kubernetes) remove that
+boundary.** There is no namespace and no publish indirection, so the same
+wildcard bind is a real LAN bind — the console is reachable from anything that
+can route to the node, with the operator's password as the only barrier. Nothing
+inside the container can detect either setting, so the console cannot warn you
+specifically: if you use them, set `FORTRESS_UI_BIND=127.0.0.1` and reach the
+console over an SSH forward, or put a TLS-terminating ingress in front and set
+`FORTRESS_UI_PUBLIC_URL`.
 
 ### Health checks
 
