@@ -1,10 +1,11 @@
 # gitleaks configuration for hx-fortress
 #
-# Extends the built-in ruleset (all default detectors stay active) and adds a
-# narrow, path-scoped allowlist for the intentionally secret-shaped TEST FIXTURES
-# in test/embed-scrub.test.ts that exercise the embedding-scrub logic. They are
-# crafted strings proving the scrubber redacts secrets, not live credentials, so
-# gitleaks must not fail on them. Every other file is fully scanned.
+# Extends the built-in ruleset (all default detectors stay active) and adds
+# narrow, path-scoped allowlists for the intentionally secret-shaped TEST
+# FIXTURES that some suites cannot do without: the crafted strings proving the
+# embedding scrubber redacts secrets, and the 32-hex credentialRef ids proving a
+# rotation carries a reference and never the credential. Neither is a live
+# credential. Every other file is fully scanned.
 
 title = "hx-fortress gitleaks config"
 
@@ -19,4 +20,17 @@ description = "Redacted secret-scrub test fixtures (test/embed-scrub.test.ts) â€
 # by path (not a blanket regex) keeps every other file fully scanned.
 paths = [
   '''test/embed-scrub\.test\.ts''',
+]
+
+[[allowlists]]
+description = "credentialRef fixtures â€” 32-hex indirection ids, which are not credentials"
+# A `credentialRef` is 32 lowercase hex characters by construction: it names the
+# INDIRECTION, and exists precisely so the secret it points at never travels on
+# the command. A conforming fixture therefore has to look like a key to the
+# generic detector, and cannot be softened without destroying what the test
+# proves. These two files carry those fixtures; every other file, including
+# every other test, stays fully scanned.
+paths = [
+  '''test/console-commands\.test\.ts''',
+  '''test/console-runtime-files\.test\.ts''',
 ]
