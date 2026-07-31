@@ -13,29 +13,45 @@
 // the cluster's clean stop all do not happen. pid 1 is also the parent every
 // orphan is re-parented to, so it is the only process that can reap them.
 //
+// THE DAEMON IS NOT RESTARTED. Its exit is this process's exit, with its code.
+// A supervisor that respawned it would report a healthy container over a
+// fortress that has never once come up: no crash loop for the orchestrator to
+// see, no rollback signal, and FORTRESS_STORE_EXIT_ON_WEDGE — whose whole
+// contract is "exit and let something restart me" — silently answered by
+// something that restarts nothing else. It is also unsurvivable in practice:
+// `pg_ctl` daemonizes the postmaster, so a dead daemon leaves its cluster
+// re-parented to pid 1 and the next daemon cannot start one that is already
+// running. That container serves every Postgres-backed surface as dark.
+//
+// THE CONSOLE IS RESTARTED, WITH BACKOFF. It is the secondary process and its
+// failures are its own; a console that exits immediately backs off toward the
+// cap instead of spinning through the container's log.
+//
 // THE CONSOLE'S ENABLEMENT IS RE-READ BEFORE EVERY RESPAWN, never captured at
 // boot. `ui enable` and `ui disable` write a file, and in a container there is no
 // unit for `ui disable` to stop — the console stops because this loop notices.
 // The same read is what stops a disabled console from being respawned after it
 // exits, which is the difference between "disabled" and "restarting forever".
-//
-// SIGNALLING A CHILD IS GUARDED BY IDENTITY, NOT BY LIVENESS. Before this process
-// signals a console it believes it started, it re-checks the recorded pid
-// against the machine's boot id AND the process's start time. A loopback probe
-// would only prove that SOMETHING is listening on the port; a pid check alone
-// would only prove that SOMETHING has that number. The kernel recycles pids
-// inside one boot, and the most likely recycler in this container is
-// `hx-fortress host` — the one process a console shutdown must never SIGTERM.
 
+import { identify, signalIfStillOurs, spawnFortress, type ChildIdentity, type SupervisedChild } from "./container-children";
 import { fortressPaths } from "./host/paths";
 import { LiveUiConfig, effectiveUiEnabled } from "./ui/config";
-import { holderAlive, machineBootId, processStartToken, type InstanceLockRecord } from "./ui/instance";
+import { proveIdentity, type IdentityVerdict, type InstanceLockRecord } from "./ui/instance";
 import { bootstrapRequestPath, writeBootstrapRequest } from "./ui/bootstrap-user";
 
-/** How long to wait after a child exits before starting it again. Long enough
- *  that a binary which exits immediately does not spin, short enough that a
- *  genuine crash is back inside a health check's window. */
-export const RESPAWN_DELAY_MS = 2_000;
+export type { ChildIdentity, SupervisedChild };
+export { signalIfStillOurs, spawnFortress };
+
+/** The first console respawn delay, and the ceiling it doubles toward. Long
+ *  enough that a binary which exits immediately does not spin; short enough that
+ *  a genuine crash is back inside a health check's window. */
+export const RESPAWN_BASE_MS = 1_000;
+export const RESPAWN_MAX_MS = 30_000;
+
+/** How long a console has to stay up before its next crash is treated as a fresh
+ *  one. Without it the backoff is permanent: a console that has run for a day
+ *  would come back at the cap after a single restart. */
+export const RESPAWN_RESET_MS = 60_000;
 
 /** How long the daemon is given to stop on its own after the container runtime
  *  asks. Deliberately under Docker's default 10s grace: a supervisor that used
@@ -51,11 +67,11 @@ export const NOT_PID_ONE_REFUSAL =
   "init wrapper it can do neither, and the daemon would be killed rather than stopped. " +
   "Set ENTRYPOINT [\"hx-fortress\", \"container-run\"], or run `hx-fortress host` directly.";
 
-export interface SupervisedChild {
-  /** The pid, when the child is running. */
-  readonly pid: number;
-  kill(signal: NodeJS.Signals | number): void;
-  readonly exited: Promise<number>;
+/** Doubling from the base to the cap. Exported because the schedule is a
+ *  decision, and a test that re-derived it would only re-state the code. */
+export function respawnDelayMs(attempt: number): number {
+  const doubled = RESPAWN_BASE_MS * 2 ** Math.max(0, attempt);
+  return Math.min(RESPAWN_MAX_MS, doubled);
 }
 
 type Who = "daemon" | "console";
@@ -72,57 +88,18 @@ export interface ContainerRunDeps {
   pid?: number;
   fortressRoot?: string;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
   /** Injected in tests; the real loop runs until it is signalled. */
   stopSignal?: Promise<void>;
   /** Proves a recorded child is still the process that was started. */
-  alive?: (record: InstanceLockRecord) => boolean;
-}
-
-/** What the supervisor remembers about a child it started: enough to prove, later
- *  and from the outside, that the pid it holds is still the process it started. */
-export interface ChildIdentity {
-  record: InstanceLockRecord;
-  child: SupervisedChild;
-}
-
-function identify(child: SupervisedChild, port: number): ChildIdentity {
-  return {
-    child,
-    record: {
-      pid: child.pid,
-      bootId: machineBootId(),
-      ...processStartToken(child.pid),
-      port,
-    },
-  };
+  prove?: (record: InstanceLockRecord) => IdentityVerdict;
 }
 
 /**
- * Signal a child, but only once it has been proven to still BE that child.
+ * Run the container until the daemon stops, or until it is asked to.
  *
- * Returns false when the identity no longer matches — the process exited and its
- * number was reused, and the thing wearing it now is somebody else's.
- */
-export function signalIfStillOurs(
-  identity: ChildIdentity,
-  signal: NodeJS.Signals = "SIGTERM",
-  alive: (record: InstanceLockRecord) => boolean = holderAlive,
-): boolean {
-  if (!alive(identity.record)) return false;
-  try {
-    identity.child.kill(signal);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Run the container until it is asked to stop.
- *
- * The daemon is unconditional; the console comes and goes with the enablement
- * predicate. Both are respawned, and neither respawn is decided from a value
- * read at boot.
+ * Returns the daemon's exit code, so the orchestrator sees what the fortress
+ * saw rather than a supervisor's opinion of it.
  */
 export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   const pid = deps.pid ?? process.pid;
@@ -130,7 +107,8 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
 
   const paths = fortressPaths(deps.fortressRoot);
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  const alive = deps.alive ?? holderAlive;
+  const now = deps.now ?? Date.now;
+  const prove = deps.prove ?? proveIdentity;
   const config = new LiveUiConfig(paths.uiConfig, (message) => deps.writeLine(message));
   const uiEnabled = async (): Promise<boolean> => {
     try {
@@ -169,13 +147,16 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   interface Slot {
     identity: ChildIdentity | null;
     exit: Promise<Settled> | null;
+    startedAt: number;
+    crashes: number;
   }
-  const daemon: Slot = { identity: null, exit: null };
-  const ui: Slot = { identity: null, exit: null };
+  const daemon: Slot = { identity: null, exit: null, startedAt: 0, crashes: 0 };
+  const ui: Slot = { identity: null, exit: null, startedAt: 0, crashes: 0 };
 
   const start = (slot: Slot, who: Who, args: readonly string[], port: number): void => {
     const identity = identify(deps.spawn(args), port);
     slot.identity = identity;
+    slot.startedAt = now();
     slot.exit = identity.child.exited.then((code) => ({ who, code }));
     deps.writeLine(`${who} started (pid ${identity.record.pid})`);
   };
@@ -185,6 +166,7 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   startDaemon();
   if (await uiEnabled()) startConsole();
 
+  let exitCode = 0;
   while (!stopping) {
     const races: Promise<Settled>[] = [
       stopped,
@@ -196,13 +178,13 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
     if (stopping || settled.who === "stop") break;
 
     if (settled.who === "daemon") {
+      // D4: host exit ⇒ exit. See the header — this is the whole reason the
+      // container is allowed to fail visibly.
       daemon.identity = null;
       daemon.exit = null;
-      deps.writeLine(`daemon exited (${settled.code}); restarting in ${RESPAWN_DELAY_MS}ms`);
-      await sleep(RESPAWN_DELAY_MS);
-      if (stopping) break;
-      startDaemon();
-      continue;
+      exitCode = settled.code;
+      deps.writeLine(`daemon exited (${settled.code}); stopping the container`);
+      break;
     }
 
     if (settled.who === "console") {
@@ -214,8 +196,12 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
         deps.writeLine("console exited and is disabled; leaving it stopped");
         continue;
       }
-      deps.writeLine(`console exited (${settled.code}); restarting in ${RESPAWN_DELAY_MS}ms`);
-      await sleep(RESPAWN_DELAY_MS);
+      // A console that ran long enough to be working is a fresh failure, not the
+      // next step of the last one.
+      ui.crashes = now() - ui.startedAt >= RESPAWN_RESET_MS ? 0 : ui.crashes + 1;
+      const delay = respawnDelayMs(ui.crashes - 1);
+      deps.writeLine(`console exited (${settled.code}); restarting in ${delay}ms`);
+      await sleep(delay);
       if (stopping) break;
       startConsole();
       continue;
@@ -229,7 +215,7 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
       startConsole();
     } else if (!enabled && running) {
       deps.writeLine(
-        signalIfStillOurs(running, "SIGTERM", alive)
+        signalIfStillOurs(running, "SIGTERM", prove)
           ? `console disabled; stopping pid ${running.record.pid}`
           : "console disabled; the process it was is already gone",
       );
@@ -238,13 +224,14 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
     }
   }
 
-  return await shutdown({
+  await shutdown({
     daemon: daemon.identity,
     console: ui.identity,
     writeLine: deps.writeLine,
     sleep,
-    alive,
+    prove,
   });
+  return exitCode;
 }
 
 /**
@@ -259,20 +246,19 @@ async function shutdown(args: {
   console: ChildIdentity | null;
   writeLine: (line: string) => void;
   sleep: (ms: number) => Promise<void>;
-  alive: (record: InstanceLockRecord) => boolean;
-}): Promise<number> {
+  prove: (record: InstanceLockRecord) => IdentityVerdict;
+}): Promise<void> {
   args.writeLine("stopping");
   const waits: Promise<unknown>[] = [];
   for (const identity of [args.console, args.daemon]) {
     if (!identity) continue;
-    if (signalIfStillOurs(identity, "SIGTERM", args.alive)) waits.push(identity.child.exited);
+    if (signalIfStillOurs(identity, "SIGTERM", args.prove)) waits.push(identity.child.exited);
   }
-  if (waits.length === 0) return 0;
+  if (waits.length === 0) return;
   // Bounded: the runtime's own grace period is next, and a supervisor still
   // waiting when it expires is SIGKILLed together with everything it was
   // waiting for.
   await Promise.race([Promise.all(waits), args.sleep(SHUTDOWN_GRACE_MS)]);
-  return 0;
 }
 
 function errorText(error: unknown): string {
@@ -284,27 +270,6 @@ function signalled(signals: readonly NodeJS.Signals[]): Promise<void> {
   return new Promise<void>((resolve) => {
     for (const signal of signals) process.once(signal, () => resolve());
   });
-}
-
-/** The production child factory: this very binary, re-invoked with a verb. Argv
- *  rather than a shell line — nothing here is interpolated into a command. */
-export function spawnFortress(argv0: string): (args: readonly string[]) => SupervisedChild {
-  return (args) => {
-    const child = Bun.spawn([argv0, ...args], {
-      // Inherited on purpose: the container's log capture is the only place these
-      // two processes are ever read from.
-      stdout: "inherit",
-      stderr: "inherit",
-      stdin: "ignore",
-    });
-    return {
-      get pid(): number {
-        return child.pid;
-      },
-      kill: (signal) => child.kill(signal as number),
-      exited: child.exited,
-    };
-  };
 }
 
 /** The verb. Separated from the loop so the loop takes no process globals. */

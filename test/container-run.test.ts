@@ -9,6 +9,10 @@ import path from "node:path";
 
 import {
   NOT_PID_ONE_REFUSAL,
+  RESPAWN_BASE_MS,
+  RESPAWN_MAX_MS,
+  RESPAWN_RESET_MS,
+  respawnDelayMs,
   runContainer,
   signalIfStillOurs,
   SUPERVISE_TICK_MS,
@@ -35,7 +39,7 @@ import { CONTAINER_DISABLE_NOTE } from "../src/ui/copy";
 import { runUiVerb } from "../src/cli-ui-verbs";
 import { runCli } from "../src/cli";
 import type { UiServiceControl } from "../src/ui/service-control";
-import type { InstanceLockRecord } from "../src/ui/instance";
+import type { IdentityVerdict, InstanceLockRecord } from "../src/ui/instance";
 
 let root = "";
 
@@ -75,7 +79,9 @@ interface Rig {
   finished: Promise<number>;
 }
 
-function rig(over: { env?: Record<string, string | undefined>; slowTick?: boolean } = {}): Rig {
+function rig(
+  over: { env?: Record<string, string | undefined>; slowTick?: boolean; now?: () => number } = {},
+): Rig {
   const spawned: string[][] = [];
   const children: FakeChild[] = [];
   const lines: string[] = [];
@@ -98,15 +104,22 @@ function rig(over: { env?: Record<string, string | undefined>; slowTick?: boolea
     sleep: (ms) =>
       new Promise<void>((r) => setTimeout(r, over.slowTick && ms >= SUPERVISE_TICK_MS ? 10_000 : 1)),
     stopSignal,
+    ...(over.now ? { now: over.now } : {}),
     // The fake children have no pids the kernel knows; the identity guard is
     // exercised on its own below.
-    alive: () => true,
+    prove: () => "same",
   };
   const finished = runContainer(deps);
   return { deps, spawned, children, lines, stop: release, finished };
 }
 
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 25));
+
+/** The delay each console respawn announced, in order. */
+const respawnDelays = (r: Rig): number[] =>
+  r.lines
+    .filter((line) => line.startsWith("console exited"))
+    .map((line) => Number(/restarting in (\d+)ms/.exec(line)?.[1] ?? 0));
 
 async function enableConsole(enabled: boolean): Promise<void> {
   const store = new UiConfigStore(fortressPaths(root).uiConfig);
@@ -175,15 +188,61 @@ describe("what the loop starts", () => {
 });
 
 describe("what the loop re-reads", () => {
-  test("a daemon that dies comes back", async () => {
+  test("a daemon that dies takes the container with it, carrying its code", async () => {
+    await enableConsole(true);
     const r = rig();
     await settle();
     r.children[0]?.die(7);
+    // Not respawned. A supervisor that restarted it would report a healthy
+    // container over a fortress that never came up — no crash loop for the
+    // orchestrator to see and no rollback signal — and the postmaster `pg_ctl`
+    // daemonized is re-parented to pid 1, so the next daemon cannot start a
+    // cluster that is already running.
+    expect(await r.finished).toBe(7);
+    expect(r.spawned).toEqual([["host"], ["ui", "--supervised"]]);
+    expect(r.lines.some((l) => l.includes("daemon exited (7); stopping the container"))).toBe(true);
+    // The console goes down with it rather than serving beside nothing.
+    expect(r.children[1]?.signals).toEqual(["SIGTERM"]);
+  });
+
+  test("a console that keeps crashing backs off instead of spinning", async () => {
+    await enableConsole(true);
+    // Real ticks here: the rig collapses every sleep to a yield, and the delay
+    // this test reads is the one the loop announced before taking it.
+    const r = rig();
     await settle();
-    expect(r.spawned).toEqual([["host"], ["host"]]);
-    expect(r.lines.some((l) => l.includes("daemon exited (7)"))).toBe(true);
+    r.children[1]?.die(1);
+    await settle();
+    r.children[2]?.die(1);
+    await settle();
+    expect(respawnDelays(r)).toEqual([RESPAWN_BASE_MS, RESPAWN_BASE_MS * 2]);
     r.stop();
     await r.finished;
+  });
+
+  test("a console that stayed up is a fresh failure, not the next step of the last one", async () => {
+    await enableConsole(true);
+    let clock = 0;
+    const r = rig({ slowTick: true, now: () => clock });
+    await settle();
+    // It ran long enough to have been working. Without the reset the backoff is
+    // permanent, and a console up for a day comes back at the cap after one
+    // restart.
+    clock += RESPAWN_RESET_MS;
+    r.children[1]?.die(1);
+    await settle();
+    clock += RESPAWN_RESET_MS;
+    r.children[2]?.die(1);
+    await settle();
+    expect(respawnDelays(r)).toEqual([RESPAWN_BASE_MS, RESPAWN_BASE_MS]);
+    r.stop();
+    await r.finished;
+  });
+
+  test("the backoff doubles to a cap, and no further", () => {
+    expect(respawnDelayMs(0)).toBe(RESPAWN_BASE_MS);
+    expect(respawnDelayMs(1)).toBe(RESPAWN_BASE_MS * 2);
+    expect(respawnDelayMs(99)).toBe(RESPAWN_MAX_MS);
   });
 
   test("a console that dies while DISABLED is not started again", async () => {
@@ -257,13 +316,14 @@ describe("what may be signalled", () => {
     const child = new FakeChild(pid);
     return {
       child,
+      exited: false,
       record: { pid, bootId: "boot-a", startTicks: 100, port: 8788 },
     };
   }
 
   test("a child whose identity still matches is signalled", () => {
     const target = identity(1234);
-    expect(signalIfStillOurs(target, "SIGTERM", () => true)).toBe(true);
+    expect(signalIfStillOurs(target, "SIGTERM", () => "same")).toBe(true);
     expect((target.child as FakeChild).signals).toEqual(["SIGTERM"]);
   });
 
@@ -273,9 +333,28 @@ describe("what may be signalled", () => {
     // would say "something has that number". Neither says it is still ours, and
     // the process most likely to be wearing a recycled pid in this container is
     // the daemon a console shutdown must never touch.
-    const stale = (record: InstanceLockRecord): boolean => record.startTicks === 999;
+    const stale = (record: InstanceLockRecord): IdentityVerdict =>
+      record.startTicks === 999 ? "same" : "gone";
     expect(signalIfStillOurs(target, "SIGTERM", stale)).toBe(false);
     expect((target.child as FakeChild).signals).toEqual([]);
+  });
+
+  test("a child this process already watched exit is never signalled", () => {
+    const target = identity(1234);
+    target.exited = true;
+    // The parent's own observation, and the reason UNPROVEN is allowed to pass
+    // below: a reaped pid's next owner is somebody else.
+    expect(signalIfStillOurs(target, "SIGTERM", () => "same")).toBe(false);
+    expect((target.child as FakeChild).signals).toEqual([]);
+  });
+
+  test("an UNPROVEN record still stops the console — a slim image has no start token", () => {
+    // Neither /proc nor `ps`: the record cannot say whose pid this is. The
+    // supervisor has seen no exit, which is what carries it — a bare pid check
+    // on its own would not.
+    const target = identity(1234);
+    expect(signalIfStillOurs(target, "SIGTERM", () => "unproven")).toBe(true);
+    expect((target.child as FakeChild).signals).toEqual(["SIGTERM"]);
   });
 
   test("the identity carries the boot id AND the start token, not just the pid", () => {

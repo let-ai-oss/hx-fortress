@@ -91,31 +91,45 @@ export function processStartToken(pid: number): Pick<InstanceLockRecord, "startT
   return started ? { startTime: started } : {};
 }
 
+/** Three answers, because two collapse the case that matters. */
+export type IdentityVerdict = "same" | "gone" | "unproven";
+
 /**
- * True when the process named by the record is still the one that wrote it.
+ * Is the process named by this record still the one that wrote it?
  *
  * A record from a previous boot is dead by definition. Within one boot, a pid
  * that exists but started at a different time is a DIFFERENT process wearing a
- * recycled number, and treating it as the holder would leave the console
- * permanently unable to start.
+ * recycled number.
+ *
+ * UNPROVEN is the third answer, and it is not a synonym for either. It means the
+ * pid exists and nothing available on this platform — no /proc, no `ps` — can
+ * say whose it is. Collapsing it into "same" is a claim the machine did not
+ * make, and every caller weighs it differently: refusing to start a console is
+ * recoverable where two consoles are not, while signalling the wrong pid in a
+ * container is how a console shutdown kills the daemon.
  */
-export function holderAlive(record: InstanceLockRecord): boolean {
-  if (record.bootId !== machineBootId()) return false;
+export function proveIdentity(record: InstanceLockRecord): IdentityVerdict {
+  if (record.bootId !== machineBootId()) return "gone";
   try {
     process.kill(record.pid, 0);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EPERM") return false;
+    if ((err as NodeJS.ErrnoException).code !== "EPERM") return "gone";
   }
   const current = processStartToken(record.pid);
   if (record.startTicks !== undefined && current.startTicks !== undefined) {
-    return record.startTicks === current.startTicks;
+    return record.startTicks === current.startTicks ? "same" : "gone";
   }
   if (record.startTime !== undefined && current.startTime !== undefined) {
-    return record.startTime === current.startTime;
+    return record.startTime === current.startTime ? "same" : "gone";
   }
-  // No start token on either side: the pid check is all there is. Reported as
-  // alive, because refusing to start is recoverable and two consoles are not.
-  return true;
+  return "unproven";
+}
+
+/** True when the record's process may still be holding this lock. UNPROVEN reads
+ *  as alive here on purpose: a console that refuses to start says so and is
+ *  fixed in a second, and two consoles on one root cannot be. */
+export function holderAlive(record: InstanceLockRecord): boolean {
+  return proveIdentity(record) !== "gone";
 }
 
 export function parseInstanceLock(raw: unknown): InstanceLockRecord | null {
