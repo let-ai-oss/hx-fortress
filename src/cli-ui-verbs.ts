@@ -296,25 +296,29 @@ async function enableVerb(ctx: Ctx): Promise<number> {
  *   • enabled by FORTRESS_UI_ENABLE — a file write changes nothing, so refuse and
  *     name what would;
  *   • a unit — flip, stop, and revoke;
- *   • a CONTAINER — flip and revoke. There is no unit to stop, and the running
- *     console is the supervisor's child, not something this shell may kill: the
- *     supervisor re-reads this setting before every respawn and stops the child
- *     when it flips, so writing the file IS the act. Killing the pid here would
- *     be undone by the next respawn;
+ *   • a SUPERVISED console — flip and revoke. There is no unit to stop, and the
+ *     running console is the supervisor's child, not something this shell may
+ *     kill: the supervisor re-reads this setting before every respawn and stops
+ *     the child when it flips, so writing the file IS the act. Killing the pid
+ *     here would be undone by the next respawn;
  *   • a foreground `hx-fortress ui` — no unit, no supervisor, nothing to notice
  *     the flip, so refuse and name the pid rather than silently doing nothing.
+ *
+ * Which of the last two is which is read off the console's own lock, not off the
+ * container detector. A container is not a supervisor: a custom entrypoint or an
+ * image built before `container-run` runs the console with nothing watching it,
+ * and telling that operator "the supervisor stops it within a few seconds" names
+ * a process that does not exist.
  */
 async function disableVerb(ctx: Ctx): Promise<number> {
   if (uiEnabledFromEnv(ctx.env)) {
     throw new Error(ENV_ENABLED_DISABLE_REFUSAL);
   }
   const unitInstalled = await ctx.service.installed();
-  const container = detectContainer({ env: ctx.env, platform: ctx.platform });
-  if (!unitInstalled && !container.container) {
-    const holder = await readInstanceLock(ctx.instanceLock);
-    if (holder && holderAlive(holder)) {
-      throw new Error(foregroundDisableRefusal(holder.pid));
-    }
+  const holder = unitInstalled ? null : await readInstanceLock(ctx.instanceLock);
+  const live = holder && holderAlive(holder) ? holder : null;
+  if (live && !live.supervised) {
+    throw new Error(foregroundDisableRefusal(live.pid));
   }
   await ctx.config.update((config) => ({ ...config, enabled: false }));
   // The GLOBAL session epoch has exactly one writer, and this is it. Live
@@ -323,7 +327,7 @@ async function disableVerb(ctx: Ctx): Promise<number> {
   if (unitInstalled) await ctx.service.stopAndDisable();
   ctx.write("Console disabled.");
   ctx.write(`Live sessions revoked (session epoch ${users.sessionEpoch}).`);
-  if (!unitInstalled && container.container) ctx.write(CONTAINER_DISABLE_NOTE);
+  if (live?.supervised) ctx.write(CONTAINER_DISABLE_NOTE);
   ctx.write(DISABLE_PROPAGATION_NOTE);
   return 0;
 }

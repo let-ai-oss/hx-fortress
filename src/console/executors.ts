@@ -145,6 +145,11 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
     },
 
     self_test: async () => {
+      // Refused BY NAME while a migration holds the write gate. The probe is a
+      // real bucket WRITE, so the gate answers it with its wire literal —
+      // `vault_offline:ingest_paused:<deadline>`, which is addressed to a retrying
+      // client and reads to an operator as a broken bucket.
+      await assertNotMigrating(deps);
       const store = deps.store();
       if (!store) throw new Error("the object store is not initialized on this fortress");
       await store.selfTest();
@@ -204,8 +209,12 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
      */
     run_migration: async (ctx) => {
       const command = ctx.params.phase;
+      // The narrowing from a row's parameter to a command. The validator already
+      // guarantees it, in another file — so this is what makes the guarantee a
+      // type rather than a convention, and it names the row's fault instead of
+      // implying the build is too old to know the word.
       if (!isMigrationCommand(command)) {
-        throw new Error(`this build does not run a ${String(command)} migration step`);
+        throw new Error(`unknown storage-migration phase: ${String(command)}`);
       }
       return await deps.runMigration({
         command,

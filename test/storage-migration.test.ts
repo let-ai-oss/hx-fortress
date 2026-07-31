@@ -930,7 +930,7 @@ describe("the command surface", () => {
     expect(calls).toEqual([{ command: "swap", target: "b", credentialRef: "a".repeat(32) }]);
     await expect(
       executors.run_migration({ id: "c2", params: { phase: "teleport" }, credentialRef: null }),
-    ).rejects.toThrow(/does not run a teleport migration step/);
+    ).rejects.toThrow(/unknown storage-migration phase: teleport/);
   });
 
   test("the console offers the kind, so the control it ships can mint the row", () => {

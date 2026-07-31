@@ -15,6 +15,7 @@
 import os from "node:os";
 import path from "node:path";
 
+import { adoptDaemonHome } from "./host/daemon-home";
 import { fortressPaths } from "./host/paths";
 import { isUiSubcommand, runUiVerb } from "./cli-ui-verbs";
 import { installUiService, uninstallUiService } from "./cli-ui-service";
@@ -186,6 +187,14 @@ export async function runUiCommand(
   const write = deps.writeLine;
   const flags = parseFlags(args, env);
   const paths = fortressPaths(deps.fortressRoot);
+  // The same home walk the daemon does, for the same file. credentials.json
+  // lives under $HOME/.let/session-vault, and an image whose HOME moved between
+  // versions leaves the daemon adopting the older location at ITS boot while
+  // this process still looks at the new one — where the bucket panel reads
+  // empty and every residency proof answers "this fortress has no object-store
+  // credential". One walk, at boot, before anything reads the file. It writes
+  // nothing: an absent file is simply not a candidate.
+  const home = adoptDaemonHome({ env });
 
   const assets = await (deps.loadAssets ?? loadUiAssets)();
   if (!assets) {
@@ -234,7 +243,9 @@ export async function runUiCommand(
     return 1;
   }
 
-  const lock = await acquireInstanceLock(path.join(paths.uiRoot, "instance.lock"), port);
+  const lock = await acquireInstanceLock(path.join(paths.uiRoot, "instance.lock"), port, {
+    supervised: flags.supervised,
+  });
   if (!lock.ok) {
     write(`error: ${lock.message}`);
     return 1;
@@ -321,6 +332,12 @@ export async function runUiCommand(
       `${humanBytes(assets.manifest.bytes)}, sha256 ${assets.manifest.hash}`,
   );
   write(`  listening on ${bracketed(bind.hostname)}:${boundPort}`);
+  if (home.adopted) {
+    // Said out loud, like the daemon says it: a home that moved between image
+    // versions is only ever noticed by an operator comparing this line against
+    // the volume they think they mounted.
+    write(`  reading credentials from an adopted fortress home: ${home.home}`);
+  }
   for (const line of PEOPLE_VISIBILITY_DISCLOSURE) write(line);
   write(`  open ${url.base}`);
   for (const note of [...url.notes, ...bind.notes]) write(`  ${note}`);

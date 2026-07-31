@@ -269,6 +269,28 @@ describe("the rotation executor", () => {
     ).rejects.toThrow("a storage migration is in progress (run 3f1d)");
   });
 
+  test("so is the self-test — its probe is a bucket WRITE the gate refuses", async () => {
+    const cmdCredsDir = path.join(await mkdtemp(path.join(os.tmpdir(), "hx-creds-")), "cmd");
+    const executors = createCommandExecutors(
+      executorDeps({
+        cmdCredsDir,
+        episode: {
+          id: "3f1d",
+          pausedUntil: new Date(Date.now() + 60_000),
+          resumedAt: null,
+          rowWrittenAt: new Date(),
+          reason: "storage migration",
+        },
+      }),
+    );
+    // Unrefused, the gate answers with the literal it sends a retrying client —
+    // `vault_offline:ingest_paused:<deadline>` — and an operator reads a paused
+    // fortress as a broken bucket and goes off to re-issue keys mid-migration.
+    await expect(executors.self_test({ id: "c1", params: {}, credentialRef: null })).rejects.toThrow(
+      "a storage migration is in progress (run 3f1d)",
+    );
+  });
+
   test("a consumed reference is terminal — the same rotation cannot run twice", async () => {
     const cmdCredsDir = path.join(home, "cmd-creds");
     const ref = mintCredentialRef();

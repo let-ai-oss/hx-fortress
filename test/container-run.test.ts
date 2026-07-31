@@ -2,7 +2,7 @@
 // respawns anything, and what it is allowed to signal.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +39,7 @@ import { CONTAINER_DISABLE_NOTE } from "../src/ui/copy";
 import { runUiVerb } from "../src/cli-ui-verbs";
 import { runCli } from "../src/cli";
 import type { UiServiceControl } from "../src/ui/service-control";
+import { machineBootId, processStartToken } from "../src/ui/instance";
 import type { IdentityVerdict, InstanceLockRecord } from "../src/ui/instance";
 
 let root = "";
@@ -422,6 +423,17 @@ describe("where the daemon's credentials are", () => {
     expect(untouched.HOME).toBe("/data");
   });
 
+  test("both processes walk it — one container, two processes, one credentials.json", () => {
+    // The daemon adopting the older home while the console keeps the newer one
+    // is the state where the bucket panel reads empty and every residency proof
+    // answers "this fortress has no object-store credential", on a fortress that
+    // is ingesting perfectly well.
+    for (const file of ["src/host/main.ts", "src/cli-ui.ts"]) {
+      const text = readFileSync(path.join(import.meta.dir, "..", file), "utf8");
+      expect(`${file}: ${text.includes("adoptDaemonHome(")}`).toBe(`${file}: true`);
+    }
+  });
+
   test("the walk is not reachable from readVaultCredentials", () => {
     // A read-class console handler reaches that function, and the route classes
     // forbid a read route from having an effect. Re-homing the process is one.
@@ -518,12 +530,30 @@ describe("ui disable inside a container", () => {
     stopAndDisable: async () => {},
   };
 
+  /** A console holding its own lock, as this process would find it. */
+  async function lockHeldBy(record: Partial<InstanceLockRecord>): Promise<void> {
+    const file = path.join(fortressPaths(root).uiRoot, "instance.lock");
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      `${JSON.stringify({
+        pid: process.pid,
+        bootId: machineBootId(),
+        ...processStartToken(process.pid),
+        port: 8788,
+        ...record,
+      })}\n`,
+    );
+  }
+
   test("flips the setting and names the supervisor, instead of naming a pid to kill", async () => {
     await enableConsole(true);
+    // A SUPERVISED console: it recorded that something re-reads the setting and
+    // will stop it. That claim comes off its lock, never off the detector.
+    await lockHeldBy({ supervised: true });
     const lines: string[] = [];
     const code = await runUiVerb(["disable"], {
       writeLine: (line) => lines.push(line),
-      // Docker-class markers, and no unit: the console is a supervisor child.
       env: { KUBERNETES_SERVICE_HOST: "10.0.0.1" },
       platform: "linux",
       fortressRoot: root,
@@ -535,6 +565,26 @@ describe("ui disable inside a container", () => {
     // the supervisor reads.
     expect(lines.join("\n")).not.toContain("kill ");
     expect((await new UiConfigStore(fortressPaths(root).uiConfig).load()).enabled).toBe(false);
+  });
+
+  test("a container console nobody supervises is not promised a supervisor", async () => {
+    await enableConsole(true);
+    // A custom entrypoint, or an image built before `container-run`: the console
+    // is running and nothing is watching the setting. Saying the supervisor will
+    // stop it within a few seconds names a process that does not exist.
+    await lockHeldBy({});
+    await expect(
+      runUiVerb(["disable"], {
+        writeLine: () => {},
+        env: { KUBERNETES_SERVICE_HOST: "10.0.0.1" },
+        platform: "linux",
+        fortressRoot: root,
+        service: noUnit,
+      }),
+    ).rejects.toThrow(/running in the foreground/);
+    // And the setting is untouched, because the flip alone would have done
+    // nothing while reading as though it had.
+    expect((await new UiConfigStore(fortressPaths(root).uiConfig).load()).enabled).toBe(true);
   });
 
   test("the note says the supervisor will not bring it back", () => {

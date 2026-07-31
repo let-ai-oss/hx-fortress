@@ -38,6 +38,11 @@ export interface InstanceLockRecord {
   /** Elsewhere: the platform's own start timestamp, compared as a string. */
   startTime?: string;
   port: number;
+  /** True when something is watching this console and will act on the stored
+   *  enablement setting — a unit's ExecStart, or the container supervisor.
+   *  `ui disable` needs it: a console nobody supervises does not stop because a
+   *  file changed, and promising that it will is worse than saying nothing. */
+  supervised?: boolean;
 }
 
 export const MOVE_REMEDIATION =
@@ -143,6 +148,7 @@ export function parseInstanceLock(raw: unknown): InstanceLockRecord | null {
     port: value.port,
     ...(typeof value.startTicks === "number" ? { startTicks: value.startTicks } : {}),
     ...(typeof value.startTime === "string" ? { startTime: value.startTime } : {}),
+    ...(value.supervised === true ? { supervised: true } : {}),
   };
 }
 
@@ -160,12 +166,17 @@ export type InstanceAcquire =
 
 /** O_EXCL, then a liveness check on what is already there. A lock left by a
  *  killed console is reclaimed; one held by a live console is refused. */
-export async function acquireInstanceLock(file: string, port: number): Promise<InstanceAcquire> {
+export async function acquireInstanceLock(
+  file: string,
+  port: number,
+  options: { supervised?: boolean } = {},
+): Promise<InstanceAcquire> {
   const record: InstanceLockRecord = {
     pid: process.pid,
     bootId: machineBootId(),
     ...processStartToken(process.pid),
     port,
+    ...(options.supervised ? { supervised: true } : {}),
   };
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   for (let attempt = 0; attempt < 2; attempt += 1) {
