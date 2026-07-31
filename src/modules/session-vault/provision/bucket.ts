@@ -3,7 +3,7 @@
 // world-readable.
 
 import { capture, type RunResult } from "./exec.js";
-import { writeFile, unlink } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -105,9 +105,14 @@ export async function createGcsBucket(o: GcsBucketOpts, log: Log): Promise<boole
       { action: { type: "AbortIncompleteMultipartUpload" }, condition: { age: 1 } },
     ],
   });
-  const lifecycleFile = path.join(os.tmpdir(), `hx-fortress-lifecycle-${Date.now()}.json`);
+  // mkdtemp: a PRIVATE (0700, unpredictable) directory — this file's content
+  // becomes bucket lifecycle DELETION rules, so a predictable path in the
+  // shared temp dir would be a symlink/content-swap target (CodeQL
+  // js/insecure-temporary-file).
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-"));
+  const lifecycleFile = path.join(tmpDir, "lifecycle.json");
   try {
-    await writeFile(lifecycleFile, lifecycle, "utf8");
+    await writeFile(lifecycleFile, lifecycle, { encoding: "utf8", mode: 0o600 });
     const lr = await capture("gcloud", [
       "storage",
       "buckets",
@@ -117,7 +122,7 @@ export async function createGcsBucket(o: GcsBucketOpts, log: Log): Promise<boole
     ]);
     if (!lr.ok) log(`Lifecycle rule not applied (probe versions will accrue): ${lr.stderr || "unknown error"}`);
   } finally {
-    await unlink(lifecycleFile).catch(() => {});
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
   return true;
 }
