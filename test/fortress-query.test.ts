@@ -26,7 +26,7 @@ const CREDENTIAL: CloudCredential = {
   credential: "test-credential",
 };
 
-const POSTURE = { tunnel: true, directGateway: false, ingestPausedUntil: null };
+const POSTURE = { cloudOnlySessions: 3, routedHere: 41, computedAt: "2026-07-31T09:00:00.000Z" };
 
 function config(url: string): FortressConfig {
   return {
