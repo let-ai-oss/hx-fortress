@@ -40,6 +40,8 @@ import { FileStatusReader } from "../status-reader";
 import { downloadBaseFromCloudUrl } from "../update";
 import { classifyConnectError, resolveConsoleDb, type ConsoleDbState } from "./console-db";
 import { createConsoleReadPort } from "./console-read-port";
+import { createConsoleWritePort } from "./console-write-port";
+import { OFFERED_COMMAND_KINDS, type ConsoleWritePort } from "./mutate-routes";
 import type { UiConfig } from "./config";
 import type { EgressInputs } from "./egress";
 import { createLogEventProducer } from "./log-events";
@@ -67,6 +69,9 @@ export interface ConsoleMountOptions {
 
 export interface ConsoleMount {
   port: ConsoleReadPort;
+  /** The write surface. Separate from the read port on purpose: the read class
+   *  is defined by an interface that cannot express a write. */
+  write: ConsoleWritePort;
   /** The console's own spool writer: exports, sign-ins, and the two records the
    *  drain raises about the trail itself. */
   audit: ConsoleAudit;
@@ -260,6 +265,22 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     env,
   });
 
+  const write = createConsoleWritePort({
+    // Under an orchestrator there is no unit to drive, and the route says so
+    // rather than calling a manager that would answer for the wrong lifecycle.
+    service: options.serviceManager === "container" ? null : service,
+    serviceLogPath: paths.serviceLog,
+    executablePath: process.execPath,
+    db: () => {
+      void refresh();
+      return handle?.db ?? null;
+    },
+    // The heartbeat, not updatedAt: a transition-only timestamp says nothing
+    // about whether anyone is still polling.
+    heartbeatAt: async () => (await status.read().catch(() => null))?.host.writtenAt ?? null,
+    offered: OFFERED_COMMAND_KINDS,
+  });
+
   const ready = Promise.all([
     refresh(),
     credentialStore
@@ -283,7 +304,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }),
   ]).then(() => undefined);
 
-  return { port, audit, drain, ready };
+  return { port, write, audit, drain, ready };
 }
 
 function hostOf(dsn: string): string {

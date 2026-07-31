@@ -86,3 +86,24 @@ export const OPEN_WINDOW_COPY =
   "Failed sign-ins are collapsed into one record per account, source and 5-minute window, " +
   "written when the window closes. A console that stops mid-window loses that window and " +
   "nothing else.";
+
+/** Said by the service route, and by the disabled control, under an orchestrator.
+ *  The verbs exist on a host with a unit; here the lifecycle belongs to whatever
+ *  started the container, and a console that offered to restart it would be
+ *  claiming an authority it does not have. */
+export const CONTAINER_SERVICE_REFUSAL =
+  "this fortress runs under a container orchestrator, which owns starting, stopping and " +
+  "updating it. Use your orchestrator's controls.";
+
+/** Said when the daemon has written no recent heartbeat. Told BEFORE the request
+ *  is made: a row nobody polls for sits in the queue until its deadline and is
+ *  then rejected, which reads as a failure of the work rather than of the ask. */
+export const NO_POLLER_REFUSAL =
+  "the daemon is not running, so nothing would pick this up. Start the fortress first.";
+
+/** What every control that hands work to the daemon says about the answer it
+ *  will render. The console reports the daemon's own record, not the fact that
+ *  the request was accepted. */
+export const COMMAND_REQUEST_NOTE =
+  "The daemon does the work and records the result; this page shows its answer, not this " +
+  "request's success.";

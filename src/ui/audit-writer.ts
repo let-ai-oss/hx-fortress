@@ -121,6 +121,43 @@ export class ConsoleAudit implements ConsoleExportAudit {
   }
 
   /**
+   * A console act, recorded as an append-only pair around the work.
+   *
+   * The intent is fsynced BEFORE the mutation runs and the outcome after it
+   * returns, so a crash between them leaves an intent nothing answers — the
+   * honest state, and the one an auditor can act on. Never amended in place.
+   */
+  async run<T>(
+    action: string,
+    fields: {
+      actor?: string | null;
+      sessionRef?: string | null;
+      params?: Record<string, unknown> | null;
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const intent = await this.spool
+      .intent(action, {
+        actor: fields.actor ?? null,
+        sessionRef: fields.sessionRef ?? null,
+        params: fields.params ?? null,
+      })
+      .catch((error: unknown) => {
+        this.report(error);
+        return null;
+      });
+    try {
+      const result = await work();
+      if (intent) await this.spool.outcome(intent, "done").catch((e: unknown) => this.report(e));
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (intent) await this.spool.outcome(intent, "failed", message).catch(() => null);
+      throw error;
+    }
+  }
+
+  /**
    * Note one failed public-auth attempt. Nothing is written here, which is the
    * point. The caller must NOT call this for an attempt a rate bucket or the
    * global ceiling refused: those are counted by the limiter and write no

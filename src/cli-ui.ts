@@ -17,6 +17,7 @@ import path from "node:path";
 
 import { fortressPaths } from "./host/paths";
 import { isUiSubcommand, runUiVerb } from "./cli-ui-verbs";
+import { installUiService, uninstallUiService } from "./cli-ui-service";
 import { loadUiAssets, type UiAssets } from "./ui/assets";
 import {
   bracketed,
@@ -36,6 +37,22 @@ import { startUiServer, type UiServerCtx } from "./ui/server";
 import { getServiceManager } from "./service";
 
 type WriteLine = (line: string) => void;
+
+function uiServiceDeps(deps: UiCommandDeps): {
+  writeLine: WriteLine;
+  env?: Record<string, string | undefined>;
+  fortressRoot?: string;
+  platform?: string;
+  hostName?: string;
+} {
+  return {
+    writeLine: deps.writeLine,
+    ...(deps.env ? { env: deps.env } : {}),
+    ...(deps.fortressRoot ? { fortressRoot: deps.fortressRoot } : {}),
+    ...(deps.platform ? { platform: deps.platform } : {}),
+    ...(deps.hostName ? { hostName: deps.hostName } : {}),
+  };
+}
 
 export interface UiCommandDeps {
   writeLine: WriteLine;
@@ -138,6 +155,15 @@ export async function runUiCommand(
   args: readonly string[],
   deps: UiCommandDeps,
 ): Promise<number> {
+  // The unit verbs are flags rather than subcommands because they configure the
+  // very invocation the unit will make; they take the same --allow-insecure-bind
+  // the foreground console takes, and persist it.
+  if (args.includes("--install-service")) {
+    return await installUiService(args, uiServiceDeps(deps));
+  }
+  if (args.includes("--uninstall-service")) {
+    return await uninstallUiService(uiServiceDeps(deps));
+  }
   if (isUiSubcommand(args[0])) {
     return await runUiVerb(args, {
       writeLine: deps.writeLine,
@@ -190,7 +216,7 @@ export async function runUiCommand(
     publicUrl,
     uiEnable: env.FORTRESS_UI_ENABLE === "1" || env.FORTRESS_UI_ENABLE === "true",
     containerBind: env.FORTRESS_UI_CONTAINER_BIND === "1",
-    allowInsecureBind: flags.allowInsecureBind,
+    allowInsecureBind: flags.allowInsecureBind || stored.allowInsecureBind,
     container,
   });
 
@@ -232,7 +258,7 @@ export async function runUiCommand(
     env,
   });
   await mount.ready;
-  const ctx: UiServerCtx = { assets, port, runtime, read: mount, audit: mount.audit };
+  const ctx: UiServerCtx = { assets, port, runtime, read: mount, write: mount, audit: mount.audit };
   let started: { readonly port?: number | null };
   try {
     started = (deps.serve ?? startUiServer)(

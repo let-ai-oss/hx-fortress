@@ -46,6 +46,11 @@ export interface UiConfig {
   sessionIdleMinutes: number;
   /** An explicit console DSN, overriding pg.json in both modes. Never printed. */
   databaseUrl: string | null;
+  /** The operator's standing acceptance of a non-loopback bind, recorded by
+   *  `ui --install-service --allow-insecure-bind`. A unit carries no
+   *  FORTRESS_UI_* environment and cannot be handed a flag by whoever set the
+   *  value, so this file is where that gesture has to live. */
+  allowInsecureBind: boolean;
   /** Operator-set banner phrase. Non-org-identifying by contract — it renders to
    *  token-bearing arrivals only, never on a plain pre-auth sign-in. */
   marker: string | null;
@@ -65,6 +70,7 @@ export const UI_CONFIG_DEFAULTS: UiConfig = {
   sessionTtlHours: DEFAULT_SESSION_TTL_HOURS,
   sessionIdleMinutes: DEFAULT_SESSION_IDLE_MINUTES,
   databaseUrl: null,
+  allowInsecureBind: false,
   marker: null,
 };
 
@@ -100,6 +106,7 @@ export function parseUiConfig(raw: unknown): UiConfig | null {
     sessionTtlHours: asInt(value.sessionTtlHours, DEFAULT_SESSION_TTL_HOURS),
     sessionIdleMinutes: asInt(value.sessionIdleMinutes, DEFAULT_SESSION_IDLE_MINUTES),
     databaseUrl: asStringOrNull(value.databaseUrl),
+    allowInsecureBind: asBool(value.allowInsecureBind, false),
     marker: asStringOrNull(value.marker),
   };
 }
@@ -356,6 +363,8 @@ export interface BindCheckContext {
   env: Record<string, string | undefined>;
   platform?: string;
   container?: ContainerVerdict;
+  /** The persisted `--install-service --allow-insecure-bind` gesture. */
+  allowInsecureBind?: boolean;
 }
 
 /**
@@ -374,7 +383,7 @@ export function checkBind(raw: string, ctx: BindCheckContext): ValueCheck<string
     publicUrl: ctx.publicUrl,
     uiEnable: uiEnabledFromEnv(ctx.env),
     containerBind: ctx.env.FORTRESS_UI_CONTAINER_BIND === "1",
-    allowInsecureBind: false,
+    allowInsecureBind: ctx.allowInsecureBind === true,
     container: ctx.container ?? detectContainer({ env: ctx.env, platform: ctx.platform }),
   });
   if (!resolution.ok) {
@@ -417,6 +426,7 @@ export function printableUiConfig(config: UiConfig): Array<[string, string]> {
     // and its default is a silent failure behind any proxy.
     ["remote-key source", remoteKeySourceLine(config.trustedProxies)],
     ["sso", String(config.sso)],
+    ["allowInsecureBind", String(config.allowInsecureBind)],
     ["sessionTtlHours", String(config.sessionTtlHours)],
     ["sessionIdleMinutes", String(config.sessionIdleMinutes)],
     ["databaseUrl", config.databaseUrl ? maskDatabaseUrl(config.databaseUrl) : "(from pg.json)"],

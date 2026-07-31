@@ -331,6 +331,64 @@ export function MutationControl(props: {
   );
 }
 
+/**
+ * The confirmation every destructive or host-affecting action passes through.
+ *
+ * One dialog rather than a per-panel one, so the words a person reads before
+ * stopping a fortress are written in one place and cannot drift into a softer
+ * version somewhere else. It states what will happen to the thing in front of
+ * them, not a generic "are you sure".
+ */
+export interface ConfirmRequest {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger?: boolean;
+}
+
+export function useConfirm(): [
+  React.ReactElement | null,
+  (request: ConfirmRequest) => Promise<boolean>,
+] {
+  const [pending, setPending] = useState<
+    (ConfirmRequest & { resolve: (ok: boolean) => void }) | null
+  >(null);
+  const ask = (request: ConfirmRequest): Promise<boolean> =>
+    new Promise<boolean>((resolve) => setPending({ ...request, resolve }));
+  const close = (ok: boolean): void => {
+    pending?.resolve(ok);
+    setPending(null);
+  };
+  const element = pending ? (
+    <div className="overlayw open" onClick={() => close(false)}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="mhead">
+          <div className="row1">
+            <h3>{pending.title}</h3>
+            <button className="x" onClick={() => close(false)} aria-label="Close">
+              ×
+            </button>
+          </div>
+          <div className="msub">{pending.body}</div>
+        </div>
+        <div className="mfoot">
+          <span className="grow"></span>
+          <button className="btn ghost" onClick={() => close(false)}>
+            Cancel
+          </button>
+          <button
+            className={pending.danger ? "btn danger" : "btn"}
+            onClick={() => close(true)}
+          >
+            {pending.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+  return [element, ask];
+}
+
 /** The 6s result line the console uses to answer an action in place. */
 export function useResultLine(): [
   { text: string; on: boolean; warn: boolean },

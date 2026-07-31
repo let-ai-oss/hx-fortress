@@ -26,6 +26,7 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress", summary: "open the terminal dashboard" },
       { usage: "hx-fortress enroll [token] --cloud <url>", summary: "connect this host to an organization" },
       { usage: "hx-fortress start", summary: "install and start the service" },
+      { usage: "hx-fortress start --reinstall", summary: "point the existing unit at this binary and start it" },
       { usage: "hx-fortress stop", summary: "stop the service" },
       { usage: "hx-fortress status", summary: "report what is running" },
       { usage: "hx-fortress host", summary: "run the daemon in the foreground" },
@@ -40,6 +41,8 @@ export const CLI_HELP: readonly HelpSection[] = [
     blurb: "Serve and configure the administration console.",
     entries: [
       { usage: "hx-fortress ui", summary: "serve the console in the foreground" },
+      { usage: "hx-fortress ui --install-service [--allow-insecure-bind]", summary: "install and start the console as a service" },
+      { usage: "hx-fortress ui --uninstall-service", summary: "remove the console service, keeping its settings" },
       { usage: "hx-fortress ui enable", summary: "allow the console to run" },
       { usage: "hx-fortress ui disable", summary: "stop the console and revoke live sessions" },
       { usage: "hx-fortress ui config", summary: "print the effective configuration" },

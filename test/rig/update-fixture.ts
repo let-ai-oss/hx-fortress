@@ -21,7 +21,10 @@ import { gzipSync } from "node:zlib";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { TrustedSigningKey } from "../../src/host/trust/signing-keys";
+import {
+  PRODUCTION_KEYID_PREFIX,
+  type TrustedSigningKey,
+} from "../../src/host/trust/signing-keys";
 
 /** The pinned payload. Not a real binary — the update path never executes what
  *  it downloads during a test, and fixed bytes keep the checksum stable. */
@@ -61,6 +64,9 @@ export interface UpdateFixtureOptions {
   tamperChecksum?: boolean;
   version?: string;
   binary?: Buffer;
+  /** Mint the anchor as a PRODUCTION one, so the console's enforcing path has a
+   *  release-shaped key to verify against without a private key in the repo. */
+  production?: boolean;
 }
 
 function detectAsset(): string {
@@ -81,8 +87,14 @@ export async function startUpdateFixture(
   // Ed25519 over the decompressed bytes, exactly as the release workflow signs.
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const rawPublic = publicKey.export({ format: "jwk" }).x as string;
-  const keyid = `rig-${digest.slice(0, 8)}`;
-  const trustedKey: TrustedSigningKey = { keyid, publicKey: rawPublic };
+  const keyid = options.production
+    ? `${PRODUCTION_KEYID_PREFIX}rig-${digest.slice(0, 8)}`
+    : `rig-${digest.slice(0, 8)}`;
+  const trustedKey: TrustedSigningKey = {
+    keyid,
+    publicKey: rawPublic,
+    production: options.production === true,
+  };
   const signature = signBytes(null, binary, privateKey).toString("base64url");
   const sidecar = JSON.stringify({
     v: 1,

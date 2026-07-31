@@ -8,6 +8,7 @@ import type { LogsOptions } from "../src/cli-logs";
 import type { WizardEntryOpts } from "../src/modules/session-vault/wizard";
 import type { UpdateResult } from "../src/update";
 import type { ServiceManager, ServiceState } from "../src/service/types";
+import type { UiServiceControl } from "../src/ui/service-control";
 
 describe("runCli", () => {
   test("dispatches no args into the tui entrypoint", async () => {
@@ -209,6 +210,7 @@ describe("runCli update", () => {
         return alreadyLatestResult;
       },
       getServiceManager: () => fakeManager([{ loaded: false, pid: null }]),
+      getUiServiceControl: () => noUiUnit(),
       writeLine: (line) => lines.push(line),
     });
 
@@ -238,6 +240,7 @@ describe("runCli update", () => {
       fortressRoot: root,
       runUpdate: async () => installedResult,
       getServiceManager: () => fakeManager([{ loaded: false, pid: null }]),
+      getUiServiceControl: () => noUiUnit(),
       writeLine: (line) => lines.push(line),
     });
 
@@ -264,12 +267,15 @@ describe("runCli update", () => {
       fortressRoot: root,
       runUpdate: async () => installedResult,
       getServiceManager: () => manager,
+      getUiServiceControl: () => noUiUnit(),
       writeLine: (line) => lines.push(line),
     });
 
     expect(exitCode).toBe(0);
-    expect(manager.stops).toBe(1);
-    expect(manager.installs).toBe(1);
+    // The unit is restarted in place: a re-render would drop directives the
+    // host added to it.
+    expect(manager.restarts).toBe(1);
+    expect(manager.installs).toBe(0);
     expect(lines.some((l) => l.includes("restarting Fortress"))).toBe(true);
     expect(lines.some((l) => l.includes("restarted"))).toBe(true);
   });
@@ -291,11 +297,12 @@ describe("runCli update", () => {
       fortressRoot: root,
       runUpdate: async () => installedResult,
       getServiceManager: () => manager,
+      getUiServiceControl: () => noUiUnit(),
       writeLine: () => {},
     });
 
     expect(exitCode).toBe(0);
-    expect(manager.stops).toBe(0);
+    expect(manager.restarts).toBe(0);
     expect(manager.installs).toBe(0);
   });
 
@@ -318,14 +325,33 @@ describe("runCli update", () => {
 interface FakeManager extends ServiceManager {
   installs: number;
   stops: number;
+  restarts: number;
+  unitPresent: boolean;
 }
 
-function fakeManager(states: ServiceState[], wasRunning = false): FakeManager {
+function fakeManager(states: ServiceState[], wasRunning = false, unitPresent = true): FakeManager {
   let callIndex = 0;
   return {
     name: "launchd",
     installs: 0,
     stops: 0,
+    restarts: 0,
+    unitPresent,
+    async unit() {
+      return {
+        path: "/Users/test/Library/LaunchAgents/ai.let.hx-fortress.plist",
+        present: (this as FakeManager).unitPresent,
+        executablePath: (this as FakeManager).unitPresent ? process.execPath : null,
+      };
+    },
+    async start(): Promise<void> {
+      (this as FakeManager).installs++;
+    },
+    async restart(): Promise<void> {
+      (this as FakeManager).restarts++;
+    },
+    async uninstall(): Promise<void> {},
+    async ensureLogDir(): Promise<void> {},
     async state(): Promise<ServiceState> {
       const s = states[callIndex] ?? states[states.length - 1] ?? { loaded: false, pid: null };
       callIndex++;
@@ -338,5 +364,19 @@ function fakeManager(states: ServiceState[], wasRunning = false): FakeManager {
       (this as FakeManager).stops++;
       return { wasRunning };
     },
+  };
+}
+
+/** No console unit on this host: the update path must not reach for one. */
+function noUiUnit(): UiServiceControl {
+  return {
+    name: "none",
+    async installed() {
+      return false;
+    },
+    async install() {},
+    async start() {},
+    async uninstall() {},
+    async stopAndDisable() {},
   };
 }

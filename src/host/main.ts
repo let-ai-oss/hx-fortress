@@ -54,7 +54,11 @@ import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/gua
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 import { drainParkedArtifacts, parkArtifact } from "../console/artifact-replay";
 import { createCommandGateway } from "../console/command-gateway";
-import { runBootFence } from "../console/commands";
+import { pollCommands, runBootFence } from "../console/commands";
+import { createCommandExecutors } from "../console/executors";
+import { getServiceManager } from "../service";
+import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-control";
+import { downloadBaseFromCloudUrl } from "../update";
 import { DaemonAudit } from "../console/daemon-audit";
 import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
 import { sweepCmdCreds } from "../console/cmd-creds";
@@ -593,6 +597,75 @@ export async function runFortressHost(
    *  Fence-first is unachievable under the embedded apparatus — ensureAppRoles
    *  is what CREATES hx.reject_command, and Postgres resolves the function at
    *  parse time, so the statement errors even against zero rows. */
+  /** Rows the boot fence found still ours; only these may be re-claimed. */
+  let redriveIds: ReadonlySet<string> = new Set();
+  /** pid + a boot-unique id. Observability only — never a security predicate. */
+  const claimedBy = `${process.pid}:${randomUUID()}`;
+  /** Set by the update executor once a new binary is in place; acted on only
+   *  after the poll pass that wrote the outcome record has returned. */
+  let restartAfterUpdate = false;
+  const commandExecutors = createCommandExecutors({
+    logger: consoleLog,
+    store: () => vaultModule.getStore(),
+    downloadBaseUrl: async () => {
+      const loaded = await new FileConfigStore(paths).load().catch(() => null);
+      if (!loaded?.cloud.url) return null;
+      try {
+        return downloadBaseFromCloudUrl(loaded.cloud.url);
+      } catch {
+        return null;
+      }
+    },
+    service: getServiceManager(),
+    onBinarySwapped: () => {
+      restartAfterUpdate = true;
+    },
+  });
+
+  /**
+   * One poll pass over the command queue.
+   *
+   * The daemon is the only executor: the console can ask, and the write role
+   * cannot even ask. A pass that finds nothing costs one indexed SELECT.
+   */
+  async function pollConsolePlane(): Promise<void> {
+    const db = resolveHxDb();
+    if (!db || !postgres.isReady()) return;
+    try {
+      await pollCommands(
+        {
+          gateway: createCommandGateway(db),
+          inFlightPath: paths.commandsInFlight,
+          claimedBy,
+          logger: consoleLog,
+          onTransition: daemonAudit.onTransition,
+          executors: commandExecutors,
+        },
+        redriveIds,
+      );
+    } catch (err) {
+      consoleLog.error("console command poll failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    if (!restartAfterUpdate) return;
+    restartAfterUpdate = false;
+    // AFTER the outcome record reached disk. The console unit goes first
+    // because the daemon's own restart ends this process.
+    try {
+      if (await getUiServiceControl().installed()) restartUiUnitDetached({});
+      await getServiceManager().restart();
+    } catch (err) {
+      consoleLog.error("the fortress could not restart onto the new binary", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const commandTimer = setInterval(() => void pollConsolePlane(), 1_000);
+  (commandTimer as { unref?: () => void }).unref?.();
+
   async function bootConsolePlane(): Promise<void> {
     await refreshPause();
     // Orphaned credential files are secrets on disk for commands that will
@@ -608,10 +681,11 @@ export async function runFortressHost(
         const fence = await runBootFence({
           gateway: createCommandGateway(db),
           inFlightPath: paths.commandsInFlight,
-          claimedBy: `${process.pid}:${randomUUID()}`,
+          claimedBy,
           logger: consoleLog,
           onTransition: daemonAudit.onTransition,
         });
+        redriveIds = new Set(fence.redriven);
         return fence;
       });
     } catch (err) {
@@ -625,6 +699,7 @@ export async function runFortressHost(
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     clearInterval(pauseTimer);
+    clearInterval(commandTimer);
     metricsPublisher.stop();
     gatewayHandle?.stop();
     setEmbedSignalHandler(() => {});

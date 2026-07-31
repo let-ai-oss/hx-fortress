@@ -1,8 +1,22 @@
 import React from "react";
 
 import { helpEntries } from "../../../src/ui/help";
-import { api, type CommandView } from "../api";
-import { Empty, FactRow, Loaded, Panel } from "../components";
+import {
+  COMMAND_REQUEST_NOTE,
+  CONTAINER_SERVICE_REFUSAL,
+  NO_POLLER_REFUSAL,
+} from "../../../src/ui/copy";
+import { api, ApiError, NO_ANSWER, type CommandView, type StatusView } from "../api";
+import {
+  Empty,
+  FactRow,
+  Loaded,
+  MutationControl,
+  Panel,
+  ResultLine,
+  useConfirm,
+  useResultLine,
+} from "../components";
 import { COMMAND_SURFACE_NOTE, OPS_SESSION_LINE, opsLede } from "../copy";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
@@ -81,6 +95,15 @@ export default function Ops(): React.ReactElement {
         </Loaded>
       </Panel>
 
+      <ServicePanel
+        status={status.data}
+        container={container}
+        onChanged={() => {
+          status.reload();
+          commands.reload();
+        }}
+      />
+
       <Panel title="Version">
         <Loaded resource={version}>
           {(remote) => (
@@ -105,6 +128,16 @@ export default function Ops(): React.ReactElement {
                 k="Checked"
                 v={fmt.ago(remote.checkedAt)}
                 vs={remote.cached ? "from this console's cache" : "asked just now"}
+              />
+              <UpdateRow
+                container={container}
+                daemon={status.data?.daemon ?? null}
+                available={
+                  remote.kind === "available" && remote.version !== status.data?.version
+                    ? remote.version
+                    : null
+                }
+                onSubmitted={() => commands.reload()}
               />
             </div>
           )}
@@ -212,5 +245,183 @@ function CommandLine({ command }: { command: CommandView }): React.ReactElement 
       </div>
       <div className="m">{fmt.ago(command.completedAt ?? command.requestedAt)}</div>
     </div>
+  );
+}
+
+/**
+ * The daemon's lifecycle, driven from the browser.
+ *
+ * Every action confirms, states what it does to THIS page as well as to the
+ * fortress, and answers in place with the server's own sentence. A console that
+ * stops the daemon keeps serving — that is the point of a separate process — and
+ * the copy says so, because a page that went blank after Stop would read as a
+ * crash.
+ */
+function ServicePanel(props: {
+  status: StatusView | null;
+  container: boolean;
+  onChanged: () => void;
+}): React.ReactElement {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [busy, setBusy] = React.useState(false);
+  const running = props.status?.pid !== null && props.status?.pid !== undefined;
+
+  const drive = async (
+    action: "start" | "stop" | "restart",
+    confirm: { title: string; body: string; confirmLabel: string; danger?: boolean },
+  ): Promise<void> => {
+    if (!(await ask(confirm))) return;
+    setBusy(true);
+    try {
+      const answer = await api.serviceAction(action);
+      showResult(answer.copy);
+    } catch (error) {
+      showResult(
+        error instanceof ApiError && error.status === NO_ANSWER
+          ? "This console stopped answering. It is restarting; this page follows it."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+        true,
+      );
+    } finally {
+      setBusy(false);
+      props.onChanged();
+    }
+  };
+
+  return (
+    <Panel
+      title="Service"
+      sub={
+        props.container
+          ? CONTAINER_SERVICE_REFUSAL
+          : "Start, restart and stop the daemon. This console runs in its own process and keeps answering either way."
+      }
+    >
+      {dialog}
+      <div className="facts wide">
+        <FactRow
+          k="Daemon"
+          v={props.status?.copy ?? "—"}
+          vs={
+            running
+              ? `pid ${props.status?.pid}, under ${props.status?.serviceManager ?? "this host"}`
+              : "nothing is running to answer for this fortress"
+          }
+          tone={running ? "ok" : "warn"}
+          action={
+            <span style={{ display: "inline-flex", gap: 8 }}>
+              <MutationControl
+                label="Start"
+                small
+                disabled={props.container || busy || running}
+                {...(props.container ? { reason: CONTAINER_SERVICE_REFUSAL } : {})}
+                onClick={() =>
+                  void drive("start", {
+                    title: "Start the fortress?",
+                    body: "The daemon comes up under this host's service manager and begins accepting uploads again.",
+                    confirmLabel: "Start",
+                  })
+                }
+              />
+              <MutationControl
+                label="Restart"
+                small
+                disabled={props.container || busy || !running}
+                {...(props.container ? { reason: CONTAINER_SERVICE_REFUSAL } : {})}
+                onClick={() =>
+                  void drive("restart", {
+                    title: "Restart the fortress?",
+                    body: "Uploads in flight fail and their senders retry. The unit is restarted exactly as installed — nothing about it is rewritten.",
+                    confirmLabel: "Restart",
+                  })
+                }
+              />
+              <MutationControl
+                label="Stop"
+                small
+                danger
+                disabled={props.container || busy || !running}
+                {...(props.container ? { reason: CONTAINER_SERVICE_REFUSAL } : {})}
+                onClick={() =>
+                  void drive("stop", {
+                    title: "Stop the fortress?",
+                    body: "Uploads stop being accepted and the tunnel closes until it is started again. This console keeps answering, and every panel that needs the daemon will say it is stopped.",
+                    confirmLabel: "Stop the fortress",
+                    danger: true,
+                  })
+                }
+              />
+            </span>
+          }
+        />
+      </div>
+      <ResultLine state={result} />
+    </Panel>
+  );
+}
+
+/** Applying an update is host code execution, asked for from a browser. It is
+ *  confirmed, it is recorded, and the daemon — not this page — reports what
+ *  happened. */
+function UpdateRow(props: {
+  container: boolean;
+  daemon: string | null;
+  available: string | null;
+  onSubmitted: () => void;
+}): React.ReactElement {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [busy, setBusy] = React.useState(false);
+  const noPoller = props.daemon !== "running";
+  const reason = props.container
+    ? CONTAINER_SERVICE_REFUSAL
+    : noPoller
+      ? NO_POLLER_REFUSAL
+      : props.available === null
+        ? "there is no newer release to install"
+        : undefined;
+
+  return (
+    <>
+      {dialog}
+      <FactRow
+        k="Update"
+        v={props.available ? `${props.available} available` : "up to date"}
+        vs={COMMAND_REQUEST_NOTE}
+        action={
+          <MutationControl
+            label="Install update"
+            small
+            disabled={busy || reason !== undefined}
+            {...(reason ? { reason } : {})}
+            onClick={() => {
+              void (async () => {
+                const ok = await ask({
+                  title: `Install ${props.available ?? "the latest release"}?`,
+                  body: "The daemon downloads the release, verifies it, replaces its own binary and restarts. Uploads in flight fail and their senders retry.",
+                  confirmLabel: "Install and restart",
+                  danger: true,
+                });
+                if (!ok) return;
+                setBusy(true);
+                try {
+                  await api.submitCommand("update_apply");
+                  showResult("Asked the daemon to install it. Its answer appears under Commands.");
+                } catch (error) {
+                  showResult(error instanceof Error ? error.message : String(error), true);
+                } finally {
+                  setBusy(false);
+                  props.onSubmitted();
+                }
+              })();
+            }}
+          />
+        }
+      />
+      <ResultLine state={result} />
+    </>
   );
 }

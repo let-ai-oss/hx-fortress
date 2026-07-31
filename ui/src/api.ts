@@ -26,6 +26,7 @@ export const API = {
   setupStatus: "/ui/api/setup/status",
   setupComplete: "/ui/api/setup/complete",
   status: "/ui/api/status",
+  service: "/ui/api/service",
   sessions: "/ui/api/sessions",
   people: "/ui/api/people",
   devices: "/ui/api/devices",
@@ -423,6 +424,20 @@ export const api = {
     ),
 
   status: () => getJson<StatusView>(API.status),
+  /** Drive the daemon's own unit. Runs in the console process, because a
+   *  stopped daemon polls for nothing. */
+  serviceAction: (action: "start" | "stop" | "restart") =>
+    getJson<{ action: string; manager: string; pid: number | null; copy: string }>(API.service, {
+      method: "POST",
+      body: { action },
+    }),
+  /** Ask the daemon to do something. The answer is the REQUEST's id; what
+   *  happened is read back off the command row and its corroboration. */
+  submitCommand: (kind: string, params: Record<string, unknown> = {}) =>
+    getJson<{ id: string; kind: string; status: string }>(API.commands, {
+      method: "POST",
+      body: { kind, params },
+    }),
   sessions: (query: Record<string, string>) =>
     getJson<SessionsPage>(`${API.sessions}?${new URLSearchParams(query).toString()}`),
   people: () => getJson<{ people: PersonRow[] }>(API.people),

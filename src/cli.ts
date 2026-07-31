@@ -1,4 +1,19 @@
-import { startFortress, statusFortress, stopFortress } from "./cli-lifecycle";
+import {
+  divergenceRefusal,
+  startFortress,
+  statusFortress,
+  stopFortress,
+  uiUnitLines,
+  updateDivergenceRefusal,
+} from "./cli-lifecycle";
+import { CliAudit } from "./cli-audit";
+import { AUDIT_ACTIONS } from "./console/audit-actions";
+import { ensureUiUnit } from "./cli-ui-service";
+import {
+  getUiServiceControl,
+  restartUiUnitDetached,
+  type UiServiceControl,
+} from "./ui/service-control";
 import { setFortressCredential } from "./cli-credentials";
 import { runDevCommand, type DevCommandDeps } from "./cli-dev";
 import { runUiCommand, type UiCommandDeps } from "./cli-ui";
@@ -19,7 +34,6 @@ import {
 import { ProgressBar } from "./progress";
 import { FileStatusReader } from "./status-reader";
 import { getServiceManager } from "./service";
-import type { ServiceInstallOptions } from "./service";
 import { runFortressTui } from "./tui";
 import {
   downloadBaseFromCloudUrl,
@@ -37,6 +51,9 @@ type RunUpdate = (opts: { downloadBaseUrl: string; binPath?: string; log?: (msg:
 
 interface CliDependencies {
   getServiceManager?: typeof getServiceManager;
+  getUiServiceControl?: () => UiServiceControl;
+  restartUiUnit?: (options: { platform?: string; uid?: number }) => void;
+  ensureUiUnit?: typeof ensureUiUnit;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
@@ -84,14 +101,29 @@ export async function runCli(
         writeLine("Restart Fortress or reconnect it to use the new credential.");
         return 0;
       }
-      case "start":
-        await startFortress({
+      case "start": {
+        const paths = fortressPaths(dependencies.fortressRoot);
+        const result = await startFortress({
           manager: (dependencies.getServiceManager ?? getServiceManager)(),
           executablePath: process.execPath,
-          paths: fortressPaths(),
+          paths,
           writeLine,
+          // The terminal owns stdin and is the caller the console unit is meant
+          // to be installed from.
+          mayInstallUiUnit: true,
+          ensureUiUnit: (mayInstall) =>
+            (dependencies.ensureUiUnit ?? ensureUiUnit)(mayInstall, {
+              writeLine,
+              ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+            }),
+          reinstall: args.includes("--reinstall"),
         });
+        if (result.refused && result.divergence) {
+          throw new Error(divergenceRefusal(result.divergence));
+        }
+        for (const line of uiUnitLines(result.uiUnit)) writeLine(line);
         return 0;
+      }
       case "stop":
         await stopFortress({
           manager: (dependencies.getServiceManager ?? getServiceManager)(),
@@ -140,6 +172,29 @@ export async function runCli(
           );
         }
 
+        const manager = (dependencies.getServiceManager ?? getServiceManager)();
+        // UNIT-FILE existence, never loaded-ness: `hx-fortress stop` unloads the
+        // unit, and the runbook has that rung, so a loaded-ness test would send
+        // an installed fortress down the no-unit branch — swapping this
+        // process's binary and leaving the unit to start the untouched old one.
+        const unit = await manager.unit();
+        if (
+          unit.present &&
+          unit.executablePath !== null &&
+          unit.executablePath !== process.execPath
+        ) {
+          throw new Error(
+            updateDivergenceRefusal({
+              unitPath: unit.path,
+              unitExecutable: unit.executablePath,
+              invoking: process.execPath,
+            }),
+          );
+        }
+        // With no unit there is nothing to resolve a target from and nothing to
+        // restart: this binary is the whole install.
+        const binPath = unit.executablePath ?? process.execPath;
+
         const bar = new ProgressBar();
         const LABEL: Record<UpdateProgress["phase"], string> = {
           download: "Downloading",
@@ -173,15 +228,52 @@ export async function runCli(
         };
 
         const doUpdate = dependencies.runUpdate ?? runFortressUpdate;
-        let result: UpdateResult;
-        try {
-          result = await doUpdate({ downloadBaseUrl, log: writeLine, onProgress });
-        } catch (err) {
-          if (seen.size > 0 && !barClosed) bar.clearLine();
-          throw err;
-        } finally {
-          bar.showCursor();
-        }
+        const audit = new CliAudit({
+          dir: paths.auditSpool,
+          onWarn: (message) => writeLine(`warning: the audit record was incomplete - ${message}`),
+        });
+        const result = await audit.run(AUDIT_ACTIONS.cliUpdate, { binPath }, async () => {
+          let updated: UpdateResult;
+          try {
+            updated = await doUpdate({ downloadBaseUrl, binPath, log: writeLine, onProgress });
+          } catch (err) {
+            if (seen.size > 0 && !barClosed) bar.clearLine();
+            throw err;
+          } finally {
+            bar.showCursor();
+          }
+
+          if (updated.alreadyLatest) return updated;
+
+          const shaNote = updated.sha256 ? `, sha256 ${updated.sha256.slice(0, 12)}…` : "";
+          writeLine(`hx-fortress updated to latest (${updated.asset}${shaNote}).`);
+
+          // Restart the service if it was running so the new binary takes over.
+          // A restart failure is fatal: the binary is new but modules are still
+          // on the old code. Report the state and a concrete next step. The unit
+          // is RESTARTED, never re-rendered — a rewrite would drop whatever
+          // Environment= or EnvironmentFile= the host added to it.
+          const before = await manager.state();
+          if (unit.present && before.pid !== null) {
+            writeLine(`restarting Fortress (${manager.name}, was pid ${before.pid})`);
+            try {
+              await manager.restart();
+            } catch (err) {
+              const after = await manager.state().catch(() => ({ loaded: false, pid: null }));
+              const next =
+                after.pid !== null
+                  ? `the previous version is still running (pid ${after.pid}); run \`hx-fortress stop && hx-fortress start\` to load the new binary.`
+                  : `Fortress is not running; run \`hx-fortress start\` to launch the new binary.`;
+              throw new Error(
+                `binary installed at ${updated.installedPath}, but Fortress failed to restart: ` +
+                  `${(err as Error).message}\n${next}`,
+                { cause: err },
+              );
+            }
+            writeLine(`Fortress restarted (${manager.name}).`);
+          }
+          return updated;
+        });
 
         if (result.alreadyLatest) {
           writeLine(
@@ -190,38 +282,13 @@ export async function runCli(
           return 0;
         }
 
-        const shaNote = result.sha256 ? `, sha256 ${result.sha256.slice(0, 12)}…` : "";
-        writeLine(`hx-fortress updated to latest (${result.asset}${shaNote}).`);
-
-        // Restart the service if it was running so the new binary takes over.
-        // A restart failure is fatal: the binary is new but modules are still
-        // on the old code. Report the state and a concrete next step.
-        const manager = (dependencies.getServiceManager ?? getServiceManager)();
-        const before = await manager.state();
-        if (before.pid !== null) {
-          writeLine(
-            `restarting Fortress (${manager.name}, was pid ${before.pid})`,
-          );
-          try {
-            await manager.stop();
-            const installOpts: ServiceInstallOptions = {
-              executablePath: result.installedPath,
-              serviceLogPath: paths.serviceLog,
-            };
-            await manager.install(installOpts);
-          } catch (err) {
-            const after = await manager.state().catch(() => ({ loaded: false, pid: null }));
-            const next =
-              after.pid !== null
-                ? `the previous version is still running (pid ${after.pid}); run \`hx-fortress stop && hx-fortress start\` to load the new binary.`
-                : `Fortress is not running; run \`hx-fortress start\` to launch the new binary.`;
-            throw new Error(
-              `binary installed at ${result.installedPath}, but Fortress failed to restart: ` +
-                `${(err as Error).message}\n${next}`,
-              { cause: err },
-            );
-          }
-          writeLine(`Fortress restarted (${manager.name}).`);
+        // AFTER the outcome record: this restart can kill a console mid-write,
+        // and a swap with no record of its result is the one state nobody can
+        // reconstruct.
+        const uiService = (dependencies.getUiServiceControl ?? getUiServiceControl)();
+        if (await uiService.installed()) {
+          (dependencies.restartUiUnit ?? restartUiUnitDetached)({});
+          writeLine("Console service restarting onto the new binary.");
         }
 
         writeLine(`hx-fortress version: ${result.remoteVersion ?? result.localVersion}`);

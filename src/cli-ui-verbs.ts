@@ -204,6 +204,7 @@ const SET_VALIDATORS: Record<
       env: ctx.env,
       platform: ctx.platform,
       container: detectContainer({ env: ctx.env, platform: ctx.platform }),
+      allowInsecureBind: config.allowInsecureBind,
     }),
   sessionTtlHours: (raw) => checkSessionTtlHours(raw),
   sessionIdleMinutes: (raw) => checkSessionIdleMinutes(raw),

@@ -163,6 +163,10 @@ function renderMain(app: TuiApp, stdout: TerminalOutput): void {
     lines.push("");
     lines.push(`error: ${state.error}`);
   }
+  if (state.notice) {
+    lines.push("");
+    for (const line of state.notice) lines.push(line);
+  }
 
   lines.push("");
   lines.push(model.footerNote);

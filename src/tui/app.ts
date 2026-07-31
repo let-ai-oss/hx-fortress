@@ -13,10 +13,15 @@ export interface TuiAppState {
   selectedAction: number;
   pendingDetailsFor: MainScreenRowId | null;
   error: string | null;
+  /** What an action reported that is not a failure. Start returns its findings
+   *  rather than printing them: this renderer's writeLine goes nowhere, so a
+   *  printed one would leave the screen claiming a clean start. */
+  notice: string[] | null;
 }
 
 export interface TuiAppActions {
-  start: () => Promise<void>;
+  /** Returns the lines to render beside the screen, if any. */
+  start: () => Promise<string[] | void>;
   stop: () => Promise<void>;
   update: (version: string) => Promise<void>;
   uninstall: (moduleId: string) => Promise<void>;
@@ -48,6 +53,7 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
     selectedAction: 0,
     pendingDetailsFor: null,
     error: null,
+    notice: null,
   };
 
   const enterMain = () => {
@@ -136,6 +142,7 @@ export function createTuiApp(params: CreateTuiAppParams): TuiApp {
     },
     activate: async () => {
       currentState.error = null;
+      currentState.notice = null;
 
       try {
         switch (currentState.screen) {
@@ -170,11 +177,13 @@ async function activateMain(
   if (!action || !action.enabled) return;
 
   switch (action.kind) {
-    case "start":
-      await handlers.start();
+    case "start": {
+      const notice = await handlers.start();
+      if (notice && notice.length > 0) state.notice = notice;
       enterMain();
       await refreshModel();
       return;
+    }
     case "stop":
       await handlers.stop();
       enterMain();

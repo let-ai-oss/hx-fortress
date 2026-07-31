@@ -21,6 +21,7 @@ import { buildHostAllowlist, checkHost, checkOrigin, type HostCheck } from "./or
 import { RateLimiter, LockoutTable, type LockoutSnapshot } from "./rate-limit";
 import { remoteKeyFor, normalizeAddress } from "./remote-key";
 import { EventStreamRegistry } from "./events";
+import { MUTATE_ROUTES } from "./mutate-routes";
 import { READ_ROUTES } from "./read-routes";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
 import { SESSION_HEADER, SessionTable, type SessionPolicy, type UiSession } from "./sessions";
@@ -77,6 +78,7 @@ export class UiRuntime {
     // and a read surface that refuses its own auditors is a bug nobody would
     // find until a compliance review.
     for (const route of READ_ROUTES) this.routes.register(route);
+    for (const route of MUTATE_ROUTES) this.routes.register(route);
     // A session that stops existing takes its open streams with it. Registered
     // here rather than at each open, so no future caller can forget it.
     this.streams.attachRevocation((listener) => this.sessions.onDrop((session) => listener(session)));

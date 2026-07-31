@@ -25,11 +25,28 @@ let root: string;
 class FakeService implements UiServiceControl {
   readonly name = "fake";
   stopped = 0;
+  installs = 0;
+  starts = 0;
+  uninstalls = 0;
 
-  constructor(private readonly present: boolean) {}
+  constructor(private present: boolean) {}
 
   async installed(): Promise<boolean> {
     return this.present;
+  }
+
+  async install(): Promise<void> {
+    this.installs += 1;
+    this.present = true;
+  }
+
+  async start(): Promise<void> {
+    this.starts += 1;
+  }
+
+  async uninstall(): Promise<void> {
+    this.uninstalls += 1;
+    this.present = false;
   }
 
   async stopAndDisable(): Promise<void> {

@@ -33,6 +33,11 @@ export const AUDIT_ACTIONS = {
   integrityError: "console.audit.integrity_error",
   /** A terminal command row no daemon record agrees with. */
   commandDisputed: "console.command.disputed",
+  /** The console asked the daemon to do something. */
+  commandSubmitted: "console.command.submit",
+  /** The console drove the daemon's own unit. One prefix, one arm per action. */
+  servicePrefix: "console.service.",
+  cliUpdate: "cli.update",
   cliEnable: "cli.ui.enable",
   cliDisable: "cli.ui.disable",
   cliPrefix: "cli.ui.",
@@ -59,7 +64,10 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "console.audit.integrity_error": ["spoolFileId", "seq", "field"],
   "console.command.disputed": ["commandKind", "arm", "expectedDigest", "records"],
   "console.command.outcome": ["commandKind", "terminalStatus", "resultDigest", "accepted", "transition", "reason"],
+  "console.command.submit": ["commandKind", "commandId", "phase", "scope", "enabled", "org", "session", "sessionId"],
+  "console.service.": ["action", "manager", "pid", "state"],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
+  "cli.update": ["binPath", "asset", "version"],
   "system.": ["engine", "kind", "count", "reason", "from", "to"],
 };
 
