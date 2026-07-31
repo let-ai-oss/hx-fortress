@@ -25,6 +25,7 @@
 
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
+import { handleAuthRoute } from "./auth-routes";
 import { normalizeAddress } from "./remote-key";
 import { INSTANCE_PROBE_IDENTITY } from "./routes";
 import type { UiRuntime } from "./runtime";
@@ -229,10 +230,37 @@ export function startUiServer(
     if (!host.ok) {
       return finish(new Response(host.reason, { status: 400 }), "no-store", csp);
     }
-    const response = handleUiRequest(req, ctx, peer);
-    if (host.scheme === "https") {
-      response.headers.set("strict-transport-security", "max-age=31536000");
+    const hsts = host.scheme === "https";
+
+    // The gate decides everything — bucket, loopback rule, session, role, Origin.
+    // No handler below it re-decides any of that, and nothing reaches a handler
+    // without a verdict.
+    const verdict = await runtime.authorize(req, peer ?? "", ctx.port);
+    if (!verdict.ok) {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (verdict.retryAfterMs !== undefined) {
+        headers["retry-after"] = String(Math.max(1, Math.ceil(verdict.retryAfterMs / 1000)));
+      }
+      return finish(
+        new Response(`${JSON.stringify({ error: verdict.reason })}\n`, {
+          status: verdict.status,
+          headers,
+        }),
+        "no-store",
+        csp,
+        hsts,
+      );
     }
+
+    const authenticated = await handleAuthRoute(req, {
+      runtime,
+      remoteKey: verdict.remoteKey,
+      remoteAddr: peer ?? "",
+    });
+    if (authenticated) return finish(authenticated, "no-store", csp, hsts);
+
+    const response = handleUiRequest(req, ctx, peer);
+    if (hsts) response.headers.set("strict-transport-security", "max-age=31536000");
     return response;
   };
   const serveOn = (host: string): Server<undefined> => {

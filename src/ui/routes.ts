@@ -79,6 +79,9 @@ export const SELF_ROUTES: readonly RouteSpec[] = [
  *  capability: it reissues nothing, names no org, and states no version. */
 export const INSTANCE_PROBE_IDENTITY = { app: "hx-fortress-ui" } as const;
 
+/** Reserved for the console's own API; never claimed by the shell prefix. */
+const API_NAMESPACE = "/ui/api/";
+
 export class RouteRegistry {
   private readonly routes: RouteSpec[] = [];
 
@@ -102,6 +105,12 @@ export class RouteRegistry {
       if (route.method !== wanted) continue;
       const hit = route.prefix ? path.startsWith(route.path) : path === route.path;
       if (!hit) continue;
+      // The API namespace is RESERVED from every prefix route outside it. The
+      // shell matches "/" as a prefix so a cold deep link renders, and without
+      // this an unclassified /ui/api path would inherit the shell's public class
+      // and answer 404 — telling an unauthenticated caller which endpoints exist,
+      // which is exactly what 401-before-404 is for.
+      if (path.startsWith(API_NAMESPACE) && !route.path.startsWith(API_NAMESPACE)) continue;
       if (!best || route.path.length > best.path.length) best = route;
     }
     return best;
