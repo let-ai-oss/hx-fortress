@@ -55,12 +55,16 @@ function withDatabase(base: string, database: string): string {
 }
 
 describe.if(!!SUPER_DSN)("an external Postgres", () => {
-  const adminDsn = withDatabase(SUPER_DSN as string, "postgres");
+  // Resolved in beforeAll, not at describe scope: bun evaluates a skipped
+  // describe's body, so parsing an absent DSN here would error the whole run
+  // on a machine with no Postgres.
+  let adminDsn = "";
   let externalDsn = "";
   const OPERATOR_ROLE = "hx_ext_daemon";
   const UI_PASSWORD = "external-console-pw";
 
   beforeAll(async () => {
+    adminDsn = withDatabase(SUPER_DSN as string, "postgres");
     await query(adminDsn, `DROP DATABASE IF EXISTS "${EXTERNAL_DB}"`);
     await query(adminDsn, `CREATE DATABASE "${EXTERNAL_DB}"`);
     externalDsn = withDatabase(SUPER_DSN as string, EXTERNAL_DB);
