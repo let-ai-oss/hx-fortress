@@ -244,7 +244,7 @@ export async function handleAuthRoute(
         remoteKey: ctx.remoteKey,
       });
       return json({ completed: true, login: user.login, role: user.role });
-    } catch (err) {
+    } catch {
       ctx.audit?.noteFailure(AUDIT_ACTIONS.setupFailed, { remoteKey: ctx.remoteKey });
       // ONE sentence, never the exception's. The caller holds a setup token that
       // did not work and nothing else, and every reason this throws — unknown,
