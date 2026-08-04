@@ -244,7 +244,15 @@ export class EventStreamRegistry {
             // A comment frame: it keeps proxies from idling the connection out
             // and costs the client nothing to parse.
             write(`: heartbeat ${(args.now?.() ?? Date.now()).toString()}\n\n`);
-          })();
+          })().catch(() => {
+            // `stillValid` reads the user store, which THROWS on any unreadable
+            // file (EACCES, EIO, EMFILE, a torn JSON). Unhandled here that
+            // rejection exits the whole console process - the one process whose
+            // job is to say what is broken on a broken fortress, and it would
+            // die again on every restart's next stream. The fail direction is
+            // chosen explicitly: a session we cannot re-affirm is hung up.
+            end("disabled");
+          });
         }, heartbeatMs);
         (timer as { unref?: () => void }).unref?.();
 

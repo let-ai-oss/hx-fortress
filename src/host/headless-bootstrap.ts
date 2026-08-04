@@ -94,8 +94,24 @@ export async function applyHeadlessBootstrap(
     // the file with the counter absent — reading as 0 — and the console would
     // see 1 → 1 across genuinely different credentials and keep signing with
     // the old ones.
-    const existing = (await deps.readVaultCredentials?.().catch(() => null)) ?? null;
-    const merged = reattachUnmanaged(vaultCreds, existing);
+    //
+    // A read that FAILS is not a read that found nothing. `readVaultCredentials`
+    // refuses on unparseable JSON precisely so a torn file is never silently
+    // rebuilt; catching that to null here reinstated the loss it was written to
+    // stop — `openaiApiKey` gone and the CAS `version` rewound — on every boot of
+    // the container path, since the raw writer takes no lock and asks no
+    // questions. ENOENT is the only absence: the reader already returns null for
+    // it, so anything thrown is a real fault and is re-raised by name.
+    const existing = await deps.readVaultCredentials?.().catch((err: unknown) => {
+      throw new Error(
+        "the existing session_vault credentials could not be read, so this fortress will not rebuild " +
+          `them from the environment and overwrite what is there (${
+            err instanceof Error ? err.message : String(err)
+          }). Move the file aside once you have a copy, then restart.`,
+        { cause: err },
+      );
+    });
+    const merged = reattachUnmanaged(vaultCreds, existing ?? null);
     await deps.writeVaultCredentials(merged);
     wroteVaultCredentials = true;
     logger.info("Applied session_vault storage credentials from environment", {

@@ -28,9 +28,12 @@ export const LAUNCHD_UI_LABEL = CONSOLE_UNIT.label;
  * How the console unit is allowed to come back.
  *
  * A binary that does not understand `ui --supervised` — a downgrade — exits
- * immediately, every time. Without a ceiling the supervisor respawns it forever;
- * with one the unit goes to failed and stays there, which is a state an operator
- * can see and a loop is not.
+ * immediately, every time. On systemd the burst is a real ceiling: the unit goes
+ * to failed and stays there, which is a state an operator can see and a loop is
+ * not. On launchd there is no equivalent — no start limit, no failed state — so
+ * `throttleSeconds` buys a slow loop rather than a stopped one, and the darwin
+ * remedy is `ui --uninstall-service`. Stated rather than assumed, because the
+ * unit generator used to claim a ceiling it did not have.
  */
 export const UI_RESTART_DISCIPLINE: RestartDiscipline = {
   limitIntervalSec: 60,

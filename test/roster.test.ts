@@ -130,7 +130,8 @@ describe("who needs attention", () => {
     const rows = attentionRows(
       [
         member({ externalId: "backlog", syncDone: 2, syncTotal: 9 }),
-        member({ externalId: "silent", installed: 2, lastUploadAt: null }),
+        // No stamp of ANY kind beside an install: nothing has been observed.
+        member({ externalId: "silent", installed: 2, lastUploadAt: null, lastSeenAt: null }),
         member({ externalId: "gone", installed: 0, active: false, inactiveSince: new Date(NOW).toISOString() }),
         member({ externalId: "noclient", installed: 0 }),
         member({ externalId: "fine" }),
@@ -139,6 +140,31 @@ describe("who needs attention", () => {
     );
     expect(rows.map((r) => r.externalId)).toEqual(["noclient", "silent", "backlog"]);
     expect(rows.map((r) => r.kind)).toEqual(["nothing-here-yet", "never-uploaded", "backfill-outstanding"]);
+  });
+
+  test("a MISSING upload stamp is not an accusation — it falls back to what the org has seen", () => {
+    // Every session recorded before the hub's per-destination table has no
+    // destination row, so its upload stamp is null. Reading that as "never
+    // uploaded" put every member whose history predates it on the attention list
+    // permanently, on a surface whose whole job is to be short.
+    const rows = attentionRows(
+      [
+        member({
+          externalId: "legacy-active",
+          lastUploadAt: null,
+          lastSeenAt: new Date(NOW - DAY).toISOString(),
+        }),
+        member({
+          externalId: "legacy-quiet",
+          lastUploadAt: null,
+          lastSeenAt: new Date(NOW - (QUIET_AFTER_DAYS + 5) * DAY).toISOString(),
+        }),
+      ],
+      NOW,
+    );
+    // The active one is not on the list at all; the stale one is quiet, which is
+    // the true statement about it.
+    expect(rows.map((r) => [r.externalId, r.kind])).toEqual([["legacy-quiet", "quiet"]]);
   });
 });
 

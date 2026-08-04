@@ -9,7 +9,7 @@ import path from "node:path";
 import { exportJWK, SignJWT, importPKCS8 } from "jose";
 
 import { readConsoleAdvertisement } from "../src/ui/advertise";
-import { clockSkewPath, writeClockSkew } from "../src/ui/clock-skew";
+import { clearClockSkew, clockSkewPath, writeClockSkew } from "../src/ui/clock-skew";
 import { UI_CONFIG_DEFAULTS, type UiConfig } from "../src/ui/config";
 import {
   ConsumedGrants,
@@ -26,7 +26,10 @@ const ORIGIN = "https://fortress.example";
 
 async function signer(): Promise<{
   publicKey: string;
-  mint: (claims: Record<string, unknown>, opts?: { expiresIn?: string; iat?: number }) => Promise<string>;
+  mint: (
+    claims: Record<string, unknown>,
+    opts?: { expiresIn?: string | number; iat?: number },
+  ) => Promise<string>;
   mintNotBefore: (notBefore: number) => Promise<string>;
 }> {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519", {
@@ -171,6 +174,68 @@ describe("the console-grant verifier", () => {
       };
       expect(written.allowedSeconds).toBe(30);
       expect(Math.abs(written.offsetSeconds)).toBeGreaterThan(30);
+    } finally {
+      await rm(runtimeRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a merely STALE grant is not diagnosed as a broken clock", async () => {
+    // A short window plus an operator who clicked late is an expired link, not a
+    // drifted host. Diagnosing it as skew wrote a record nothing could clear and
+    // pinned a permanent Posture warning on a healthy fortress.
+    const { publicKey, mint } = await signer();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    // Minted 61 s ago with a 1 s window: expired 60 s ago, which is a slow
+    // click, not a drifted clock.
+    const grant = await mint(
+      {
+        jti: "stale-1",
+        purpose: CONSOLE_GRANT_PURPOSE,
+        org: ORG,
+        aud: ORG,
+        sub: "u",
+        origin: ORIGIN,
+      },
+      { iat: nowSeconds - 61, expiresIn: nowSeconds - 60 },
+    );
+    const measured: number[] = [];
+    const verdict = await verifyConsoleGrant({
+      ...baseArgs(publicKey),
+      grant,
+      onClockSkew: async (offset) => {
+        measured.push(offset);
+      },
+    });
+    expect(verdict).toMatchObject({ ok: false, reason: "expired" });
+    expect(measured).toEqual([]);
+  });
+
+  test("a hand-off that WORKS clears the skew record", async () => {
+    const runtimeRoot = await mkdtemp(path.join(os.tmpdir(), "hx-skew-clear-"));
+    try {
+      // A record left behind by an earlier failure — or by the mis-diagnosis
+      // that used to be possible.
+      await writeClockSkew(runtimeRoot, 900);
+      expect(await readFile(clockSkewPath(runtimeRoot), "utf8")).toContain("offsetSeconds");
+
+      const { publicKey, mint } = await signer();
+      const grant = await mint({
+        jti: "grant-ok",
+        purpose: CONSOLE_GRANT_PURPOSE,
+        org: ORG,
+        aud: ORG,
+        sub: "u",
+        origin: ORIGIN,
+      });
+      const verdict = await verifyConsoleGrant({
+        ...baseArgs(publicKey),
+        grant,
+        onClockOk: async () => {
+          await clearClockSkew(runtimeRoot);
+        },
+      });
+      expect(verdict.ok).toBe(true);
+      await expect(readFile(clockSkewPath(runtimeRoot), "utf8")).rejects.toThrow();
     } finally {
       await rm(runtimeRoot, { recursive: true, force: true });
     }

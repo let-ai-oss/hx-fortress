@@ -190,6 +190,49 @@ export class SessionTable {
     return { ok: true, session, user };
   }
 
+  /**
+   * Re-affirm an OPEN stream's session against the CURRENT users.json, by id.
+   *
+   * The same revocation predicates `validate` applies — the session epoch, the
+   * account, and the credential epoch / password version — because a belt that
+   * asked a weaker question than the door would keep a stream alive for a
+   * principal every ordinary request already refuses. `reset`, the console's own
+   * standing remedy for a locked-out operator, bumps exactly the epochs and
+   * touches none of the account flags, so an eligibility-only check missed it
+   * entirely.
+   *
+   * NOT the clock predicates: TTL and idle belong to the request path, and a
+   * heartbeat is not a user action, so re-running them here would either extend
+   * an idle session or kill a stream the operator is actively watching.
+   * Revocation drops the session, so the next request sees it gone too.
+   */
+  revocationCheck(id: string, file: UsersFile): boolean {
+    for (const [digest, session] of this.byDigest) {
+      if (session.id !== id) continue;
+      if (session.sessionEpoch < file.sessionEpoch) {
+        this.drop(digest, session, "revoked");
+        return false;
+      }
+      const user = file.users.find((u) => u.login === session.userLogin);
+      if (!user || user.deletedAt) {
+        this.drop(digest, session, "user-gone");
+        return false;
+      }
+      if (user.disabledAt) {
+        this.drop(digest, session, "user-disabled");
+        return false;
+      }
+      if (user.credentialEpoch > session.credentialEpoch || user.pwdVersion > session.pwdVersion) {
+        this.drop(digest, session, "credentials-changed");
+        return false;
+      }
+      return true;
+    }
+    // A session id the table does not hold is one this process already dropped
+    // (or never issued): not valid.
+    return false;
+  }
+
   list(): UiSession[] {
     return [...this.byDigest.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
   }

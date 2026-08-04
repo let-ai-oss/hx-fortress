@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -219,6 +219,45 @@ describe("following across a rotation", () => {
     ac.abort();
     await running;
     expect(followed.some((l) => l.includes("line 999"))).toBe(true);
+  }, 20_000);
+});
+
+describe("the live follower and a character split by a POLL boundary", () => {
+  test("decodes whole, rather than as two replacement characters", async () => {
+    // The backwards reader was fixed for this; `watchLines` — the function the
+    // console's live Logs tab actually streams from — was not. It decoded each
+    // poll's byte range on its own, so a multi-byte character written across two
+    // polls became mojibake on the operator's screen.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hx-poll-straddle-"));
+    try {
+      const file = path.join(dir, "fortress.jsonl");
+      await writeFile(file, "");
+      const seen: string[] = [];
+      const ac = new AbortController();
+      const watcher = watchLines(file, (line) => seen.push(line), ac.signal, { pollMs: 5 });
+      await Bun.sleep(30);
+
+      // Written one BYTE at a time, so every multi-byte character is guaranteed
+      // to straddle at least one poll.
+      const bytes = Buffer.from("日本語のログ行です\n", "utf8");
+      const handle = await open(file, "a");
+      try {
+        for (const byte of bytes) {
+          await handle.write(Buffer.from([byte]));
+          await Bun.sleep(2);
+        }
+      } finally {
+        await handle.close();
+      }
+      await Bun.sleep(60);
+      ac.abort();
+      await watcher;
+
+      expect(seen).toEqual(["日本語のログ行です"]);
+      expect(seen.join("")).not.toContain("\uFFFD");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 20_000);
 });
 

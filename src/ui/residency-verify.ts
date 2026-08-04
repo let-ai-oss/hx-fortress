@@ -47,6 +47,10 @@ export interface VerifyInput {
   witness?: {
     letaiCopy: boolean;
     anyDestinationRecord: boolean;
+    /** let.ai recorded a delivery to THIS fortress — the narrow fact the
+     *  incident verdict is keyed on, carried rather than inferred from the one
+     *  above. */
+    hubRoutedHere: boolean;
     acknowledged: boolean;
   };
 }
@@ -139,6 +143,7 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
         fortressPresent: input.canonicalBytes !== null && input.canonicalBytes !== undefined,
         letaiCopy: input.witness.letaiCopy,
         anyDestinationRecord: input.witness.anyDestinationRecord,
+        hubRoutedHere: input.witness.hubRoutedHere,
         ingestChannel: input.row?.ingestChannel ?? null,
         acknowledged: input.witness.acknowledged,
         // This arm is built only when a run actually asked, so by construction.

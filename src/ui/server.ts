@@ -34,6 +34,7 @@ import { handleAuthRoute } from "./auth-routes";
 import { handleMutateRoute, type ConsoleWritePort } from "./mutate-routes";
 import { handleReadRoute, type ConsoleExportAudit, type ConsoleReadPort } from "./read-routes";
 import { normalizeAddress } from "./remote-key";
+import { redactedMessage } from "./redact";
 import { INSTANCE_PROBE_IDENTITY } from "./routes";
 import type { UiRuntime } from "./runtime";
 
@@ -328,13 +329,45 @@ export function startUiServer(
     if (hsts) response.headers.set("strict-transport-security", "max-age=31536000");
     return response;
   };
+  /**
+   * Nothing thrown out of a handler reaches the runtime's own error page. Bun's
+   * default one is 67 KB of HTML carrying the exception message, the throwing
+   * source lines and absolute filesystem paths — served to whoever made the
+   * request, and reachable post-auth from the READONLY class. It also bypassed
+   * `redact.ts` entirely, falsifying its "every value that leaves the console
+   * goes through here". Both belts are worn: this catch, and `development:
+   * false` so an escape at any other layer is still a bare 500.
+   */
+  const answerSafely = async (req: Request, peer: string | undefined): Promise<Response> => {
+    try {
+      return await answer(req, peer);
+    } catch (err) {
+      return finish(
+        new Response(`${JSON.stringify({ error: redactedMessage(err) })}\n`, {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+        "no-store",
+        csp,
+      );
+    }
+  };
+
   const serveOn = (host: string): Server<undefined> => {
     try {
       return Bun.serve({
         hostname: host,
         port: ctx.port,
         maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
-        fetch: (req, server) => answer(req, server.requestIP(req)?.address),
+        // NODE_ENV is set nowhere on the container path, and Bun's default is a
+        // development error page. Stated here rather than inherited.
+        development: false,
+        fetch: (req, server) => answerSafely(req, server.requestIP(req)?.address),
+        error: (err: Error): Response =>
+          new Response(`${JSON.stringify({ error: redactedMessage(err) })}\n`, {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          }),
       });
     } catch (err) {
       if (fallbackHostname && host !== fallbackHostname) return serveOn(fallbackHostname);

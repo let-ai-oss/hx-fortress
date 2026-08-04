@@ -155,6 +155,36 @@ export interface PostureView {
   /** Present when the verifier last measured a clock offset beyond the allowed
    *  skew. Rendered with its remediation; absent when the clock is fine. */
   clockSkew?: { offsetSeconds: number; allowedSeconds: number; remediation: string };
+  /** The cloud-witness setting AND its stamp. `hx.set_cloud_witness` cannot be
+   *  fenced — the daemon and a leaked roles.json present the same Postgres role
+   *  — so recording who last changed it is the whole compensating control, and a
+   *  stamp nothing renders is not a control at all. */
+  witness: { enabled: boolean; changedAt: string | null; changedBy: string | null } | null;
+  /** The latest completed run's failing findings, named. Without this the
+   *  compliance surface could say "N sessions have not been acknowledged" and
+   *  name none of them, while the only acknowledgeable verdict had no control
+   *  anywhere — a page stuck at failed with nothing an operator could do. */
+  findings: {
+    runStartedAt: string | null;
+    total: number;
+    shown: number;
+    rows: ResidencyFindingRow[];
+  } | null;
+}
+
+export interface ResidencyFindingRow {
+  org: string;
+  family: string;
+  sessionId: string;
+  verdict: string;
+  ingestChannel: string | null;
+  detail: string | null;
+  observedAt: string | null;
+  acknowledged: boolean;
+  /** Whether THIS verdict is one an acknowledgement can clear. Only
+   *  `also_at_letai` is: every other failing verdict is a statement about bytes
+   *  that are not here, which no amount of sign-off makes true. */
+  acknowledgeable: boolean;
 }
 
 export interface CommandView extends CommandRowView {
@@ -298,6 +328,16 @@ export async function handleReadRoute(
       case READ_PATHS.status:
         return json(await port.status());
       case READ_PATHS.sessions: {
+        // Validated HERE, like the export range above it. These two reach the
+        // query as `::timestamptz` casts, so an unparseable value is not a bad
+        // filter that returns nothing — it is a database error thrown out of the
+        // handler, which is a 500 the caller cannot act on.
+        for (const key of ["from", "to"] as const) {
+          const value = url.searchParams.get(key);
+          if (value !== null && value !== "" && !ISO.test(value)) {
+            return refusal(`${key} must be an ISO-8601 instant`);
+          }
+        }
         const page = await port.sessions(url.searchParams);
         return json(page);
       }

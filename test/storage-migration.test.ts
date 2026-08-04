@@ -629,6 +629,46 @@ describe("the drain, the barrier and the fence", () => {
     expect(h.trace).not.toContain("swap");
   });
 
+  test("the in-pause work HEARTBEATS, so a long final delta does not lapse the window", async () => {
+    // The final delta reads every sidecar from both buckets and the replay makes
+    // a round trip per tombstone; either can outlast one episode. Without a beat
+    // from inside their loops the window silently expires, writes reopen behind
+    // them, and the fence sees only the fresh episode it armed itself.
+    // Production timings: a 60 s episode, and the fence needs 30 s of it left.
+    const h = harness({ sessions: 4, swapPauseMs: 30 * 60_000 });
+    const readText = h.source.readArtifactText.bind(h.source);
+    h.source.readArtifactText = async (k, name): Promise<string | null> => {
+      // Each sidecar read costs a third of an episode, so the in-pause delta
+      // outlives many of them.
+      h.advance(20_000);
+      return await readText(k, name);
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.phase).toBe("done");
+    expect(result.switched).toBe(true);
+    // Re-armed repeatedly rather than once: every extension is its own episode.
+    const episodes = h.trace.filter((t) => t.startsWith("pause:"));
+    expect(episodes.length).toBeGreaterThan(3);
+  });
+
+  test("a window that LAPSED under the in-pause work refuses the cut", async () => {
+    // Re-arming afterwards makes the gate agree again but cannot undo the writes
+    // admitted while it was open — and a permanent delete landing then is read
+    // from neither list: the source loses it, the target keeps it, and
+    // verification walks the source, so nothing ever notices.
+    const h = harness({ sessions: 1, swapPauseMs: 30_000, tombstones: async () => [key(0)] });
+    h.target.deleteSession = async (): Promise<DeleteSessionResult> => {
+      // One round trip that outlives the whole budget.
+      h.advance(90_000);
+      return { complete: true, deleted: 1 };
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.phase).toBe("aborted");
+    expect(result.aborted).toContain("expired");
+    expect(result.switched).toBeFalsy();
+    expect(h.trace).not.toContain("swap");
+  });
+
   test("the pause window is bounded, not open-ended", async () => {
     const h = harness({ sessions: 1, swapPauseMs: 30_000 });
     await runStorageMigration(h.deps);

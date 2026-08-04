@@ -38,7 +38,7 @@ import { startUiServer, type UiServerCtx } from "./ui/server";
 import { getServiceManager } from "./service";
 import { FileCredentialStore } from "./cloud/credentials";
 import { FileSigningKeyStore } from "./gateway/signing-key-store";
-import { writeClockSkew } from "./ui/clock-skew";
+import { clearClockSkew, writeClockSkew } from "./ui/clock-skew";
 import {
   applyBootstrapUser,
   bootstrapLinkPath,
@@ -309,6 +309,10 @@ export async function runUiCommand(
       // never permanently on.
       onClockSkew: async (offsetSeconds) => {
         await writeClockSkew(paths.runtimeRoot, offsetSeconds).catch(() => {});
+      },
+      // …and the eraser. A hand-off that worked is proof the clock is usable.
+      onClockOk: async () => {
+        await clearClockSkew(paths.runtimeRoot).catch(() => {});
       },
     },
   });

@@ -98,11 +98,25 @@ describe("the console unit", () => {
     });
     expect(unit).toContain('ExecStart="/usr/local/bin/hx-fortress" ui --supervised --allow-insecure-bind');
     expect(unit).toContain('Environment=FORTRESS_ROOT="/data/fortress"');
-    expect(unit).toContain(`StartLimitBurst=${UI_RESTART_DISCIPLINE.limitBurst}`);
+    // BOTH directives, and in [Unit] — which is the whole property. systemd
+    // ignores a start limit written under [Service], so a whole-file substring
+    // match is blind to the one regression this test exists to catch; and a
+    // burst without its interval falls back to the 10 s default, which never
+    // trips at RestartSec=5.
+    const sections = new Map<string, string>();
+    for (const block of unit.split(/^\[/m).slice(1)) {
+      const name = block.slice(0, block.indexOf("]"));
+      sections.set(name, block);
+    }
+    expect(sections.get("Unit")).toContain(`StartLimitBurst=${UI_RESTART_DISCIPLINE.limitBurst}`);
+    expect(sections.get("Unit")).toContain(
+      `StartLimitIntervalSec=${UI_RESTART_DISCIPLINE.limitIntervalSec}`,
+    );
+    expect(sections.get("Service") ?? "").not.toContain("StartLimit");
     expect(unit).not.toContain("FORTRESS_UI_");
   });
 
-  test("stops respawning a binary that cannot run it — launchd arm", () => {
+  test("throttles a binary that cannot run it, and claims nothing more — launchd arm", () => {
     const plist = renderLaunchdPlist(
       {
         executablePath: "/usr/local/bin/hx-fortress",
@@ -113,7 +127,13 @@ describe("the console unit", () => {
       },
       CONSOLE_UNIT.label,
     );
-    expect(plist).toContain("<key>Crashed</key><false/>");
+    // launchd's KeepAlive sub-keys are OR'd, and `Crashed=false` means "restart
+    // when it did NOT crash" — the inverse of how it reads. Beside
+    // SuccessfulExit=false it matched every termination, i.e. an unconditional
+    // KeepAlive dressed as a ceiling. The rule darwin actually gets is: come
+    // back after a non-zero exit, no faster than ThrottleInterval.
+    expect(plist).not.toContain("Crashed");
+    expect(plist).toContain("<key>SuccessfulExit</key><false/>");
     expect(plist).toContain(
       `<key>ThrottleInterval</key><integer>${UI_RESTART_DISCIPLINE.throttleSeconds}</integer>`,
     );

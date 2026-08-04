@@ -19,10 +19,14 @@
 //   departed employees falls forever, and one that deletes them loses the fact
 //   that their sessions are still here.
 //
-//   QUIET IS DERIVED FROM lastUploadAt, NEVER lastSeenAt. A client heartbeats
-//   whether or not it is uploading anything, so last-seen stays fresh on an
-//   install that has silently stopped sending — which is exactly the install an
-//   operator is looking for.
+//   QUIET IS DERIVED FROM lastUploadAt WHEN THERE IS ONE. Both roster stamps are
+//   org-scoped evidence — the hub deliberately does not report the per-person
+//   heartbeat column, which carries no org — so last-seen is the most recent
+//   activity this organization has seen from the machine and last-upload is when
+//   bytes last landed on its destination row. The upload stamp is the stronger
+//   signal and wins; its ABSENCE means the session history predates
+//   per-destination tracking, not that nothing was ever sent, so it falls back
+//   to last-seen rather than accusing the member of never uploading.
 
 import type { RosterPersonRow } from "../query/console/roster";
 
@@ -139,7 +143,7 @@ export interface AttentionRow {
 
 export const ATTENTION_COPY: Record<AttentionKind, string> = {
   "nothing-here-yet": "on the roster, with no machine of theirs having produced a session for this organization",
-  "never-uploaded": "has a machine that worked here, with no upload recorded",
+  "never-uploaded": "has a machine that worked here, with no activity recorded at all",
   quiet: `has a machine that worked here, with nothing uploaded for over ${QUIET_AFTER_DAYS} days`,
   "backfill-outstanding": "is still backfilling — earlier sessions are on their way",
 };
@@ -179,9 +183,16 @@ function attentionKind(row: RosterPersonRow, now: number): AttentionKind | null 
   // mean they have no client — saying so would send an operator chasing an
   // install that already exists.
   if (row.installed === 0) return "nothing-here-yet";
-  // lastUploadAt, never lastSeenAt: a heartbeat is not an upload.
-  if (row.lastUploadAt === null) return "never-uploaded";
-  const age = now - Date.parse(row.lastUploadAt);
+  // The upload stamp when there is one. A NULL is not "never uploaded": the
+  // row got past `installed === 0`, so a machine of theirs did produce a session
+  // for this organization — the upload stamp comes from the hub's
+  // per-destination row, which sessions recorded before that table existed do
+  // not have. Calling that "never uploaded" put every member whose history
+  // predates it on the attention list permanently. Fall back to the activity
+  // the org has actually seen, and only call it out when THAT has gone quiet.
+  const stamp = row.lastUploadAt ?? row.lastSeenAt;
+  if (stamp === null) return "never-uploaded";
+  const age = now - Date.parse(stamp);
   if (Number.isFinite(age) && age > QUIET_AFTER_DAYS * 86_400_000) return "quiet";
   if (row.syncTotal !== null && row.syncDone !== null && row.syncDone < row.syncTotal) {
     return "backfill-outstanding";

@@ -304,6 +304,8 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
       cloudOnlySessions: null,
       routedHere: null,
       qualification: "unqualified - posture unavailable, cloud-only sessions not checked",
+      witness: null,
+      findings: null,
     }),
     logsExport: async () => "{}\n",
     report: async () => ({
@@ -738,6 +740,52 @@ describe("credentials never leave", () => {
     expect(redactCredentials("Authorization: Bearer abcdef0123456789")).toContain(REDACTED);
     expect(redactCredentials("https://x/y?token=abcdef0123")).toContain(REDACTED);
     expect(redactCredentials("password = 'hunter22'")).toContain(REDACTED);
+  });
+
+  test("the JSON form credentials.json is actually WRITTEN in is redacted too", () => {
+    // Every field rule required its separator to follow the bare name, and in
+    // JSON the next character is a quote — so the rules added for this file
+    // matched the file's own contents in none of its shapes. Probed one shape
+    // per rule, in the form `writePrivateJson` produces.
+    const file = JSON.stringify(
+      {
+        store: "s3",
+        bucket: "letai-sessions",
+        accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        sessionToken: "FQoGZXIvYXdzEBYaDEXAMPLETOKENvalue0123456789",
+        password: "hunter22",
+        openaiApiKey: "sk-abcdefghijklmnopqrstuvwxyz012345",
+        gcs: { private_key_id: "0123456789abcdef0123456789abcdef01234567" },
+      },
+      null,
+      2,
+    );
+    const redacted = redactCredentials(file);
+    for (const secret of [
+      "AKIAIOSFODNN7EXAMPLE",
+      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "FQoGZXIvYXdzEBYaDEXAMPLETOKENvalue0123456789",
+      "hunter22",
+      "sk-abcdefghijklmnopqrstuvwxyz012345",
+      "0123456789abcdef0123456789abcdef01234567",
+    ]) {
+      expect(redacted).not.toContain(secret);
+    }
+    // …and the shape is still readable, which is the whole point of redacting
+    // rather than dropping.
+    expect(redacted).toContain('"bucket": "letai-sessions"');
+    expect(redacted).toContain('"store": "s3"');
+  });
+
+  test("the equals form still works, and both separators live in one rule", () => {
+    expect(redactCredentials("password = 'hunter22'")).toContain(REDACTED);
+    expect(redactCredentials("PGPASSWORD=hunter22")).toContain(REDACTED);
+    expect(redactCredentials("secret_access_key = wJalrXUtnFEMI/K7MDENG/bPx")).toContain(REDACTED);
+    expect(redactCredentials("https://x/y?X-Amz-Signature=deadbeefdeadbeef01")).toContain(REDACTED);
+    expect(
+      redactCredentials("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"),
+    ).toBe(REDACTED);
   });
 
   test("an instant survives redaction as an instant", () => {

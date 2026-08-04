@@ -8,6 +8,7 @@
 // while the reader waits on the old one, with no error anywhere to say so.
 
 import { open, stat, type FileHandle } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 
 /** Rotate once the live file passes this. */
 export const ROTATE_BYTES = 16 * 1024 * 1024;
@@ -142,6 +143,14 @@ export async function watchLines(
   let identity: string | null = null;
   let offset = 0;
   let carry = "";
+  // Each poll reads its own byte range, and a multi-byte character straddling
+  // two ranges is not a whole character in either. Decoding each range on its
+  // own turned it into replacement characters — the live Logs tab is what reads
+  // these lines, so the operator saw the corruption. StringDecoder holds the
+  // incomplete tail bytes UNDECODED until the rest arrives; it is per
+  // attachment, because a rotation or a truncation means the held bytes belong
+  // to a file nobody will read again.
+  let decoder = new StringDecoder("utf8");
   // Once attached, EVERY later attach starts at byte 0. Seeking to the end
   // again would silently skip whatever the new segment already holds — the
   // exact hole a rotation opens when the reopen lands a poll late.
@@ -154,12 +163,13 @@ export async function watchLines(
       // Truncated in place by a writer that reused the inode.
       offset = 0;
       carry = "";
+      decoder = new StringDecoder("utf8");
     }
     if (info.size <= offset) return;
     const buffer = Buffer.alloc(info.size - offset);
     await handle.read(buffer, 0, buffer.length, offset);
     offset = info.size;
-    const parts = (carry + buffer.toString("utf8")).split("\n");
+    const parts = (carry + decoder.write(buffer)).split("\n");
     carry = parts.pop() ?? "";
     for (const part of parts) if (part.length > 0) onLine(part);
   };
@@ -187,6 +197,7 @@ export async function watchLines(
             identity = `${info.dev}:${info.ino}`;
             offset = attached || options.fromStart ? 0 : info.size;
             carry = "";
+            decoder = new StringDecoder("utf8");
             attached = true;
           }
         }

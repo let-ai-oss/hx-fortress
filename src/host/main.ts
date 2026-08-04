@@ -1037,10 +1037,21 @@ export async function runFortressHost(
    *  gateway called them regardless, so on an external DSN every claim raised
    *  42883, every poll pass swallowed it, and a command minted from the console
    *  sat at `requested` until its deadline while the daemon reported healthy.
-   *  Read once and cached: pg.json does not change under a running daemon. */
+   *  Read once and cached: pg.json does not change under a running daemon.
+   *
+   *  A FAILED READ IS NOT AN ANSWER, and it is not cached. `?.mode !== "external"`
+   *  reads `undefined !== "external"` as true, so a momentarily unreadable
+   *  pg.json on an external-DSN fortress used to pin "installed" for the process
+   *  lifetime: every `hx.claim_command` then raised 42883, the poll pass
+   *  swallowed it, and commands sat at `requested` until their deadline — the
+   *  exact silent failure this predicate was written to remove. Unknown means
+   *  unavailable for this pass, and the next pass asks again. */
   let commandPlaneInstalledCache: boolean | null = null;
   async function commandPlaneIsInstalled(): Promise<boolean> {
-    commandPlaneInstalledCache ??= (await readPgJson(paths.pgJson).catch(() => null))?.mode !== "external";
+    if (commandPlaneInstalledCache !== null) return commandPlaneInstalledCache;
+    const pg = await readPgJson(paths.pgJson).catch(() => null);
+    if (pg === null) return false;
+    commandPlaneInstalledCache = pg.mode !== "external";
     return commandPlaneInstalledCache;
   }
 

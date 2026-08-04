@@ -45,7 +45,6 @@ import { FileStatusReader } from "../status-reader";
 import { downloadBaseFromCloudUrl } from "../update";
 import { classifyConnectError, resolveConsoleDb, type ConsoleDbState } from "./console-db";
 import { createConsoleReadPort } from "./console-read-port";
-import { signInEligible } from "./users";
 import { createConsoleWritePort } from "./console-write-port";
 import { OFFERED_COMMAND_KINDS, type ConsoleWritePort } from "./mutate-routes";
 import type { UiConfig } from "./config";
@@ -292,9 +291,12 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // The registry has always taken this belt and nothing passed one, so a
     // revoked or disabled operator kept receiving the live daemon log until the
     // idle sweep fired — up to an hour. Re-read per check rather than captured:
-    // the point is that it changes under an open stream.
-    sessionStillValid: async (login: string): Promise<boolean> =>
-      signInEligible(await runtime.users.load(), login) !== null,
+    // the point is that it changes under an open stream. Keyed on the SESSION,
+    // not the login, so the same epoch predicates the request path applies reach
+    // the stream — a `reset` (the console's standing lockout remedy) bumps only
+    // the epochs, and an eligibility-only belt was blind to it.
+    sessionStillValid: async (sessionId: string): Promise<boolean> =>
+      runtime.sessions.revocationCheck(sessionId, await runtime.users.load()),
     db: () => {
       void refresh();
       return handle?.db ?? null;

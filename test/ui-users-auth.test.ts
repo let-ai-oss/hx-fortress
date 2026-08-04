@@ -4,7 +4,12 @@ import os from "node:os";
 import path from "node:path";
 
 import { ArgonBusyError, ArgonGate } from "../src/ui/argon-gate";
-import { LOCKOUT_FREE_ATTEMPTS, LockoutTable, RateLimiter } from "../src/ui/rate-limit";
+import {
+  GLOBAL_SIGN_IN_CEILING,
+  LOCKOUT_FREE_ATTEMPTS,
+  LockoutTable,
+  RateLimiter,
+} from "../src/ui/rate-limit";
 import { UiRuntime } from "../src/ui/runtime";
 import { SESSION_HEADER, SessionTable } from "../src/ui/sessions";
 import { StoreCorruptError } from "../src/ui/store-lock";
@@ -295,6 +300,51 @@ describe("the argon gate", () => {
       ),
     );
     expect(peak).toBe(1);
+  });
+
+  test("the ceiling reservation survives a SHARED remote key — the proxy deployment", async () => {
+    // The console ships for a `publicUrl` behind a reverse proxy, and the
+    // default `trustedProxies: []` makes every caller present the same peer
+    // address. Keyed on that address alone, one attacker failure marked the
+    // shared key dirty for half an hour, so the real operator no longer counted
+    // as clean, paid the process-wide ceiling the attacker was saturating, and
+    // got a 429 — the exact outcome the reservation exists to prevent.
+    const runtime = runtimeOn(root);
+    const created = await runtime.users.create("ada", "operator");
+    await runtime.users.completeSetup(created.token, PASSWORD);
+
+    // One stranger fails, from the shared address.
+    const attacker = await runtime.signIn({
+      login: "eve",
+      password: "wrong-password-here",
+      remoteKey: "proxy",
+      remoteAddr: "proxy",
+    });
+    expect(attacker.ok).toBe(false);
+    expect(runtime.lockouts.isClean("proxy")).toBe(false);
+    // …and the operator, who has failed at nothing, is still a clean principal.
+    expect(runtime.lockouts.isCleanPrincipal("ada", "proxy")).toBe(true);
+
+    // Now saturate the process-wide ceiling, which is what a flood does.
+    for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
+    expect(runtime.limiter.takeGlobalSignIn().ok).toBe(false);
+
+    const genuine = await runtime.signIn({
+      login: "ada",
+      password: PASSWORD,
+      remoteKey: "proxy",
+      remoteAddr: "proxy",
+    });
+    expect(genuine.ok).toBe(true);
+
+    // The stranger, whose own login HAS failed, still pays it.
+    const again = await runtime.signIn({
+      login: "eve",
+      password: "wrong-password-here",
+      remoteKey: "proxy",
+      remoteAddr: "proxy",
+    });
+    expect(again.ok === false && again.status).toBe(429);
   });
 
   test("a principal with no recent failures still gets in during a flood", async () => {

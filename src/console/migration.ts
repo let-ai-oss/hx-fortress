@@ -286,6 +286,18 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
   const done = new Set(await (deps.alreadyCopied?.() ?? Promise.resolve(new Set<string>())));
 
   /**
+   * Set only while the final delta and the tombstone replay are running, which
+   * is the work that happens INSIDE the armed pause. Both walk every session and
+   * read every object, so either can outlast one 60 s episode; without a beat
+   * from inside their loops the window lapses, writes reopen behind them, and
+   * the fence below sees only the fresh episode it just armed.
+   */
+  let inPauseBeat: (() => Promise<void>) | null = null;
+  const beat = async (): Promise<void> => {
+    if (inPauseBeat) await inPauseBeat();
+  };
+
+  /**
    * Whether the target holds this session's canonical as the source has it NOW.
    *
    * CONTENT, not existence — which is the whole reason the delta passes exist. A
@@ -321,14 +333,24 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
     // frozen and the target is not yet live. After the cut the target IS live
     // and a sidecar is rewritten whole on every commit, so the same comparison
     // reports an intact session as a partial loss.
-    const held = new Map<string, number>();
+    // HASHED, not measured. A sidecar is rewritten whole, so its length is not
+    // a function of its content the way an append-only canonical's is: the
+    // gateway's per-commit `session.json` rewrite moves fixed-width ISO stamps
+    // and integer counts, which changes the bytes and routinely leaves the
+    // length identical. Measuring it here would skip exactly the sessions this
+    // pass exists to catch. Both texts are already fully in hand.
+    const held = new Map<string, string>();
     for (const name of await deps.source.listSessionArtifacts(key)) {
+      // Per OBJECT, not per session: this loop reads every sidecar's full text
+      // from both buckets, so one busy session can outlast an episode on its own.
+      await beat();
       const text = await deps.source.readArtifactText(key, name);
-      if (text !== null) held.set(name, Buffer.byteLength(text));
+      if (text !== null) held.set(name, sha256(text));
     }
-    for (const [name, bytes] of held) {
+    for (const [name, digest] of held) {
+      await beat();
       const arrived = await deps.target.readArtifactText(key, name);
-      if (arrived === null || Buffer.byteLength(arrived) !== bytes) return false;
+      if (arrived === null || sha256(arrived) !== digest) return false;
     }
     return true;
   };
@@ -336,6 +358,7 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
   const copyMissing = async (keys: readonly SessionKey[], phase: MigrationPhase): Promise<number> => {
     let copied = 0;
     for (const key of keys) {
+      await beat();
       const ref = sessionRef(key);
       // Proven by a previous run — but only while the target still agrees. A
       // record without an object is a record about a bucket somebody emptied,
@@ -370,6 +393,7 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
     result.sessionsTotal = Math.max(result.sessionsTotal, keys.length);
     const behind: SessionKey[] = [];
     for (const key of keys) {
+      await beat();
       if (await targetIsCurrent(key, alsoSidecars)) continue;
       behind.push(key);
     }
@@ -434,10 +458,18 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
       armedUntil = new Date(Math.min(budgetEnds, clock().getTime() + heartbeatMs));
       return await deps.armPause(armedUntil, "storage migration swap");
     };
+    /** Has the armed window ever been observed already spent? Re-arming makes
+     *  the gate agree again but cannot undo the writes admitted in between, and
+     *  the fence proves only that SOME episode is in force — it has no way to
+     *  see that the previous one expired under the work it is fencing. */
+    let pauseLapsed = false;
+    /** The armed window is already spent — writes are being admitted again. */
+    const pauseSpent = (): boolean => armedUntil.getTime() <= clock().getTime();
     /** Extend only when the episode in force is close to lapsing — a heartbeat
      *  on every poll would be a row every quarter-second. */
     const heartbeat = async (): Promise<void> => {
       const now = clock().getTime();
+      if (pauseSpent()) pauseLapsed = true;
       if (now >= budgetEnds) return;
       if (armedUntil.getTime() - now > heartbeatMs / 2) return;
       episode = await armPause();
@@ -504,8 +536,28 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
       // source cannot change under them.
       // The final pass compares sidecars as well — see targetIsCurrent for why
       // this is the one pass where that comparison is sound.
-      await deltaPass("quiescing", true);
-      await replayTombstones(deps, emit);
+      inPauseBeat = heartbeat;
+      try {
+        await deltaPass("quiescing", true);
+        await replayTombstones(deps, emit, heartbeat);
+      } finally {
+        inPauseBeat = null;
+      }
+
+      // A lapse is not recoverable by re-arming. Deletes are gated only while
+      // the pause is IN FORCE, so a window that expired under the replay is one
+      // where a permanent delete could land in the source with the tombstone
+      // list already read — the source loses it, the target keeps it, and
+      // verification walks the source so it never notices. Refuse the cut.
+      // `pauseSpent()` as well as the flag: the last unit of work has no beat
+      // after it, so a window that expired during it is only visible here.
+      if (pauseLapsed || pauseSpent()) {
+        result.phase = "aborted";
+        result.aborted =
+          "the pause expired while the final delta and the tombstone replay were still running, so writes " +
+          "reopened behind them — nothing was switched";
+        return result;
+      }
 
       // The fence. Between the barrier and here, time passed — so the window is
       // re-armed and then re-PROVEN, and the margin is measured against what the
@@ -612,10 +664,15 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
 async function replayTombstones(
   deps: MigrationDeps,
   emit: (event: MigrationEvent) => void,
+  heartbeat: () => Promise<void> = async (): Promise<void> => undefined,
 ): Promise<number> {
   const tombstones = await deps.tombstones();
   let removed = 0;
   for (const key of tombstones) {
+    // One beat per session, and one per delete pass below: a single permanently
+    // deleted session can take hundreds of round trips, which on its own can
+    // outlast the armed window.
+    await heartbeat();
     // NO `statCanonical` gate. It resolves only `${prefix}/log.jsonl`, so a
     // session whose objects live entirely under its `:a:<agentId>` lanes — the
     // turn-less parent stub this codebase names in 0023 — looked absent and was
@@ -639,6 +696,7 @@ async function replayTombstones(
             `${MAX_DELETE_PASSES} passes; the cut is refused rather than leaving deleted content in the new bucket`,
         );
       }
+      await heartbeat();
       const result = await deps.target.deleteSession(key, { batchLimit: DELETE_BATCH_LIMIT });
       complete = result.complete;
     }
@@ -650,6 +708,15 @@ async function replayTombstones(
 
 /**
  * Every OBJECT the source holds that the new bucket does not.
+ *
+ * SCOPE, STATED: the canonical log and every sidecar `listSessionArtifacts`
+ * reports. `.staging/` chunks are NOT carried and are not verified — they are
+ * the uncommitted halves of an upload in flight, addressed by the client that is
+ * still writing them, and a run only reaches this point after the ingest pause
+ * has held and the store has gone quiet, so there is nothing legitimate left in
+ * flight to carry. An abandoned chunk stays in the old bucket, which is the same
+ * place its `deleteSession` sweep would look for it. Anything committed is in
+ * the canonical, and the canonical is compared byte for byte.
  *
  * Re-listed rather than taken from the run's own counters: the question is what
  * the fortress can serve now, and only the bucket can answer it. Object SETS
@@ -672,12 +739,12 @@ async function replayTombstones(
  *   the one surface an auditor reads; no measurement fixes that, because the
  *   comparison itself is unsound across a live cut.
  *
- * Sidecar STALENESS is kept out before the cut, and NOT by the delta pass — that
- * pass decides from canonical length alone (`targetIsCurrent`), which a sidecar
- * rewrite does not change. The parked-artifact replay is the one writer that
- * rewrites a sidecar without appending a canonical, so the daemon simply does
- * not replay while a run is between its copy and its cut. Clearing a copy record
- * matters only to a run RESUMED under the same id, where `copyMissing` reads it.
+ * Sidecar STALENESS is therefore kept out BEFORE the cut, by two belts that can
+ * both afford to be exact: the final in-pause delta compares every sidecar by
+ * SHA-256 (`targetIsCurrent(key, true)`) while the source is frozen and the
+ * target is not yet live, and the daemon does not replay parked artifacts while
+ * a run is between its copy and its cut. Clearing a copy record matters only to
+ * a run RESUMED under the same id, where `copyMissing` reads it.
  */
 async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
   const keys = await deps.source.listAllCanonicalKeys();

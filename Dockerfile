@@ -43,9 +43,16 @@ ENV FORTRESS_ROOT=/data
 # HOME is the OTHER root. credentials.json lives under $HOME/.let/session-vault/,
 # so an unset HOME puts the organization's bucket keys in the container's
 # writable layer — which a plain image upgrade discards. Naming it /data puts it
-# on the same volume as everything else the fortress must not lose. The daemon
-# still checks the older candidates once at boot and adopts what it finds, so an
-# image built before this line does not lose its enrollment.
+# on the same volume as everything else the fortress must not lose.
+#
+# THE UPGRADE FROM AN OLDER IMAGE IS NOT AUTOMATIC. The daemon does check the
+# older homes (/root, /) once at boot and adopts what it finds — but VOLUME is
+# ["/data"], so on a container enrolled interactively under an older image those
+# paths lived in the writable layer, and replacing the image discards them before
+# the new one ever looks. Enrollment survives an upgrade only when the
+# pre-upgrade $HOME was already on the volume. Copy /root/.let (or /.let) to
+# /data/.let BEFORE replacing the image — see the container section of
+# RELEASING.md.
 ENV HOME=/data
 VOLUME ["/data"]
 # 8787 is the ingest gateway; 8788 is the administration console. Publish the

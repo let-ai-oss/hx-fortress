@@ -103,10 +103,13 @@ export function createWitnessClient(
     }
     // No ids is a complete answer about nothing: the run asked everything it was
     // allowed to ask, and every eligible session is accounted for.
-    if (ids.length === 0) return { copies: new Set<string>(), known: new Set<string>() };
+    if (ids.length === 0) {
+      return { copies: new Set<string>(), known: new Set<string>(), routedHere: new Set<string>() };
+    }
 
     const copies = new Set<string>();
     const known = new Set<string>();
+    const routedHere = new Set<string>();
     // One budget for the whole sweep, sized to it rather than to a constant.
     const batches = Math.ceil(ids.length / batchSize);
     let waitsLeft = batches + EXTRA_WAITS;
@@ -186,8 +189,14 @@ export function createWitnessClient(
       for (const answer of answers) {
         if (answer.letaiCopy) copies.add(answer.sessionId);
         if (answer.anyDestinationRecord) known.add(answer.sessionId);
+        // The THIRD boolean, carried rather than collapsed. `not_delivered_here`
+        // is keyed on it: "let.ai recorded THIS fortress as a destination" is a
+        // narrower claim than "a destination row exists somewhere", and reading
+        // the incident off the broader one accused this appliance of losing a
+        // session the hub never said it sent here.
+        if (answer.hubRoutedHere) routedHere.add(answer.sessionId);
       }
     }
-    return { copies, known };
+    return { copies, known, routedHere };
   };
 }

@@ -101,6 +101,25 @@ On a container `hx-fortress ui disable` refuses while `FORTRESS_UI_ENABLE` is
 set, and `systemctl` / `launchctl` mean nothing there. Unsetting the variable and
 redeploying is the equivalent act.
 
+**Before upgrading a container, check where its enrollment lives.** `credentials.json`
+sits under `$HOME/.let/session-vault/`, and `VOLUME` is `["/data"]`. An image built
+before `ENV HOME=/data` therefore wrote it to `/root/.let` (or `/.let`) — in the
+container's writable layer, which is discarded when the image is replaced. The daemon
+does look in those older homes at boot, but by then they are gone. So on any container
+that was enrolled interactively (`docker exec … hx-fortress enroll`, i.e. without
+`FORTRESS_STORAGE_BUCKET` in the environment), copy the state onto the volume FIRST:
+
+```sh
+docker exec <container> sh -c 'test -d /root/.let && cp -a /root/.let /data/.let || true'
+docker exec <container> sh -c 'test -d /.let    && cp -a /.let    /data/.let || true'
+```
+
+Both the bucket credentials and `openaiApiKey` live in that file. Without this the
+upgraded container starts unenrolled and `session-vault init` refuses with "no
+credentials.json — run the enroll wizard first". A container driven entirely from the
+environment (`FORTRESS_STORAGE_BUCKET` set) rebuilds the file on boot and needs none of
+this.
+
 **Before upgrading a container, check how it is started.** The image's
 `ENTRYPOINT` is now `hx-fortress container-run`, and it REFUSES unless it is
 pid 1 — it is what receives the runtime's SIGTERM and what orphans are

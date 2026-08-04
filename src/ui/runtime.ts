@@ -60,6 +60,7 @@ export interface UiRuntimeOptions {
     orgId: () => Promise<string | null>;
     /** Called with the measured offset when the clock is why a grant failed. */
     onClockSkew?: (offsetSeconds: number) => Promise<void>;
+    onClockOk?: () => Promise<void>;
   };
 }
 
@@ -153,6 +154,7 @@ export class UiRuntime {
       ssoEnabled: config.sso,
       now: () => new Date(this.now()),
       ...(sso?.onClockSkew ? { onClockSkew: sso.onClockSkew } : {}),
+      ...(sso?.onClockOk ? { onClockOk: sso.onClockOk } : {}),
       consume: (jti, expiresAt) =>
         this.consumedGrants.consume(jti, expiresAt, new Date(this.now())),
     });
@@ -269,7 +271,13 @@ export class UiRuntime {
     // it and every subsequent sign-in got 429, the real operator included. A
     // principal with no recent failures skips the ceiling; it exists to bound
     // strangers, and a clean principal is not one.
-    if (!this.lockouts.isClean(args.remoteKey, now)) {
+    //
+    // Asked about the PRINCIPAL, not the address. This console ships for a
+    // `publicUrl` behind a proxy, where the default `trustedProxies: []` makes
+    // every caller share one remote key — so the address-only question answered
+    // "dirty" for everybody after a single attacker failure, and the reservation
+    // protected nobody on the one deployment it was written for.
+    if (!this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now)) {
       const ceiling = this.limiter.takeGlobalSignIn(now);
       if (!ceiling.ok) {
         return {
@@ -293,7 +301,8 @@ export class UiRuntime {
       return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: locked.retryAfterMs };
     }
 
-    const clean = this.lockouts.isClean(args.remoteKey, now);
+    // Same question for the argon gate's reserved slot, and for the same reason.
+    const clean = this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now);
     let matched: boolean;
     try {
       matched = await this.argon.run(args.remoteKey, clean, () =>

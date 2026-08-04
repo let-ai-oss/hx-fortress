@@ -101,6 +101,11 @@ export async function stopChildren(
     if (signalIfStillOurs(identity, "SIGTERM", args.prove)) waits.push(identity.child.exited);
   }
   if (waits.length === 0) return;
+  // The grace is a CEILING, not a duration: when the children win the race this
+  // returns immediately, and the losing sleep is left pending. Production's
+  // sleep is unref'd for exactly that reason — a referenced timer would hold the
+  // event loop for the rest of the window and the supervisor would spend the
+  // whole grace on every clean stop, which is what it exists to avoid.
   await Promise.race([Promise.all(waits), args.sleep(args.graceMs)]);
 }
 

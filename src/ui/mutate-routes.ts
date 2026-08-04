@@ -178,9 +178,12 @@ export async function handleMutateRoute(
     // inside params left ctx.credentialRef null on every row — so every rotation
     // and every migration arm and swap failed with a message that reads like
     // corrupted state, while the minted secret sat at rest for its full TTL.
-    const credentialRef = secret === undefined ? null : await ctx.port.mintCredential(secret);
     const rowParams: CommandParams = checked.params;
     try {
+      // Inside the try: minting writes a 0600 file, so it can fail on a full or
+      // read-only volume, and a mint that threw out of the handler produced a
+      // bare 500 with no refusal message and no trail record.
+      const credentialRef = secret === undefined ? null : await ctx.port.mintCredential(secret);
       const submitted = await ctx.audit.run(
         AUDIT_ACTIONS.commandSubmitted,
         {

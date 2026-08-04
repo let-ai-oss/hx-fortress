@@ -265,3 +265,39 @@ export function disputedCommandIdsQuery(commandIds: readonly string[]): SQL {
   return sql`SELECT DISTINCT a.session_ref AS "sessionRef" FROM hx.admin_audit a
     WHERE a.action = ${"console.command.disputed"} AND a.session_ref IN (${ids})`;
 }
+
+/** How many findings the Residency panel will name at once. A compliance
+ *  surface that says "N sessions and you cannot see which" is the state this
+ *  bound exists to keep off the page; a surface that renders ten thousand rows
+ *  is a different way to say the same thing. */
+export const FINDINGS_PAGE_MAX = 100;
+
+/**
+ * The LATEST run's findings that still fail the residency check, with whether
+ * each has been acknowledged.
+ *
+ * Only the failing ones: `confirmed` is not recorded at all, and a surface that
+ * listed the benign verdicts would bury the row an operator has to act on. The
+ * acknowledgement join is what makes the Acknowledge control idempotent on the
+ * page — an already-acknowledged `also_at_letai` renders as cleared rather than
+ * as a second thing to do.
+ */
+export function auditFindingsQuery(limit = FINDINGS_PAGE_MAX): SQL {
+  return sql`
+    WITH latest AS (
+      SELECT id, started_at FROM hx.audit_runs
+       WHERE error IS NULL AND finished_at IS NOT NULL
+       ORDER BY started_at DESC LIMIT 1
+    )
+    SELECT f.org AS "org", f.family AS "family", f.session_id AS "sessionId",
+           f.verdict AS "verdict", f.ingest_channel AS "ingestChannel",
+           f.detail AS "detail", f.observed_at AS "observedAt",
+           (k.session_id IS NOT NULL) AS "acknowledged",
+           l.started_at AS "runStartedAt",
+           count(*) OVER () AS "total"
+      FROM latest l
+      JOIN hx.audit_findings f ON f.run_id = l.id
+      LEFT JOIN hx.audit_acks k ON k.org = f.org AND k.session_id = f.session_id
+     ORDER BY (k.session_id IS NOT NULL), f.observed_at DESC, f.session_id
+     LIMIT ${limit}`;
+}

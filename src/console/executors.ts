@@ -94,6 +94,7 @@ const EMPTY_COUNTS: RollUpCounts = {
     residencyUnwitnessable: 0,
   unknownProvenance: 0,
   notApplicable: 0,
+  copyUnchecked: 0,
 };
 
 /** A storage migration is under way — either running in this process, or
@@ -185,6 +186,13 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
       if (!ctx.credentialRef) {
         throw new Error("this rotation carries no credential reference");
       }
+      // BEFORE the credential is consumed. The reference is single-use, so a
+      // refusal that fires after it has been read forces the operator to re-mint
+      // material this console had no intention of using — and "a migration is in
+      // flight" is by far the most likely refusal, since that is precisely when
+      // somebody reaches for the credentials. Nothing below this point can send
+      // them back to the start.
+      await assertNotMigrating(deps);
       const payload = await consumeCredentialRef<unknown>(deps.cmdCredsDir, ctx.credentialRef);
       if (!payload || !isRotationPayload(payload)) {
         throw new Error(
@@ -200,7 +208,6 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
         await deps.setCloudCredential(payload.credential);
         return describeRotation(payload, null);
       }
-      await assertNotMigrating(deps);
       const current = await readVaultCredentials();
       const candidate = applyRotation(current, payload);
       // The candidate store carries no gate and no wedge escalation on purpose:

@@ -197,9 +197,14 @@ export function renderLaunchdPlist(
   const environmentBlock = environment
     ? `\n    <key>EnvironmentVariables</key>\n    <dict>${environment}\n    </dict>`
     : "";
-  // Crashed=false is what stops the respawn loop: a binary that does not
-  // understand the verb this unit passes exits non-zero forever otherwise.
-  const crashed = options.restart ? "\n      <key>Crashed</key><false/>" : "";
+  // NO `Crashed` key. Per launchd.plist(5) the KeepAlive sub-keys are OR'd and
+  // `Crashed=false` means "restart when the job did NOT crash" — the inverse of
+  // what it reads as. Paired with SuccessfulExit=false it matched every
+  // termination, making KeepAlive unconditional: the opposite of the ceiling the
+  // comment claimed. `SuccessfulExit=false` alone is the honest rule (come back
+  // only after a non-zero exit), and ThrottleInterval below rate-limits it.
+  // launchd has no start-limit concept and no `failed` state, so on darwin there
+  // is no ceiling to express — see RestartDiscipline, which now says so.
   const throttle = options.restart
     ? `\n    <key>ThrottleInterval</key><integer>${options.restart.throttleSeconds}</integer>`
     : "";
@@ -215,7 +220,7 @@ export function renderLaunchdPlist(
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key>
     <dict>
-      <key>SuccessfulExit</key><false/>${crashed}
+      <key>SuccessfulExit</key><false/>
     </dict>${throttle}${environmentBlock}
     <key>StandardOutPath</key><string>${serviceLogPath}</string>
     <key>StandardErrorPath</key><string>${serviceLogPath}</string>

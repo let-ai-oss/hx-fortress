@@ -11,7 +11,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { CONSOLE_ROUTINES } from "../../src/host/postgres/console-plane";
-import { containmentState, type ContainmentProbe } from "../../src/host/postgres/privilege-matrix";
+import {
+  containmentProbeQuery,
+  containmentState,
+  type ContainmentProbe,
+} from "../../src/host/postgres/privilege-matrix";
 import { generateRoleSql } from "../../src/host/postgres/print-role-sql";
 import { makeMigrationExec } from "../../src/host/postgres/sql-exec";
 import { migrations } from "../../src/host/postgres/migrations/manifest";
@@ -102,13 +106,8 @@ END $$`).catch(() => {});
   });
 
   test("the containment probe reports UNAVAILABLE rather than pretending", async () => {
-    const [probe] = await query<ContainmentProbe>(
-      externalDsn,
-      `SELECT current_user::text AS "currentUser",
-              (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-                WHERE n.nspname = 'hx' AND p.proname IN (${CONSOLE_ROUTINES.map((r) => `'${r.name}'`).join(", ")})) AS "routineCount",
-              has_table_privilege('hx.console_commands', 'UPDATE') AS "canUpdateCommands"`,
-    );
+    // The shipped query itself — see its twin in console-plane.e2e.
+    const [probe] = await query<ContainmentProbe>(externalDsn, containmentProbeQuery());
     expect(containmentState(probe)).toBe("unavailable");
   });
 

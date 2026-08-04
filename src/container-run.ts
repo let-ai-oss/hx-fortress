@@ -113,7 +113,21 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   if (pid !== 1) throw new Error(NOT_PID_ONE_REFUSAL);
 
   const paths = fortressPaths(deps.fortressRoot);
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  // UNREF'D. Every sleep here is one half of a race — the supervise tick against
+  // a child exiting, the shutdown grace against the children stopping — so the
+  // loser is always left pending. A referenced timer keeps the event loop alive
+  // until it fires, and this process exits by draining the loop
+  // (`process.exitCode`, never `process.exit`), so the container reported its
+  // daemon's exit code up to a whole grace period late and burned the full
+  // 8 s window on every clean stop. Unref'd, a race the sleep loses costs
+  // nothing.
+  const sleep =
+    deps.sleep ??
+    ((ms: number) =>
+      new Promise<void>((r) => {
+        const timer = setTimeout(r, ms);
+        (timer as { unref?: () => void }).unref?.();
+      }));
   const now = deps.now ?? Date.now;
   const prove = deps.prove ?? proveIdentity;
   const config = new LiveUiConfig(paths.uiConfig, (message) => deps.writeLine(message));

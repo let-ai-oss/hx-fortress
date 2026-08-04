@@ -55,6 +55,7 @@ export async function finishAuditRun(
                lanes_hold_it = ${args.counts.lanesHoldIt},
                unknown_provenance = ${args.counts.unknownProvenance},
                not_applicable = ${args.counts.notApplicable},
+               copy_unchecked = ${args.counts.copyUnchecked},
                qualification = ${args.qualification},
                error = ${args.error}
          WHERE id = ${runId}::uuid`,
@@ -69,7 +70,14 @@ export async function recordFindings(
   runId: string,
   findings: readonly AuditFinding[],
 ): Promise<number> {
-  const keep = findings.filter((f) => f.verdict !== "confirmed" && f.verdict !== "not_applicable");
+  // `copy_unchecked` joins them: it is `confirmed` with the copy question left
+  // unasked, so on a run with the witness off it describes EVERY session here.
+  // The run's own counter carries it and the roll-up names it in the
+  // qualification; a row per session would be the table-sized-as-the-fortress
+  // this filter exists to prevent, and none of them would be actionable.
+  const keep = findings.filter(
+    (f) => f.verdict !== "confirmed" && f.verdict !== "not_applicable" && f.verdict !== "copy_unchecked",
+  );
   for (const finding of keep) {
     await db.execute(
       sql`INSERT INTO hx.audit_findings (run_id, org, family, session_id, verdict, ingest_channel, detail)

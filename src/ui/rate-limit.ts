@@ -153,6 +153,12 @@ export interface LockoutSnapshot {
 export class LockoutTable {
   private readonly records = new Map<string, FailureRecord>();
   private readonly recentByRemote = new Map<string, number>();
+  /** The same memory, keyed by LOGIN. Behind a reverse proxy every principal
+   *  shares one remote key, so the remote-only memory says "dirty" for everyone
+   *  the moment any one attempt fails — and the reservation that exists to let a
+   *  real operator through a flood stopped applying to anybody. The login is the
+   *  discriminator that survives a shared address. */
+  private readonly recentByLogin = new Map<string, number>();
 
   private static key(login: string, remoteKey: string): string {
     return `${login} ${remoteKey}`;
@@ -186,6 +192,7 @@ export class LockoutTable {
     const delay = over <= 0 ? 0 : Math.min(LOCKOUT_BASE_MS * 2 ** (over - 1), LOCKOUT_MAX_MS);
     this.records.set(key, { failures, lastAt: now, lockedUntil: now + delay, epoch: lockoutEpoch });
     this.recentByRemote.set(remoteKey, now);
+    this.recentByLogin.set(login, now);
     return delay > 0 ? { locked: true, failures, retryAfterMs: delay } : { locked: false, failures };
   }
 
@@ -200,6 +207,22 @@ export class LockoutTable {
     return last === undefined || now - last > FAILURE_MEMORY_MS;
   }
 
+  /** A PRINCIPAL with no failure in living memory — quiet source OR quiet login.
+   *
+   *  OR, not AND, and that is the whole point. On the deployment this console
+   *  ships for (a `publicUrl` behind a proxy, `trustedProxies: []` by default)
+   *  every caller collapses onto the peer address, so one attacker failure marks
+   *  the shared key dirty for half an hour and the operator — whose own login has
+   *  not failed at all — pays a ceiling the attacker is saturating. Asking about
+   *  the login as well restores the reservation for exactly the person it was
+   *  written for, and takes nothing from the attacker case: a stranger's first
+   *  attempt was already clean under the remote-only rule. */
+  isCleanPrincipal(login: string, remoteKey: string, now = Date.now()): boolean {
+    if (this.isClean(remoteKey, now)) return true;
+    const last = this.recentByLogin.get(login);
+    return last === undefined || now - last > FAILURE_MEMORY_MS;
+  }
+
   sweep(now = Date.now()): number {
     let dropped = 0;
     for (const [key, record] of this.records) {
@@ -210,6 +233,9 @@ export class LockoutTable {
     }
     for (const [key, at] of this.recentByRemote) {
       if (now - at > FAILURE_MEMORY_MS) this.recentByRemote.delete(key);
+    }
+    for (const [key, at] of this.recentByLogin) {
+      if (now - at > FAILURE_MEMORY_MS) this.recentByLogin.delete(key);
     }
     return dropped;
   }
@@ -224,8 +250,9 @@ export class LockoutTable {
     for (const [key, record] of snapshot.entries) {
       if (now - record.lastAt > FAILURE_MEMORY_MS) continue;
       this.records.set(key, record);
-      const remoteKey = key.split(" ")[1];
+      const [login, remoteKey] = key.split(" ");
       if (remoteKey) this.recentByRemote.set(remoteKey, record.lastAt);
+      if (login) this.recentByLogin.set(login, record.lastAt);
     }
   }
 

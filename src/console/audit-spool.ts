@@ -285,6 +285,9 @@ export class AuditSpool {
   private bytes = 0;
   private ready: Promise<void> | null = null;
   private rotating = false;
+  /** Set when a record pushed the file past its bound; consumed by the NEXT
+   *  `append()`, never inside the chain. See `rotate()`. */
+  private rotateDue = false;
   /** One append at a time, so `seq` and the file's bytes stay in step even when
    *  two callers write without awaiting each other. */
   private tail: Promise<unknown> = Promise.resolve();
@@ -322,6 +325,10 @@ export class AuditSpool {
    *  the record describes; a mutation whose intent never reached disk is one the
    *  console can never corroborate. */
   async append(record: AuditRecordInput): Promise<AuditRecord> {
+    // Rotation happens between records, never inside one. `beforeRotate` flushes
+    // pending failure windows, i.e. it appends, so it must run at a moment when
+    // `this.tail` is settled and can be re-chained — which is exactly here.
+    if (this.rotateDue) await this.rotate();
     const write = this.tail.then(() => this.appendOne(record));
     // The chain must not break on a refusal: an ownership error would otherwise
     // poison every later append with the FIRST caller's failure.
@@ -351,16 +358,24 @@ export class AuditSpool {
       await handle.close();
     }
     this.bytes += Buffer.byteLength(line);
-    if (this.bytes >= this.rotateBytes) await this.rotate();
+    // Flag only. Rotating HERE would deadlock the whole spool: `beforeRotate`
+    // appends (production wires it to flushFailures), and an append issued from
+    // inside the chain waits on `this.tail` — which is this very call.
+    if (this.bytes >= this.rotateBytes) this.rotateDue = true;
     return full;
   }
 
   /** Retire this file and open a fresh one. Long mutations never block it: the
    *  pair they belong to is resolved by (refFileId, refSeq), so an outcome may
-   *  land in a file its intent never touched. */
+   *  land in a file its intent never touched.
+   *
+   *  Callable directly (the CLI and tests do); the size-driven path reaches it
+   *  from `append()` rather than from `appendOne()`, because `beforeRotate`
+   *  appends and an append inside the chain can never be served. */
   async rotate(): Promise<void> {
     if (this.rotating) return;
     this.rotating = true;
+    this.rotateDue = false;
     try {
       // Inside the guard, so a flush that appends does not recurse into another
       // rotation — its records belong to the file being retired.

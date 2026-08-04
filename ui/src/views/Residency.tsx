@@ -1,6 +1,6 @@
 import React from "react";
 
-import { api } from "../api";
+import { api, type PostureView, type ResidencyFindingRow } from "../api";
 import {
   FactRow,
   Loaded,
@@ -112,7 +112,13 @@ export default function Residency(): React.ReactElement {
         </Loaded>
       </Panel>
 
-      <AuditPanel daemonRunning={posture.data !== null} />
+      <FindingsPanel
+        daemonRunning={posture.data !== null}
+        findings={posture.data?.findings ?? null}
+        onChanged={() => void posture.reload()}
+      />
+
+      <AuditPanel daemonRunning={posture.data !== null} witness={posture.data?.witness ?? null} />
 
       {page.data?.rows[0] ? (
         <VerifyResidencyPanel
@@ -185,7 +191,10 @@ export default function Residency(): React.ReactElement {
  * eligible session reports the witness as unavailable — which is a different
  * answer from "let.ai holds no copy", and the run says so.
  */
-function AuditPanel(props: { daemonRunning: boolean }): React.ReactElement {
+function AuditPanel(props: {
+  daemonRunning: boolean;
+  witness: { enabled: boolean; changedAt: string | null; changedBy: string | null } | null;
+}): React.ReactElement {
   const [dialog, ask] = useConfirm();
   const [result, showResult] = useResultLine();
   const [busy, setBusy] = React.useState(false);
@@ -243,8 +252,16 @@ function AuditPanel(props: { daemonRunning: boolean }): React.ReactElement {
         />
         <FactRow
           k="Ask let.ai"
-          v="Cloud witness"
-          vs="With it on, the ids of cloud-relayed sessions are sent to let.ai during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
+          v={props.witness ? (props.witness.enabled ? "On" : "Off") : "Cloud witness"}
+          vs={
+            // The STAMP, rendered. `hx.set_cloud_witness` cannot be fenced — the
+            // daemon and a leaked roles.json are the same Postgres role — so who
+            // last changed it is the whole compensating control, and it was
+            // recorded and read by nothing.
+            props.witness?.changedAt
+              ? `Last changed ${fmt.when(props.witness.changedAt)} by ${props.witness.changedBy ?? "an unrecorded role"}. With it on, the ids of cloud-relayed sessions are sent to let.ai during a run; with it off nothing leaves this host.`
+              : "With it on, the ids of cloud-relayed sessions are sent to let.ai during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
+          }
           action={
             <span style={{ display: "inline-flex", gap: 8 }}>
               <MutationControl
@@ -288,6 +305,110 @@ function AuditPanel(props: { daemonRunning: boolean }): React.ReactElement {
             </span>
           }
         />
+      </div>
+      <ResultLine state={result} />
+    </Panel>
+  );
+}
+
+/**
+ * What the last run actually found, named — and the one control that can clear
+ * it.
+ *
+ * The audit's roll-up fails on any unacknowledged `also_at_letai`, and until
+ * this panel existed it failed while naming no session: the findings were
+ * written to a table nothing read, and `acknowledge_finding` was an accepted
+ * command with no surface that submitted it. A compliance page stuck at failed
+ * with nothing an operator can do is worse than one that never ran.
+ *
+ * Only `also_at_letai` is acknowledgeable, and the control says so rather than
+ * offering a button that would be refused: every other failing verdict is a
+ * statement about bytes that are not in this bucket, which no sign-off changes.
+ */
+function FindingsPanel(props: {
+  daemonRunning: boolean;
+  findings: PostureView["findings"];
+  onChanged: () => void;
+}): React.ReactElement | null {
+  const [dialog, ask] = useConfirm();
+  const [result, showResult] = useResultLine();
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const reason = props.daemonRunning ? undefined : NO_POLLER_REFUSAL;
+  const data = props.findings;
+
+  if (!data || data.rows.length === 0) return null;
+
+  const acknowledge = async (row: ResidencyFindingRow): Promise<void> => {
+    const ok = await ask({
+      title: "Acknowledge this copy?",
+      body:
+        "This records that somebody responsible has seen that let.ai also holds a copy of this " +
+        "session, and stops it failing the residency check. It does not delete anything, here or " +
+        "there. The acknowledgement is signed into this host's audit trail with your login.",
+      confirmLabel: "Acknowledge",
+    });
+    if (!ok) return;
+    setBusy(row.sessionId);
+    try {
+      await api.submitCommand("acknowledge_finding", {
+        org: row.org,
+        sessionId: row.sessionId,
+        reason: "acknowledged from the console",
+      });
+      showResult("Asked the daemon to record it. The finding clears once it has.");
+      props.onChanged();
+    } catch (error) {
+      showResult(error instanceof Error ? error.message : String(error), true);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Panel
+      title="What the last run found"
+      sub={
+        data.runStartedAt
+          ? `From the run of ${fmt.when(data.runStartedAt)}. ${data.total} finding(s)${
+              data.shown < data.total ? `, showing the first ${data.shown}` : ""
+            }.`
+          : `${data.total} finding(s) from the most recent completed run.`
+      }
+    >
+      {dialog}
+      <div className="rowlist ops">
+        {data.rows.map((row) => (
+          <div className="row" key={`${row.org}/${row.family}/${row.sessionId}`}>
+            <span className={row.acknowledged ? "dot" : "dot warn"}></span>
+            <div className="who">
+              <b>{row.sessionId}</b>
+              <div className="sub">
+                {row.detail ?? row.verdict.split("_").join(" ")}
+                {row.ingestChannel ? ` · arrived over ${row.ingestChannel}` : ""}
+              </div>
+            </div>
+            <div>
+              <span className={row.acknowledged ? "pill ok pc" : "pill warn pc"}>
+                {row.acknowledged ? "acknowledged" : row.verdict.split("_").join(" ")}
+              </span>
+            </div>
+            <div className="m">
+              {row.acknowledged ? (
+                fmt.when(row.observedAt)
+              ) : row.acknowledgeable ? (
+                <MutationControl
+                  label="Acknowledge"
+                  small
+                  disabled={busy !== null || reason !== undefined}
+                  {...(reason ? { reason } : {})}
+                  onClick={() => void acknowledge(row)}
+                />
+              ) : (
+                <span className="sub">not acknowledgeable</span>
+              )}
+            </div>
+          </div>
+        ))}
       </div>
       <ResultLine state={result} />
     </Panel>

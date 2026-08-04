@@ -35,13 +35,20 @@ export const CONSOLE_UNIT: UnitIdentity = {
 
 /** How a unit is allowed to come back after it dies. The daemon leaves this
  *  unset and keeps its shipped discipline; the console sets it so a binary that
- *  does not understand the console verb drives the unit to failed and STOPS,
- *  instead of respawning forever against a downgrade. */
+ *  does not understand the console verb does not respawn at full speed against a
+ *  downgrade.
+ *
+ *  The two managers give different guarantees and this type does not pretend
+ *  otherwise: systemd has a real ceiling — the unit reaches `failed` and stays
+ *  there, which an operator can see — while launchd has no start-limit concept
+ *  and no failed state, so all darwin can express is a rate. Anything that reads
+ *  a stop-forever guarantee out of this on darwin is reading one that is not
+ *  there. */
 export interface RestartDiscipline {
-  /** systemd StartLimitIntervalSec / StartLimitBurst. */
+  /** systemd StartLimitIntervalSec / StartLimitBurst — a real ceiling. */
   limitIntervalSec: number;
   limitBurst: number;
-  /** launchd ThrottleInterval, and KeepAlive.Crashed=false alongside it. */
+  /** launchd ThrottleInterval — a rate limit, and the only bound darwin has. */
   throttleSeconds: number;
 }
 

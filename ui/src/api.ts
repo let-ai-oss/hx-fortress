@@ -420,6 +420,25 @@ export interface PostureView {
   routedHere: number | null;
   qualification: string;
   clockSkew?: { offsetSeconds: number; allowedSeconds: number; remediation: string };
+  witness: { enabled: boolean; changedAt: string | null; changedBy: string | null } | null;
+  findings: {
+    runStartedAt: string | null;
+    total: number;
+    shown: number;
+    rows: ResidencyFindingRow[];
+  } | null;
+}
+
+export interface ResidencyFindingRow {
+  org: string;
+  family: string;
+  sessionId: string;
+  verdict: string;
+  ingestChannel: string | null;
+  detail: string | null;
+  observedAt: string | null;
+  acknowledged: boolean;
+  acknowledgeable: boolean;
 }
 
 export interface AuditRow {

@@ -81,8 +81,15 @@ export interface AuditFinding {
 export interface WitnessAnswer {
   /** Session ids let.ai reports a copy of. */
   copies: ReadonlySet<string>;
-  /** Session ids let.ai holds ANY destination record for. */
+  /** Session ids let.ai holds ANY destination record for — a destination row
+   *  exists, wherever it points. Kept apart from `routedHere` because the two
+   *  answer different questions and the incident rests on the narrower one. */
   known: ReadonlySet<string>;
+  /** Session ids let.ai recorded a delivery to THIS fortress for. The protocol
+   *  ships all three booleans precisely so this one is not inferred from the
+   *  broader `known`: a session routed only to a let.ai-hosted destination, or
+   *  to another fortress, is not one this appliance failed to receive. */
+  routedHere: ReadonlySet<string>;
 }
 
 export interface AuditRunDeps {
@@ -214,6 +221,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
     residencyUnwitnessable: 0,
     unknownProvenance: 0,
     notApplicable: 0,
+    copyUnchecked: 0,
   };
   let truncated = false;
 
@@ -239,6 +247,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
       // and reading back under the bare one is the same defect twice over.
       letaiCopy: witness?.copies.has(witnessIdOf(row)) ?? false,
       anyDestinationRecord: witness?.known.has(witnessIdOf(row)) ?? false,
+      hubRoutedHere: witness?.routedHere.has(witnessIdOf(row)) ?? false,
       ingestChannel: row.ingestChannel,
       acknowledged: ack,
       // Per ROW: a row excluded from the ask was not answered about, whatever
@@ -303,6 +312,9 @@ function countVerdict(counts: RollUpCounts, verdict: ResidencyVerdict, acknowled
   switch (verdict) {
     case "confirmed":
       counts.confirmed += 1;
+      return;
+    case "copy_unchecked":
+      counts.copyUnchecked += 1;
       return;
     case "also_at_letai":
       counts.alsoAtLetai += 1;

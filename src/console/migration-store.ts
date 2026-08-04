@@ -144,18 +144,20 @@ export async function saveMigrationRun(
 /**
  * Forget that these sessions were copied, so a RESUMED run carries them again.
  *
- * Not a delta pass — those decide from canonical length (`targetIsCurrent`) and
+ * Not a delta pass — those decide from the live stores (`targetIsCurrent`) and
  * never read this table. The record is loaded once, into the `done` set at the
  * start of a run, and consulted by `copyMissing`; clearing it is what makes a
  * resumed run re-copy a session whose sidecar changed under it.
  *
  * A parked-artifact replay is the one writer that changes a sidecar without
- * appending the canonical, and the delta pass decides what to re-copy by
- * comparing canonical length. Without this a session whose `session.json` was
- * replayed after its copy is skipped by every later pass and the new bucket
- * keeps the stale one — invisibly, because verification checks sidecars for
- * presence (the target is live by then, so it cannot compare their bytes).
- * Within a single run the replay is suppressed instead; this covers the resume.
+ * appending the canonical, and every delta pass but the last decides what to
+ * re-copy by comparing canonical length. Without this a session whose
+ * `session.json` was replayed after its copy is skipped by those passes and,
+ * on a run resumed under the same id, is never carried at all — invisibly,
+ * because verification after the cut checks sidecars for presence (the target
+ * is live by then, so it cannot compare their bytes). Within a single run the
+ * replay is suppressed and the final in-pause pass hashes every sidecar; this
+ * covers the resume.
  *
  * Across every run, not just the one in flight: the replay does not know which
  * run copied the session, and a stale record left behind for a run that is

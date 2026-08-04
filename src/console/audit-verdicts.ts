@@ -18,6 +18,7 @@ export type ResidencyVerdict =
   | "also_at_letai"
   | "not_delivered_here"
   | "no_record"
+  | "copy_unchecked"
   | "missing_here"
   | "lanes_hold_it"
   | "residency_unchecked"
@@ -32,8 +33,13 @@ export interface VerdictInput {
   /** let.ai reports a copy of this session's bytes. */
   letaiCopy: boolean;
   /** let.ai holds ANY per-destination record for this session. Absent records
-   *  predate destination tracking and are benign legacy, not an incident. */
+   *  predate destination tracking and are benign legacy, not an incident.
+   *  Deliberately NOT the incident key — see `hubRoutedHere`. */
   anyDestinationRecord: boolean;
+  /** let.ai recorded a delivery to THIS fortress. The narrow fact the incident
+   *  verdict rests on: a destination row that points somewhere else says nothing
+   *  about what this appliance was sent. */
+  hubRoutedHere: boolean;
   /** How the session first reached this fortress. */
   ingestChannel: string | null;
   /** An acknowledgement already exists for this session. */
@@ -78,14 +84,16 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     !input.fortressPresent &&
     !input.hasOwnTranscript &&
     input.hasLaneObject &&
-    // ...and the hub is not saying it routed a parent transcript here. Moving
+    // ...and the hub is not saying it routed a parent transcript HERE. Moving
     // this ahead of the eligibility gate made it catch tunnel rows too, and
     // without this clause it swallowed `not_delivered_here` — the one incident
     // R8/R9 says is never downgraded. The hub writes its destination row inside
     // the parent commit, independently of the forward to this fortress, so "stub
-    // with lanes" and "the parent never arrived" are reachable at once. Gateway
-    // and reconciled rows are never asked, so this is already false for them.
-    !input.anyDestinationRecord &&
+    // with lanes" and "the parent never arrived" are reachable at once. The
+    // NARROW fact, matching what the incident is keyed on: a destination row
+    // pointing elsewhere is not a parent this fortress was sent. Gateway and
+    // reconciled rows are never asked, so this is already false for them.
+    !input.hubRoutedHere &&
     // ...and that "no destination record" is an ANSWER, not an absence. It is
     // false-by-default whenever the witness returned null or the row was never
     // asked about, so without this the exemption sat ahead of the
@@ -116,7 +124,16 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     // one whose channel is unknown must not be assumed to be either.
     return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";
   }
-  if (input.fortressPresent) return input.letaiCopy ? "also_at_letai" : "confirmed";
+  if (input.fortressPresent) {
+    if (input.letaiCopy) return "also_at_letai";
+    // `confirmed` says "let.ai reports no copy". `letaiCopy` is false BY DEFAULT
+    // whenever the witness was off, unreachable, or this row was left out of the
+    // ask, so returning it unguarded asserted the absence of a copy from a
+    // question nobody put — the same substitution 0020 removed from the absent
+    // branch. The object really is here either way, so this qualifies the run
+    // rather than failing it.
+    return input.witnessAnswered ? "confirmed" : "copy_unchecked";
+  }
   // Absent from this bucket, and nobody answered. `no_record` would assert that
   // let.ai holds no delivery record — a positive claim about a question never
   // put — and it is the verdict remediation calls benign legacy, so the incident
@@ -127,13 +144,34 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
   // verdict stuck at failed with an instruction that can never clear it.
   if (!input.witnessAskable) return "residency_unwitnessable";
   if (!input.witnessAnswered) return "residency_unchecked";
-  if (input.anyDestinationRecord) return "not_delivered_here";
+  // `hubRoutedHere`, not `anyDestinationRecord`. The narrative this verdict
+  // renders — "let.ai recorded THIS fortress as a destination and the object is
+  // not here" — is only true of the narrow fact. A session whose one destination
+  // row points somewhere else (a let.ai-hosted destination, another fortress) is
+  // not one this appliance failed to receive, and this verdict is deliberately
+  // non-acknowledgeable, so over-reporting it left an operator with a failed
+  // compliance surface and nothing they could do about it.
+  if (input.hubRoutedHere) return "not_delivered_here";
   // Gone, and the hub holds no delivery record. `no_record` reads as benign
   // legacy — "predates per-destination tracking, nothing to do" — and says
   // nothing about the absent transcript, so a row that claims a transcript whose
   // bytes are missing would PASS. The identical facts on a gateway row return
   // `missing_here` and fail; only the channel differed.
-  if (input.hasOwnTranscript) return "missing_here";
+  //
+  // A STUB WITH NO LANE OBJECT is the same loss wearing the other shape. The
+  // exemption at the top of this function is `lanes_hold_it` — the bytes are
+  // under the lane prefixes — and it requires a lane object to actually be
+  // there. Reaching here without one means neither the parent prefix nor any
+  // lane holds anything, on the one channel agent-lane sessions arrive over.
+  // Asking only about `hasOwnTranscript` let exactly that read as benign.
+  if (input.hasOwnTranscript || !input.hasLaneObject) return "missing_here";
+  // Unreachable as the matrix now stands, and deliberately kept. The one shape
+  // that could land here — a stub whose lanes DO hold the bytes — is claimed by
+  // `lanes_hold_it` at the top of this function, which is a truer answer than
+  // "benign legacy". The verdict itself stays because `hx.audit_runs.no_record`
+  // is a stored counter: runs recorded before 0023 still render through
+  // VERDICT_HEADLINE and VERDICT_CAUSE, and dropping it would leave their rows
+  // with a verdict nothing can describe.
   return "no_record";
 }
 
@@ -161,6 +199,7 @@ export function acknowledgeable(verdict: ResidencyVerdict): boolean {
 
 export const VERDICT_HEADLINE: Record<ResidencyVerdict, string> = {
   confirmed: "held here, and let.ai reports no copy",
+  copy_unchecked: "held here; let.ai was not asked whether it also holds a copy",
   also_at_letai: "held here, and a historical let.ai copy exists",
   not_delivered_here: "should be on this fortress, and is not",
   no_record: "no destination record at let.ai — predates per-destination tracking",
@@ -176,6 +215,8 @@ export const VERDICT_HEADLINE: Record<ResidencyVerdict, string> = {
  *  renders in the finding, in the per-session proof and on the tile. */
 export const VERDICT_CAUSE: Record<ResidencyVerdict, string> = {
   confirmed: "the transcript is in this organization's bucket and let.ai reports no copy of it",
+  copy_unchecked:
+    "the transcript is in this organization's bucket, and no answer came back about whether let.ai also holds a copy",
   also_at_letai: "bytes at let.ai predate this fortress, or the session is also attributed to a let.ai-hosted org",
   not_delivered_here: "let.ai recorded this fortress as a destination and the object never arrived",
   no_record: "this session was uploaded before let.ai recorded per-destination delivery",
@@ -192,6 +233,8 @@ export const VERDICT_CAUSE: Record<ResidencyVerdict, string> = {
 
 export const VERDICT_REMEDIATION: Record<ResidencyVerdict, string> = {
   confirmed: "nothing to do",
+  copy_unchecked:
+    "nothing to do about the object — it is here; re-run with the cloud witness on, or once let.ai is reachable, if you need the copy question answered too",
   also_at_letai:
     "acknowledge it once you have confirmed which of the two causes applies; the acknowledgement is kept per session and inherited by later runs",
   not_delivered_here:
@@ -222,6 +265,8 @@ export function unknownProvenanceCause(ingestChannel: string | null): string {
 export interface RollUpCounts {
   sessionsChecked: number;
   confirmed: number;
+  /** Held here, on a run that never asked let.ai about it. */
+  copyUnchecked: number;
   alsoAtLetai: number;
   alsoAtLetaiAcknowledged: number;
   notDeliveredHere: number;
@@ -321,6 +366,11 @@ export function rollUp(
   }
   if (counts.noRecord > 0) {
     notes.push(`${counts.noRecord} predating per-destination tracking`);
+  }
+  if (counts.copyUnchecked > 0) {
+    notes.push(
+      `${counts.copyUnchecked} held here but never checked against let.ai — the object is present; the copy question was not put`,
+    );
   }
   const witness = context.witness ?? "attested";
   if (witness !== "attested") {

@@ -215,7 +215,13 @@ export function privilegeMatrixViolations(actual: Record<string, unknown>): stri
  */
 export function containmentProbeQuery(): string {
   const names = CONSOLE_ROUTINES.map((r) => `'${r.name}'`).join(", ");
-  return `SELECT pg_catalog.current_user::text AS "currentUser",
+  // `current_user` is a reserved VALUE EXPRESSION, not a function, so
+  // `pg_catalog.current_user` parses as a column of a table named pg_catalog and
+  // raises 42P01 on every server — the same defect class just removed from
+  // hx.set_cloud_witness. It survived because both live-cluster suites restated
+  // this SQL by hand instead of calling this function, so the shipped query was
+  // never executed. They call it now.
+  return `SELECT current_user::text AS "currentUser",
        (SELECT count(*)::int FROM pg_catalog.pg_proc p
           JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
          WHERE n.nspname = '${PG_SCHEMA}' AND p.proname IN (${names})) AS "routineCount",

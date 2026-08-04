@@ -147,7 +147,10 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function consoleAudit(options: { now?: () => Date; ceiling?: number; exportCeiling?: number } = {}): {
+function consoleAudit(
+  options: { now?: () => Date; ceiling?: number; exportCeiling?: number } = {},
+  spoolOptions: { rotateBytes?: number } = {},
+): {
   audit: ConsoleAudit;
   spool: AuditSpool;
 } {
@@ -155,6 +158,7 @@ function consoleAudit(options: { now?: () => Date; ceiling?: number; exportCeili
     dir,
     writer: "ui",
     ...(options.now ? { clock: options.now } : {}),
+    ...(spoolOptions.rotateBytes ? { rotateBytes: spoolOptions.rotateBytes } : {}),
     beforeRotate: (): Promise<void> => audit.flushFailures(true).then(() => undefined),
   });
   const audit: ConsoleAudit = new ConsoleAudit(spool, options);
@@ -573,6 +577,33 @@ describe("public auth failures collapse; everything else does not", () => {
     expect(await readSpool(dir)).toEqual([]);
   });
 
+  test("crossing the size bound with an OPEN window does not deadlock the spool", async () => {
+    // The trap: production wires beforeRotate to flushFailures, which APPENDS.
+    // Rotating from inside appendOne made that append wait on `tail` - the very
+    // call that was rotating - so the chain never settled and every later
+    // mutation on the admin plane (stop/start, rotate, submit, sign-in) hung
+    // silently until restart. Rotation therefore happens BETWEEN records.
+    const { audit } = consoleAudit({}, { rotateBytes: 400 });
+    audit.noteFailure(AUDIT_ACTIONS.signInFailed, { login: "erik", remoteKey: "10.0.0.1" });
+    expect(audit.openWindows).toBe(1);
+
+    const deadline = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("DEADLOCK: the spool chain never settled")), 5_000),
+    );
+    for (let i = 0; i < 12; i += 1) {
+      await Promise.race([
+        audit.run(`${AUDIT_ACTIONS.servicePrefix}start`, { actor: null }, async () => undefined),
+        deadline,
+      ]);
+    }
+    // The flush really ran (the window is closed), and it landed in the retired
+    // file rather than being lost.
+    expect(audit.openWindows).toBe(0);
+    const records = await readSpool(dir);
+    expect(records.some((r) => r.action === AUDIT_ACTIONS.signInFailed)).toBe(true);
+    expect((await listSpoolFiles(dir)).length).toBeGreaterThan(1);
+  });
+
   test("an open window is closed when the file rotates", async () => {
     const { audit, spool } = consoleAudit();
     audit.noteFailure(AUDIT_ACTIONS.signInFailed, { login: "erik", remoteKey: "10.0.0.1" });
@@ -582,6 +613,32 @@ describe("public auth failures collapse; everything else does not", () => {
     const records = await readSpool(dir);
     expect(records).toHaveLength(1);
     expect(records[0].action).toBe(AUDIT_ACTIONS.signInFailed);
+  });
+});
+
+describe("an acknowledgement keeps its reason", () => {
+  test("the reason survives sanitizeParams — it is the record's whole value", async () => {
+    // The allowlist carried a `console.command.submit.acknowledge` key, and the
+    // action a submission records is exactly `console.command.submit`, so the
+    // longer key matched nothing and the reason was stripped from every
+    // acknowledgement in the trail.
+    const spool = new AuditSpool({ dir, writer: "ui" });
+    await spool.intent(AUDIT_ACTIONS.commandSubmitted, {
+      actor: "denis",
+      params: {
+        commandKind: "acknowledge_finding",
+        org: "org-1",
+        sessionId: "sess-1",
+        reason: "pre-fortress history, signed off by the DPO",
+      },
+    });
+    const [record] = await readSpool(dir);
+    expect(record.params).toMatchObject({
+      commandKind: "acknowledge_finding",
+      org: "org-1",
+      sessionId: "sess-1",
+      reason: "pre-fortress history, signed off by the DPO",
+    });
   });
 });
 

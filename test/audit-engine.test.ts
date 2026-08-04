@@ -73,9 +73,25 @@ describe("the verdict matrix", () => {
         fortressPresent: false,
         letaiCopy: false,
         anyDestinationRecord: true,
+        hubRoutedHere: true,
         ingestChannel: "tunnel",
         acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("not_delivered_here");
+    // A destination record that points SOMEWHERE ELSE is not this fortress being
+    // told it should hold the session. The incident is keyed on the narrow fact;
+    // reading it off the broad one accused this appliance of losing a transcript
+    // the hub never said it sent here — on a compliance surface, with a verdict
+    // that is deliberately non-acknowledgeable. It is still a local loss, and
+    // says so by the local name.
+    expect(
+      verdictFor({
+        fortressPresent: false,
+        letaiCopy: false,
+        anyDestinationRecord: true,
+        hubRoutedHere: false,
+        ingestChannel: "tunnel",
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
+    ).toBe("missing_here");
     // No destination record, but the row claims a transcript and the bytes are
     // gone: that is a LOSS, not benign legacy. `no_record` renders as "predates
     // per-destination tracking, nothing to do" and says nothing about the absent
@@ -86,19 +102,34 @@ describe("the verdict matrix", () => {
         fortressPresent: false,
         letaiCopy: false,
         anyDestinationRecord: false,
+        hubRoutedHere: false,
         ingestChannel: "tunnel",
         acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("missing_here");
-    // `no_record` keeps the case it was written for: a session with no transcript
-    // of its own, which the hub has no record of either.
+    // A stub with no transcript of its own AND no lane object is the same loss
+    // wearing the other shape: nothing under the parent prefix, nothing under any
+    // lane. It failed on gateway/reconciled/NULL and passed on tunnel, which is
+    // the one channel agent-lane sessions arrive over.
     expect(
       verdictFor({
         fortressPresent: false,
         letaiCopy: false,
         anyDestinationRecord: false,
+        hubRoutedHere: false,
         ingestChannel: "tunnel",
         acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: false, hasLaneObject: false, }),
-    ).toBe("no_record");
+    ).toBe("missing_here");
+    // The benign case it used to cover is claimed by `lanes_hold_it`, which says
+    // where the bytes are rather than calling their absence legacy.
+    expect(
+      verdictFor({
+        fortressPresent: false,
+        letaiCopy: false,
+        anyDestinationRecord: false,
+        hubRoutedHere: false,
+        ingestChannel: "tunnel",
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: false, hasLaneObject: true, }),
+    ).toBe("lanes_hold_it");
     // And the stub exemption must never swallow a hub delivery record — the
     // incident is reachable even when the lanes are present.
     expect(
@@ -106,6 +137,7 @@ describe("the verdict matrix", () => {
         fortressPresent: false,
         letaiCopy: false,
         anyDestinationRecord: true,
+        hubRoutedHere: true,
         ingestChannel: "tunnel",
         acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: false, hasLaneObject: true, }),
     ).toBe("not_delivered_here");
@@ -116,6 +148,7 @@ describe("the verdict matrix", () => {
       fortressPresent: true,
       letaiCopy: true,
       anyDestinationRecord: true,
+        hubRoutedHere: true,
       ingestChannel: "tunnel",
       acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
     expect(verdict).toBe("also_at_letai");
@@ -134,6 +167,7 @@ describe("the verdict matrix", () => {
       fortressPresent: true,
       letaiCopy: false,
       anyDestinationRecord: false,
+        hubRoutedHere: false,
       ingestChannel: "reconciled",
       acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
     expect(verdict).toBe("unknown_provenance");
@@ -145,6 +179,7 @@ describe("the verdict matrix", () => {
         fortressPresent: true,
         letaiCopy: false,
         anyDestinationRecord: false,
+        hubRoutedHere: false,
         ingestChannel: "gateway",
         acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("not_applicable");
@@ -166,6 +201,7 @@ describe("the fleet roll-up", () => {
     residencyUnwitnessable: 0,
     unknownProvenance: 0,
     notApplicable: 0,
+    copyUnchecked: 0,
   };
 
   test("an acknowledged copy qualifies the verdict and never fails it", () => {
@@ -206,7 +242,11 @@ describe("one audit run", () => {
     sessions: async () => [row()],
     listCanonical: async () => new Set([canonicalKeyOf(row())]),
     headCanonical: async () => true,
-    askWitness: async () => ({ copies: new Set<string>(), known: new Set([hubId("s1")]) }),
+    askWitness: async () => ({
+      copies: new Set<string>(),
+      known: new Set([hubId("s1")]),
+      routedHere: new Set([hubId("s1")]),
+    }),
     acknowledged: async () => new Set<string>(),
     postureFresh: async () => true,
     sleep: async () => {},
@@ -223,7 +263,11 @@ describe("one audit run", () => {
           heads.push(r.sessionId);
           return false;
         },
-        askWitness: async () => ({ copies: new Set<string>(), known: new Set([hubId("missing")]) }),
+        askWitness: async () => ({
+          copies: new Set<string>(),
+          known: new Set([hubId("missing")]),
+          routedHere: new Set([hubId("missing")]),
+        }),
       }),
     );
     expect(heads).toEqual(["missing"]);
@@ -264,7 +308,7 @@ describe("one audit run", () => {
         limits: { ...DEFAULT_AUDIT_LIMITS, perRunBudget: 5 },
         askWitness: async (ids: readonly string[]) => {
           asked = ids;
-          return { copies: new Set<string>(), known: new Set<string>() };
+          return { copies: new Set<string>(), known: new Set<string>(), routedHere: new Set<string>() };
         },
       }),
     );
@@ -317,19 +361,25 @@ describe("one audit run", () => {
     }
   });
 
-  test("a stub with NO lane object is still a loss — the exemption is checked, not assumed", async () => {
+  test("a stub with NO lane object is still a loss — on EVERY channel", async () => {
     // Exempting on the theory that the bytes live under the lanes, without
     // looking, erases a session whose parent AND every lane are empty.
-    const orphan = [row({ sessionId: "p2", ingestChannel: "gateway", eventCount: 0 })];
-    const result = await runResidencyAudit(
-      deps({
-        sessions: async () => orphan,
-        listCanonical: async () => new Set<string>(),
-        headCanonical: async () => false,
-      }),
-    );
-    expect(result.counts.missingHere).toBe(1);
-    expect(result.verdict).toBe("failed");
+    // Pinned across all four channels, like its with-lane sibling above: the
+    // tunnel arm used to ask only `hasOwnTranscript` and fell through to
+    // `no_record` — benign legacy — on the one channel agent-lane sessions
+    // actually arrive over.
+    for (const channel of ["tunnel", "gateway", "reconciled", null]) {
+      const orphan = [row({ sessionId: "p2", ingestChannel: channel, eventCount: 0 })];
+      const result = await runResidencyAudit(
+        deps({
+          sessions: async () => orphan,
+          listCanonical: async () => new Set<string>(),
+          headCanonical: async () => false,
+        }),
+      );
+      expect([channel, result.counts.missingHere]).toEqual([channel, 1]);
+      expect([channel, result.verdict]).toEqual([channel, "failed"]);
+    }
   });
 
   test("an unattributed session's id is never named to let.ai", async () => {
@@ -346,7 +396,7 @@ describe("one audit run", () => {
         ],
         askWitness: async (ids: readonly string[]) => {
           asked = ids;
-          return { copies: new Set<string>(), known: new Set<string>() };
+          return { copies: new Set<string>(), known: new Set<string>(), routedHere: new Set<string>() };
         },
       }),
     );
@@ -405,12 +455,22 @@ describe("one audit run", () => {
     const result = await runResidencyAudit(deps({ askWitness: null }));
     // Nothing was asked, so the run cannot be clean however healthy it looks.
     expect(result.verdict).toBe("qualified");
-    expect(result.counts.confirmed).toBe(1);
+    // …and the PER-SESSION verdict says so too. `confirmed` reads "held here,
+    // and let.ai reports no copy", which is a claim about a question nobody put:
+    // `letaiCopy` is false by default whenever the witness is off. The object is
+    // still here, so it qualifies rather than failing.
+    expect(result.counts.confirmed).toBe(0);
+    expect(result.counts.copyUnchecked).toBe(1);
+    expect(result.qualification).toContain("never checked against let.ai");
   });
 
   test("an acknowledged copy stays out of the failing list across runs", async () => {
     const withCopy = deps({
-      askWitness: async () => ({ copies: new Set([hubId("s1")]), known: new Set([hubId("s1")]) }),
+      askWitness: async () => ({
+        copies: new Set([hubId("s1")]),
+        known: new Set([hubId("s1")]),
+        routedHere: new Set([hubId("s1")]),
+      }),
       acknowledged: async () => new Set(["org-1 s1"]),
     });
     for (let pass = 0; pass < 2; pass += 1) {
@@ -517,6 +577,7 @@ describe("the witness client", () => {
     expect(await createWitnessClient({ request: async () => answer([]) })([])).toEqual({
       copies: new Set(),
       known: new Set(),
+      routedHere: new Set(),
     });
   });
 
@@ -594,7 +655,7 @@ describe("the session-verify dialog", () => {
 
     const attested = verifySessionResidency({
       ...base,
-      witness: { letaiCopy: true, anyDestinationRecord: true, acknowledged: false },
+      witness: { letaiCopy: true, anyDestinationRecord: true, hubRoutedHere: true, acknowledged: false },
     });
     const check = attested.checks.find((c) => c.name === "let.ai copy");
     expect(check?.state).toBe("failed");
@@ -602,7 +663,7 @@ describe("the session-verify dialog", () => {
 
     const cleared = verifySessionResidency({
       ...base,
-      witness: { letaiCopy: true, anyDestinationRecord: true, acknowledged: true },
+      witness: { letaiCopy: true, anyDestinationRecord: true, hubRoutedHere: true, acknowledged: true },
     });
     expect(cleared.checks.find((c) => c.name === "let.ai copy")?.state).toBe("passed");
   });

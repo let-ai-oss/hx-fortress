@@ -75,6 +75,11 @@ export interface VerifyConsoleGrantArgs {
   now?: () => Date;
   /** Called with the measured offset whenever the clock is the reason. */
   onClockSkew?: (offsetSeconds: number) => void | Promise<void>;
+  /** A hand-off that WORKED. The skew record is otherwise sticky — one writer,
+   *  no deleter — so a single measurement drove the Posture warning forever,
+   *  including one taken from a merely stale grant. A successful exchange is
+   *  positive evidence that this host's clock is usable, so it clears it. */
+  onClockOk?: () => void | Promise<void>;
   /** Consume `jti`. Returns false when this grant was already used. */
   consume?: (jti: string, expiresAt: Date) => boolean;
 }
@@ -136,6 +141,12 @@ export async function verifyConsoleGrant(args: VerifyConsoleGrantArgs): Promise<
     return { ok: false, reason: "grant_used" };
   }
 
+  // The clock was good enough to verify a grant, so whatever the skew record
+  // says is stale. Cleared here rather than on a timer: this is the only moment
+  // that produces positive evidence, and the record's own header says a warning
+  // that is always on is one nobody reads.
+  await args.onClockOk?.();
+
   return {
     ok: true,
     claims: { jti, org, sub: typeof payload.sub === "string" ? payload.sub : "", exp },
@@ -157,6 +168,14 @@ function decodeUnverified(grant: string): Record<string, unknown> | null {
   }
 }
 
+/** Past-expiry evidence has to clear THIS much before it is read as a clock
+ *  fault rather than a stale link. A grant is delivered by a redirect the
+ *  operator clicks, so "old" is bounded by attention span; a quarter of an hour
+ *  beyond a window that was minutes wide is not a slow click. Without a floor,
+ *  a short-TTL grant exchanged half a minute late was diagnosed as skew and
+ *  pinned a permanent warning on a perfectly good host. */
+export const SKEW_EVIDENCE_FLOOR_SECONDS = 15 * 60;
+
 /** How far this host's clock sits from the one that minted the grant. Positive
  *  means this host is AHEAD. Null when the token carries no usable window. */
 function clockSkewSeconds(payload: Record<string, unknown> | null, now: Date): number | null {
@@ -172,7 +191,7 @@ function clockSkewSeconds(payload: Record<string, unknown> | null, now: Date): n
   if (exp !== null && iat !== null && seconds > exp) {
     const ttl = exp - iat;
     const over = seconds - exp;
-    return over > ttl ? over : null;
+    return over > Math.max(ttl, SKEW_EVIDENCE_FLOOR_SECONDS) ? over : null;
   }
   return null;
 }

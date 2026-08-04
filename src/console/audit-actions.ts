@@ -69,12 +69,16 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   // travels on the command. Without it in the trail the corroboration D15 rests
   // on is one-sided — the daemon records consuming a reference the console's own
   // submission record does not carry.
-  "console.command.submit": ["commandKind", "commandId", "credentialRef", "phase", "scope", "enabled", "org", "session", "sessionId"],
+  // `reason` is here rather than on a longer key: the action a submission
+  // records is exactly `console.command.submit`, so a `console.command.submit.
+  // acknowledge` entry matched nothing and quietly stripped the one field an
+  // acknowledgement exists to carry — the operator's stated reason, which is the
+  // whole evidentiary value of the record.
+  "console.command.submit": ["commandKind", "commandId", "credentialRef", "phase", "scope", "enabled", "org", "session", "sessionId", "reason"],
   "console.service.": ["action", "manager", "pid", "state"],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
   "cli.update": ["binPath", "asset", "version"],
   "system.": ["engine", "kind", "count", "reason", "from", "to"],
-  "console.command.submit.acknowledge": ["org", "sessionId", "reason"],
 };
 
 /** Key names that never reach the spool whatever an action declares. The

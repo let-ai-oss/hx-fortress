@@ -230,6 +230,75 @@ describe("revocation", () => {
     expect(registry.size).toBe(0);
   });
 
+  test("a THROWING belt closes the stream instead of killing the process", async () => {
+    // `stillValid` reads the user store, which throws on any unreadable file.
+    // Unhandled, that rejection is fatal to the console process — the one whose
+    // job is to say what is broken on a broken fortress. It must hang up the
+    // stream and stay alive.
+    const registry = new EventStreamRegistry();
+    const verdict = registry.open({
+      sessionId: "sess-a",
+      userLogin: "marta",
+      producer: idle,
+      stillValid: () => Promise.reject(new Error("users.json is unreadable")),
+      heartbeatMs: 10,
+    });
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) return;
+    const reader = verdict.response.body?.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    for (let i = 0; i < 8; i += 1) {
+      const chunk = await reader?.read();
+      if (!chunk || chunk.done) break;
+      text += decoder.decode(chunk.value);
+      if (text.includes("event: closed")) break;
+    }
+    expect(text).toContain("event: closed");
+    expect(text).toContain("disabled");
+    expect(registry.size).toBe(0);
+  });
+
+  test("the belt applies the EPOCH predicates, not just eligibility", () => {
+    // `reset` — the console's standing remedy for a locked-out operator — bumps
+    // the credential epoch and touches none of the account flags, so a belt that
+    // asked only "may this login sign in" kept the live daemon log flowing to a
+    // principal every ordinary request already refuses.
+    const sessions = new SessionTable();
+    const file = usersFile({ pwdHash: "x" });
+    const issued = sessions.issue({ user: file.users[0], file, remoteAddr: "127.0.0.1" });
+    expect(sessions.revocationCheck(issued.session.id, file)).toBe(true);
+
+    const afterReset: UsersFile = {
+      ...file,
+      users: [{ ...file.users[0], credentialEpoch: file.users[0].credentialEpoch + 1 }],
+    };
+    // signInEligible still says yes — present, not deleted, not disabled, has a
+    // hash — which is exactly why the weaker predicate was the defect.
+    expect(afterReset.users[0].disabledAt).toBeNull();
+    expect(sessions.revocationCheck(issued.session.id, afterReset)).toBe(false);
+    // Dropped, so the request path agrees with the belt.
+    expect(sessions.revocationCheck(issued.session.id, file)).toBe(false);
+  });
+
+  test("the belt also catches a session-epoch bump and a disabled account", () => {
+    const sessions = new SessionTable();
+    const file = usersFile({ pwdHash: "x" });
+
+    const a = sessions.issue({ user: file.users[0], file, remoteAddr: "127.0.0.1" });
+    expect(sessions.revocationCheck(a.session.id, { ...file, sessionEpoch: file.sessionEpoch + 1 })).toBe(false);
+
+    const b = sessions.issue({ user: file.users[0], file, remoteAddr: "127.0.0.1" });
+    const disabled: UsersFile = {
+      ...file,
+      users: [{ ...file.users[0], disabledAt: "2026-08-01T00:00:00.000Z" }],
+    };
+    expect(sessions.revocationCheck(b.session.id, disabled)).toBe(false);
+
+    // An id the table never held is not valid either.
+    expect(sessions.revocationCheck("no-such-session", file)).toBe(false);
+  });
+
   test("closing every stream is one call, and it is idempotent", () => {
     const registry = new EventStreamRegistry();
     open(registry, "a", "marta");

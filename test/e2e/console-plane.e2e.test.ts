@@ -16,6 +16,7 @@ import {
   routineSignature,
 } from "../../src/host/postgres/console-plane";
 import {
+  containmentProbeQuery,
   containmentState,
   privilegeMatrixProbeQuery,
   privilegeMatrixViolations,
@@ -286,13 +287,10 @@ END $$`);
     });
 
     test("the containment probe reports the isolated state for the console role", async () => {
-      const [probe] = await query<ContainmentProbe>(
-        uiDsn,
-        `SELECT current_user::text AS "currentUser",
-                (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-                  WHERE n.nspname = 'hx' AND p.proname IN (${CONSOLE_ROUTINES.map((r) => `'${r.name}'`).join(", ")})) AS "routineCount",
-                has_table_privilege('hx.console_commands', 'UPDATE') AS "canUpdateCommands"`,
-      );
+      // The SHIPPED query, not a restatement of it: a hand-copy passes whatever
+      // the real one does, so an invalid `containmentProbeQuery()` went unnoticed
+      // by both of its own acceptances.
+      const [probe] = await query<ContainmentProbe>(uiDsn, containmentProbeQuery());
       expect(containmentState(probe)).toBe("isolated");
     });
   });
@@ -361,6 +359,27 @@ END $$`);
     });
 
     test("acknowledge_finding and set_cloud_witness run through the owner's grants", async () => {
+      // FENCED: the routine refuses a session with no acknowledgeable finding,
+      // so the row has to exist before it can be acknowledged. Seeded through the
+      // rw DSN, which is what an audit run writes with.
+      await query(
+        rwDsn,
+        `INSERT INTO hx.audit_runs (id, trigger) VALUES ('11111111-1111-1111-1111-111111111111', 'test')`,
+      );
+      await query(
+        rwDsn,
+        `INSERT INTO hx.audit_findings (run_id, org, family, session_id, verdict)
+           VALUES ('11111111-1111-1111-1111-111111111111', 'org-1', 'claude', 'sess-1', 'also_at_letai')`,
+      );
+
+      // The fence itself: a session with no such finding is refused, and the
+      // refusal reads as a check violation rather than a permission error — the
+      // routine's owner needs its own SELECT on hx.audit_findings to see the row
+      // at all, and without that grant every acknowledgement failed with 42501.
+      expect(
+        await refused(rwDsn, "SELECT hx.acknowledge_finding('org-1', 'no-such-session', 'denis', 'x')"),
+      ).toMatch(/no acknowledgeable finding/);
+
       await query(rwDsn, "SELECT hx.acknowledge_finding('org-1', 'sess-1', 'denis', 'known')");
       const [ack] = await query<{ n: number }>(
         uiDsn,

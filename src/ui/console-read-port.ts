@@ -23,6 +23,27 @@ import {
   type TeamSummary,
 } from "../console/adoption";
 import { readSpool } from "../console/audit-spool";
+
+/** One row of `auditFindingsQuery`, as the driver hands it back. */
+interface FindingRow {
+  org: string;
+  family: string;
+  sessionId: string;
+  verdict: string;
+  ingestChannel: string | null;
+  detail: string | null;
+  observedAt: unknown;
+  acknowledged: unknown;
+  runStartedAt: unknown;
+  total: unknown;
+}
+
+/** timestamptz comes back as a Date from the driver and as a string from a
+ *  serialized row; both have to reach the page as one shape. */
+function isoOrNull(value: unknown): string | null {
+  if (value instanceof Date) return value.toISOString();
+  return typeof value === "string" ? value : null;
+}
 import { readRosterSyncState, type RosterSyncState } from "../console/roster";
 import { redactedMessage } from "./redact";
 import type { MetricsSnapshot } from "../console/metrics";
@@ -41,6 +62,7 @@ import { readLastLines, rotateKeepFromEnv } from "../log-tail";
 import { BUCKET_CONFIG_UNAVAILABLE, type SessionStore } from "../modules/session-vault/store/types";
 import {
   auditExportQuery,
+  auditFindingsQuery,
   auditPageQuery,
   auditPageLimit,
   AUDIT_EXPORT_MAX,
@@ -50,6 +72,8 @@ import {
   type AuditRow,
   type CommandRowView,
 } from "../query/console/audit";
+import { readWitnessSetting } from "../console/audit-store";
+import { acknowledgeable, type ResidencyVerdict } from "../console/audit-verdicts";
 import {
   consoleDevicesQuery,
   consoleEmbeddingFactsQuery,
@@ -148,7 +172,7 @@ export interface ConsoleReadPortDeps {
    *  taken a `stillValid` belt and nothing ever passed one, so a revoked or
    *  disabled operator kept receiving the live daemon log — which quotes driver
    *  and SDK errors — until the idle sweep fired, up to an hour later. */
-  sessionStillValid?: (login: string) => boolean | Promise<boolean>;
+  sessionStillValid?: (sessionId: string) => boolean | Promise<boolean>;
   /** What an opened stream carries. */
   producer: EventProducer;
   downloadBase: () => string | null;
@@ -227,12 +251,42 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     const at = now().getTime();
     const state = postureFreshness(snapshot, at);
     const data = snapshot?.data;
+    // Both come from the audit's own tables, so a database this console cannot
+    // reach degrades them to null rather than failing the whole panel — the rest
+    // of the posture is read from the published snapshot and is still true.
+    const db = deps.db();
+    const witness = db
+      ? await readWitnessSetting(db).catch(() => null)
+      : null;
+    const findingRows = db
+      ? await query<FindingRow>(() => auditFindingsQuery()).catch(() => null)
+      : null;
+
     const view: PostureView = {
       state,
       asOf: snapshot?.fetchedAt ?? null,
       cloudOnlySessions: data?.cloudOnlySessions ?? null,
       routedHere: data?.routedHere ?? null,
       qualification: postureQualification(snapshot, data?.cloudOnlySessions ?? 0, at),
+      witness,
+      findings: findingRows
+        ? {
+            runStartedAt: isoOrNull(findingRows[0]?.runStartedAt),
+            total: Number(findingRows[0]?.total ?? 0),
+            shown: findingRows.length,
+            rows: findingRows.map((row) => ({
+              org: row.org,
+              family: row.family,
+              sessionId: row.sessionId,
+              verdict: row.verdict,
+              ingestChannel: row.ingestChannel,
+              detail: row.detail,
+              observedAt: isoOrNull(row.observedAt),
+              acknowledged: row.acknowledged === true,
+              acknowledgeable: acknowledgeable(row.verdict as ResidencyVerdict),
+            })),
+          }
+        : null,
     };
     const skew = await readJsonFile<ClockSkewFile>(path.join(deps.paths.runtimeRoot, "clock-skew.json"));
     if (skew && Math.abs(skew.offsetSeconds) > skew.allowedSeconds) {
@@ -535,7 +589,7 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         lastEventId: args.lastEventId,
         producer: deps.producer,
         ...(deps.sessionStillValid
-          ? { stillValid: (): boolean | Promise<boolean> => deps.sessionStillValid!(args.userLogin) }
+          ? { stillValid: (): boolean | Promise<boolean> => deps.sessionStillValid!(args.sessionId) }
           : {}),
       });
     },
