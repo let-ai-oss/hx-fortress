@@ -389,3 +389,70 @@ describe("role-aware controls", () => {
     expect(READONLY_REFUSAL_COPY).toContain("read-only");
   });
 });
+
+describe("what the SPA reaches into the server tree", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const root = path.join(here, "..");
+
+  /** Every `../../src/...` specifier under ui/src, resolved to a file path. */
+  function serverModulesTheSpaImports(): string[] {
+    const found = new Set<string>();
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = path.join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          walk(full);
+          continue;
+        }
+        if (!/\.tsx?$/.test(entry)) continue;
+        for (const m of readFileSync(full, "utf8").matchAll(/from "(\.\.\/)+src\/([^"]+)"/g)) {
+          found.add(`src/${m[2]}`);
+        }
+      }
+    };
+    walk(path.join(root, "ui", "src"));
+    return [...found].sort();
+  }
+
+  /** Follow local relative imports from a server module, breadth-first. */
+  function reachableFrom(entries: string[]): Map<string, string> {
+    const seen = new Map<string, string>();
+    const queue = [...entries];
+    while (queue.length > 0) {
+      const spec = queue.shift()!;
+      if (seen.has(spec)) continue;
+      const file = [".ts", ".tsx", "/index.ts"]
+        .map((ext) => path.join(root, spec + ext))
+        .find((candidate) => {
+          try {
+            return statSync(candidate).isFile();
+          } catch {
+            return false;
+          }
+        });
+      if (!file) continue;
+      const source = readFileSync(file, "utf8");
+      seen.set(spec, source);
+      for (const m of source.matchAll(/from "(\.[^"]*)"/g)) {
+        queue.push(path.normalize(path.join(path.dirname(spec), m[1]!)));
+      }
+    }
+    return seen;
+  }
+
+  test("nothing it reaches pulls a node: builtin behind it", () => {
+    // The SPA bundles the whole graph behind every specifier it names, so a
+    // constant shared with the server has to live in a module that reaches no
+    // Node builtin. This went red once: deduplicating the session header made
+    // ui/src import sessions.ts, which imports node:crypto, and the console
+    // build failed with "createHash is not exported by __vite-browser-external".
+    // The build catches that only when a builtin lands in retained code; this
+    // catches the import the moment it appears.
+    const offenders: string[] = [];
+    for (const [spec, source] of reachableFrom(serverModulesTheSpaImports())) {
+      const builtins = [...source.matchAll(/from "(node:[^"]+)"/g)].map((m) => m[1]);
+      if (builtins.length > 0) offenders.push(`${spec} -> ${[...new Set(builtins)].join(", ")}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+});

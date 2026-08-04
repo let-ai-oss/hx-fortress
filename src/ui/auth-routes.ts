@@ -25,7 +25,8 @@ import { checkLogin, checkPasswordPolicy, liveSetupToken } from "./users";
 
 /** Carried in the setup-status request HEADER, never a path or a query — a
  *  request line reaches access logs, proxy logs and Referer headers. */
-export const SETUP_TOKEN_HEADER = "x-setup-token";
+export { SETUP_TOKEN_HEADER } from "./wire";
+import { SETUP_TOKEN_HEADER } from "./wire";
 
 export const SIGN_IN_PATH = "/ui/api/session";
 export const SSO_EXCHANGE_PATH = "/ui/api/sso/exchange";

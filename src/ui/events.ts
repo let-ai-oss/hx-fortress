@@ -20,7 +20,7 @@
 // user record as a belt, so a revocation that happened in ANOTHER process (the
 // CLI writing users.json) still lands within one beat.
 
-import { SESSION_HEADER } from "./sessions";
+import { SESSION_HEADER } from "./wire";
 
 export const EVENTS_PATH = "/ui/api/events";
 

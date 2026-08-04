@@ -15,8 +15,7 @@ import { EVENTS_BACKOFF_MS, EVENTS_PATH } from "../../src/ui/events";
 // The header names are the SERVER's, imported across a boundary this file
 // already crosses. Restated here, a rename on one side is a console that stops
 // authenticating with no build error to say so.
-import { SETUP_TOKEN_HEADER } from "../../src/ui/auth-routes";
-import { SESSION_HEADER } from "../../src/ui/sessions";
+import { SESSION_HEADER, SETUP_TOKEN_HEADER } from "../../src/ui/wire";
 
 /** Per TAB, not per browser: localStorage would widen an XSS from "read this
  *  tab" to "read every tab, forever". The visible consequence is that a second

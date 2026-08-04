@@ -21,7 +21,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { UiRole, UiUser, UsersFile } from "./users";
 
 /** The only medium the console accepts a session on. */
-export const SESSION_HEADER = "x-fortress-ui-token";
+export { SESSION_HEADER } from "./wire";
 
 export interface UiSession {
   id: string;
