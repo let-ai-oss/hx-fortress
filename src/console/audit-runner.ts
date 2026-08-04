@@ -92,7 +92,9 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
         // console kept counting them. The session's own `deleted_at` is the
         // residency-relevant one.
         sql`SELECT s.session_id AS "sessionId", s.family AS "family", u.external_id AS "userId",
-                   s.ingest_channel AS "ingestChannel", coalesce(o.external_id, ${ownOrg}) AS "org"
+                   s.ingest_channel AS "ingestChannel", s.event_count AS "eventCount",
+                   coalesce(o.external_id, ${ownOrg}) AS "org",
+                   (s.org_id IS NOT NULL) AS "orgAttributed"
               FROM hx.sessions s
               LEFT JOIN hx.orgs o ON o.id = s.org_id AND o.deleted_at IS NULL
               JOIN hx.users u ON u.id = s.user_id
@@ -107,6 +109,8 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
           sessionId: String(row.sessionId ?? ""),
           userId: String(row.userId ?? ""),
           ingestChannel: row.ingestChannel === null ? null : String(row.ingestChannel),
+          eventCount: Number(row.eventCount ?? 0),
+          orgAttributed: row.orgAttributed === true,
         }),
       );
     },
@@ -120,6 +124,8 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
             sessionId: key.sessionId,
             userId: key.userId,
             ingestChannel: null,
+            eventCount: 0,
+            orgAttributed: false,
           }),
         ),
       );

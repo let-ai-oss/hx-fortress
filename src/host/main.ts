@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, unlink, writeFile } from "node:fs/promises";
+import { access, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -668,9 +668,11 @@ export async function runFortressHost(
     );
     if (marked) {
       throw new Error(
-        "a parked-artifact replay rewrote sidecars but did not record which sessions, so a resumed " +
-          `migration could cut over stale ones. Re-run \`hx-fortress ui\` replay (or restart the daemon) ` +
-          `to finish it; the marker is ${replayMarkerPath}`,
+        "a parked-artifact replay rewrote session sidecars but could not record which sessions, so a " +
+          "migration resumed under the same id could skip them and cut over stale ones. The daemon " +
+          "retries the replay on its own; this clears once one completes. If it does not, the cause is " +
+          `whatever stopped a small write to ${paths.runtimeRoot} (a full or read-only disk is the usual ` +
+          `one) — fix that, then remove ${replayMarkerPath} to allow the migration.`,
       );
     }
   };
@@ -691,13 +693,28 @@ export async function runFortressHost(
     // store is whichever bucket is now live, so the replay lands in the right
     // one either way: the target after a cut, the source after an abort.
     if (migrationIsRunning()) return;
-    // Raised before the first sidecar is rewritten, cleared only once the pending
-    // set is durable. Between those two points a crash leaves the marker, and a
-    // migration refuses rather than cutting over sidecars nothing recorded.
-    await writeFile(replayMarkerPath, "", { mode: 0o600 }).catch(() => {});
-    const result = await drainParkedArtifacts(parkedArtifactsPath, (entry) =>
-      store.writeArtifact(entry.key, entry.name, entry.text),
-    );
+    // Raised by the FIRST sidecar write of this drain, and carrying a token only
+    // this invocation knows.
+    //
+    // Raising it unconditionally up here repeats the defect it was written to
+    // fix: an empty park raises a marker, writes nothing, and clears it — so the
+    // 5s retry after a failed drain (the park is already unlinked, so that retry
+    // finds nothing) withdraws a refusal it never earned, within one tick. The
+    // token is what makes the clear belong to its owner; a later drain that
+    // raised no marker of its own must never remove one.
+    //
+    // And it is NOT best-effort. If the marker cannot be written, the sidecars
+    // must not be rewritten either, because the refusal is the only thing
+    // standing between an unrecorded rewrite and a migration cutting over it.
+    const token = randomUUID();
+    let raised = false;
+    const result = await drainParkedArtifacts(parkedArtifactsPath, async (entry) => {
+      if (!raised) {
+        await writeFile(replayMarkerPath, token, { mode: 0o600 });
+        raised = true;
+      }
+      await store.writeArtifact(entry.key, entry.name, entry.text);
+    });
     // The pending append FIRST, and the latch settled only after it. The append
     // is what tells a resumed run to re-carry these sessions; settling first
     // meant a throw here left `owed` already false, so nothing retried and the
@@ -711,7 +728,11 @@ export async function runFortressHost(
     // Pending keys are written before the attempt and cleared only on success,
     // so a failure is retried on the next replay rather than lost.
     const pending = await addForgetPending(forgetPendingPath, result.rewrote);
-    await unlink(replayMarkerPath).catch(() => {});
+    if (raised) {
+      // Only if it is still OURS. Another drain may have raised its own since.
+      const held = await readFile(replayMarkerPath, "utf8").catch(() => null);
+      if (held === token) await unlink(replayMarkerPath).catch(() => {});
+    }
     parkLatch.settle(result.failed);
     if (pending.length > 0) {
       const replayDb = postgres.isReady() ? resolveHxDb() : null;

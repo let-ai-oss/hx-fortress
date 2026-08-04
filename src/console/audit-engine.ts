@@ -55,6 +55,17 @@ export interface AuditSessionRow {
   sessionId: string;
   userId: string;
   ingestChannel: string | null;
+  /** Turns recorded against the PARENT session. Zero means it has no transcript
+   *  of its own — `ingestAgentCommit` inserts a turn-less parent stub when a
+   *  child chunk arrives first, and that session's bytes live under the
+   *  `:a:<agentId>` lane prefixes, never under the parent's. Absence of a parent
+   *  object is then ordinary, not a loss. */
+  eventCount: number;
+  /** The session carries an organization attribution. An UNATTRIBUTED row is not
+   *  "local" — `org_id IS NULL` means attribution was ABSENT, so on a host that
+   *  ever served a second organization it may not be this one's. Its id must not
+   *  be named to a hub acting for this org. */
+  orgAttributed: boolean;
 }
 
 export interface AuditFinding {
@@ -143,7 +154,13 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   // So the ask covers what the run reports on. If it cannot be completed the
   // adapter returns null and the whole witness reads `unavailable`, which is the
   // honest outcome and the one this engine is built to render.
-  const eligible = rows.filter((r) => witnessEligible(r.ingestChannel));
+  // Channel AND attribution. `witnessEligible` bounds which CHANNEL may leave the
+  // box; an unattributed row additionally may not be this organization's at all
+  // — org_id IS NULL means attribution was absent, not that the session is local
+  // — and this file's own preamble names a re-enrolled host as the case the org
+  // filter exists for. Naming them buys nothing either: the hub answers all-false
+  // for an id outside its reach, which reads back as benign legacy.
+  const eligible = rows.filter((r) => witnessEligible(r.ingestChannel) && r.orgAttributed);
   const witness = deps.askWitness ? await deps.askWitness(eligible.map((r) => r.sessionId)) : null;
   // Off (nobody asked) and unavailable (asked, unanswered) are different facts
   // about this organization, and the run reports which one it was.
@@ -188,6 +205,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
       ingestChannel: row.ingestChannel,
       acknowledged: ack,
       witnessAnswered: witness !== null,
+      hasOwnTranscript: row.eventCount > 0,
     });
     countVerdict(counts, verdict, ack);
     findings.push({
@@ -218,6 +236,10 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   // precisely so a later read cannot re-derive a cleaner one than the run earned.
   if (truncated) {
     summary.qualification = `${summary.qualification} — stopped at this run's budget after ${counts.sessionsChecked} session(s); the rest were not checked`;
+    // And it cannot be CLEAN. "every checked session is held here and nowhere
+    // else" is true of the rows it reached and says nothing about the rest, which
+    // is the whole reason the roll-up refuses to call an unproven set clean.
+    if (summary.verdict === "clean") summary.verdict = "qualified";
   }
   return {
     counts,

@@ -88,7 +88,7 @@ const EMPTY_COUNTS: RollUpCounts = {
   alsoAtLetaiAcknowledged: 0,
   notDeliveredHere: 0,
   noRecord: 0,
-    missingHere: 0,
+  missingHere: 0,
   residencyUnchecked: 0,
   unknownProvenance: 0,
   notApplicable: 0,

@@ -47,7 +47,16 @@ import type { SessionStore } from "../src/modules/session-vault/store/types";
 const ORG = "org-1";
 
 function row(over: Partial<AuditSessionRow> = {}): AuditSessionRow {
-  return { org: ORG, family: "claude", sessionId: "s1", userId: "u1", ingestChannel: "tunnel", ...over };
+  return {
+    org: ORG,
+    family: "claude",
+    sessionId: "s1",
+    userId: "u1",
+    ingestChannel: "tunnel",
+    eventCount: 1,
+    orgAttributed: true,
+    ...over,
+  };
 }
 
 describe("the verdict matrix", () => {
@@ -58,7 +67,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: true,
         ingestChannel: "tunnel",
-        acknowledged: false, witnessAnswered: true, }),
+        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, }),
     ).toBe("not_delivered_here");
     // No destination record at all is benign legacy, and its own verdict.
     expect(
@@ -67,7 +76,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "tunnel",
-        acknowledged: false, witnessAnswered: true, }),
+        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, }),
     ).toBe("no_record");
   });
 
@@ -77,7 +86,7 @@ describe("the verdict matrix", () => {
       letaiCopy: true,
       anyDestinationRecord: true,
       ingestChannel: "tunnel",
-      acknowledged: false, witnessAnswered: true, });
+      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, });
     expect(verdict).toBe("also_at_letai");
     // Per SESSION it fails until acknowledged...
     expect(sessionCheckPasses(verdict, false)).toBe(false);
@@ -95,7 +104,7 @@ describe("the verdict matrix", () => {
       letaiCopy: false,
       anyDestinationRecord: false,
       ingestChannel: "reconciled",
-      acknowledged: false, witnessAnswered: true, });
+      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, });
     expect(verdict).toBe("unknown_provenance");
     expect(unknownProvenanceCause("reconciled")).toContain("index outage");
     expect(unknownProvenanceCause(null)).toContain("predates channel tracking");
@@ -106,7 +115,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "gateway",
-        acknowledged: false, witnessAnswered: true, }),
+        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, }),
     ).toBe("not_applicable");
     expect(VERDICT_HEADLINE.not_applicable).toContain("id never sent");
   });
@@ -252,6 +261,44 @@ describe("one audit run", () => {
       expect([channel, failingFindings(result.findings).length]).toEqual([channel, 1]);
       expect([channel, result.verdict]).toEqual([channel, "failed"]);
     }
+  });
+
+  test("a turn-less parent stub is not a loss — its bytes are under the agent lanes", async () => {
+    // `ingestAgentCommit` inserts a parent stub when a child chunk arrives first,
+    // and that session's transcript lives under `<sid>:a:<agentId>`, never under
+    // the parent prefix. Flagging its absence tells an operator to restore data
+    // that was never there, and fails the whole fleet verdict for it.
+    const stub = [row({ sessionId: "p1", ingestChannel: "gateway", eventCount: 0 })];
+    const result = await runResidencyAudit(
+      deps({
+        sessions: async () => stub,
+        listCanonical: async () => new Set<string>(),
+        headCanonical: async () => false,
+      }),
+    );
+    expect(result.counts.missingHere).toBe(0);
+    expect(result.verdict).not.toBe("failed");
+  });
+
+  test("an unattributed session's id is never named to let.ai", async () => {
+    // `org_id IS NULL` means attribution was ABSENT, not that the session is
+    // local — so on a host that ever served a second organization it may not be
+    // this one's. The sweep includes it for the local presence check; the witness
+    // set must not.
+    let asked: readonly string[] = [];
+    await runResidencyAudit(
+      deps({
+        sessions: async () => [
+          row({ sessionId: "mine", orgAttributed: true }),
+          row({ sessionId: "unattributed", orgAttributed: false }),
+        ],
+        askWitness: async (ids: readonly string[]) => {
+          asked = ids;
+          return { copies: new Set<string>(), known: new Set<string>() };
+        },
+      }),
+    );
+    expect([...asked]).toEqual(["mine"]);
   });
 
   test("a witness that could not answer does not make a missing transcript benign", async () => {
