@@ -16,7 +16,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 
 import { cliAuditAct, CliAudit, CLI_ACTOR } from "../src/cli-audit";
-import { AUDIT_ACTIONS } from "../src/console/audit-actions";
+import { AUDIT_ACTIONS, MAX_ACTOR_CHARS } from "../src/console/audit-actions";
 import {
   assertSpoolOwnership,
   AuditSpool,
@@ -303,6 +303,29 @@ describe("the drain", () => {
   });
 });
 
+describe("what a record may name as its actor", () => {
+  test("an actor beyond the bound is clamped where it is written", async () => {
+    const spool = new AuditSpool({ dir, writer: "ui" });
+    const written = await spool.append({
+      action: AUDIT_ACTIONS.signInFailed,
+      // The one field an anonymous caller influences. Clamped at the SPOOL, under
+      // every caller, rather than only at the door it came through.
+      actor: "A".repeat(200_000),
+      sessionRef: null,
+      tier: null,
+      params: null,
+      kind: "outcome",
+      refFileId: null,
+      refSeq: null,
+      outcome: null,
+      error: "1 failed attempt",
+    });
+    expect(written.actor?.length).toBe(MAX_ACTOR_CHARS + 1);
+    const [onDisk] = (await readSpool(dir)).filter((r) => r.action === AUDIT_ACTIONS.signInFailed);
+    expect(onDisk?.actor).toBe(written.actor);
+  });
+});
+
 describe("who owns the signal", () => {
   test("starting the drain registers no process handler", () => {
     const { audit } = consoleAudit();
@@ -565,7 +588,12 @@ describe("the audited routes", () => {
     };
     const ctx = { runtime: runtime as never, remoteKey: "10.0.0.1", remoteAddr: "10.0.0.1", audit };
     await handleAuthRoute(
-      new Request("http://console.local/ui/api/session", { method: "POST", body: "{}" }),
+      new Request("http://console.local/ui/api/session", {
+        method: "POST",
+        // A login that could name an account: one that could not is refused at
+        // the door, before anything is written down.
+        body: JSON.stringify({ login: "erik", password: "a-long-enough-password" }),
+      }),
       ctx,
     );
     await handleAuthRoute(

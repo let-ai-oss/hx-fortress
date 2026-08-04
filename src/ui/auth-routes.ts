@@ -20,7 +20,7 @@ import {
 } from "./copy";
 import { UiRuntime } from "./runtime";
 import { SESSION_HEADER, sessionCopy } from "./sessions";
-import { checkPasswordPolicy, liveSetupToken } from "./users";
+import { checkLogin, checkPasswordPolicy, liveSetupToken } from "./users";
 
 /** Carried in the setup-status request HEADER, never a path or a query — a
  *  request line reaches access logs, proxy logs and Referer headers. */
@@ -112,6 +112,23 @@ export async function handleAuthRoute(
     const body = await readJson(req);
     const login = typeof body.login === "string" ? body.login : "";
     const password = typeof body.password === "string" ? body.password : "";
+    // A login that cannot name an account is refused HERE, in the same uniform
+    // 401 a wrong password gets — so it stays non-enumerating — and without
+    // reaching the failure window, the lockout table or the hasher. Every real
+    // login satisfies this rule by construction (the CLI applies it at
+    // creation), so nothing that could succeed is turned away.
+    //
+    // Unrefused, the body's `login` is a string an UNAUTHENTICATED caller
+    // chooses, up to the whole 256 KiB request ceiling, and it is written
+    // verbatim as the audit record's actor and used as a lockout key: the
+    // collapse that bounds those records bounds how MANY there are, never how
+    // big, and hx.admin_audit has no DELETE anywhere.
+    if (checkLogin(login) !== null) {
+      return json(
+        { error: SIGN_IN_FAILURE_COPY, recovery: SIGN_IN_RECOVERY_COPY },
+        401,
+      );
+    }
     const config = await runtime.readConfig();
     // The entry id is a server-side record; anything the client claims about the
     // workbench identity is ignored, and the stamp comes from the record alone.

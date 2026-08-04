@@ -35,6 +35,7 @@ import path from "node:path";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { exportJWK, importPKCS8, SignJWT } from "jose";
 
+import { MAX_ACTOR_CHARS } from "../src/console/audit-actions";
 import { AuditSpool, readSpool } from "../src/console/audit-spool";
 import { replaceRoster } from "../src/console/roster";
 import { startGatewayServer, type GatewayHandle } from "../src/gateway/server";
@@ -879,30 +880,41 @@ describe("what the console refuses to buffer, parse or echo", () => {
     expect(h.submitted).toEqual([]);
   });
 
-  test("CR/LF in a field never becomes a header, and never tears a record in two", async () => {
-    const res = await fetch(`${h.origin}/ui/api/session`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: h.origin },
-      body: JSON.stringify({ login: CRLF_PROBE, password: "wrong" }),
-    });
-    expect(res.status).toBe(401);
-    expect(res.headers.get("x-injected")).toBeNull();
-    await res.arrayBuffer();
+  test("a login no account could have is refused at the door, and writes nothing", async () => {
+    // The failed sign-in is the ONE place an unauthenticated caller chooses what
+    // is written down: the login becomes the record's actor and a lockout key.
+    // The window collapse bounds how MANY such records there are, never how big
+    // — and hx.admin_audit has no DELETE anywhere — so 200 windows of a 256 KiB
+    // login per five minutes is tens of gigabytes a day of append-only table.
+    for (const probe of [CRLF_PROBE, "A".repeat(200_000)]) {
+      const res = await fetch(`${h.origin}/ui/api/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: h.origin },
+        body: JSON.stringify({ login: probe, password: "wrong" }),
+      });
+      // The SAME uniform 401 a wrong password gets: the refusal must not tell a
+      // caller which of the two they got wrong.
+      expect(res.status).toBe(401);
+      expect(res.headers.get("x-injected")).toBeNull();
+      await res.arrayBuffer();
+    }
 
-    // The collapsed failure window is closed by hand so the record it carries is
-    // on disk to inspect.
     await h.audit.flushFailures(true);
-    const files = await readdir(h.spoolDir);
-    expect(files.length).toBe(1);
-    const text = await readFile(path.join(h.spoolDir, files[0] as string), "utf8");
-    // ONE line per record, whatever the record carries: a spool the caller can
-    // split is a spool the caller can forge a record into.
+    const records = await readSpool(h.spoolDir);
+    expect(records.find((r) => r.params?.login === CRLF_PROBE)).toBeUndefined();
+    expect(records.some((r) => (r.actor?.length ?? 0) > MAX_ACTOR_CHARS + 1)).toBe(false);
+
+    // …and whatever does reach the spool is still one JSON line per record: a
+    // spool the caller can split is a spool the caller can forge a record into.
+    // (Here that is nothing at all — a refusal at the door does not even open
+    // the file, which is the point.)
+    const files = await readdir(h.spoolDir).catch(() => [] as string[]);
+    const text = (
+      await Promise.all(files.map((f) => readFile(path.join(h.spoolDir, f), "utf8")))
+    ).join("");
     const lines = text.split("\n").filter((line) => line !== "");
     for (const line of lines) expect(() => JSON.parse(line) as unknown).not.toThrow();
-    const records = await readSpool(h.spoolDir);
     expect(lines.length).toBe(records.length);
-    const failure = records.find((r) => r.params?.login === CRLF_PROBE);
-    expect(failure).toBeDefined();
   });
 
   test("an export records what the caller asked, and names the file itself", async () => {

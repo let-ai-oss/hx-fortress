@@ -35,7 +35,7 @@ import { mkdir, open, readdir, readFile, rm, stat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 
-import { sanitizeParams } from "./audit-actions";
+import { clampActor, sanitizeParams } from "./audit-actions";
 
 export type AuditOrigin = "console" | "cli" | "system";
 
@@ -333,6 +333,7 @@ export class AuditSpool {
     await this.ensureDir();
     const full: AuditRecord = {
       ...record,
+      actor: clampActor(record.actor),
       params: sanitizeParams(record.action, record.params),
       origin: record.origin ?? this.origin,
       fileId: this.fileId,
