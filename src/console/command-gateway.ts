@@ -36,6 +36,33 @@ function firstBoolean(result: unknown): boolean {
   return Object.values(row)[0] === true;
 }
 
+/** Refused by name, on a Postgres this fortress does not own.
+ *
+ *  The five SECURITY DEFINER routines are created by `ensureAppRoles`, which is
+ *  wired only into the EMBEDDED path — there is no role split on an operator's
+ *  own database, so nothing creates them there. The gateway called them anyway:
+ *  every claim raised `42883 function hx.claim_command does not exist`, every
+ *  poll pass swallowed it, and commands minted from the console sat at
+ *  `requested` until their deadline while the daemon reported healthy. An
+ *  operator watching a console that accepts a command and never runs it has no
+ *  way to learn why.
+ *
+ *  So the plane says what is true: it cannot run commands here. Reads are
+ *  unaffected — the console's whole read surface works on an external DSN — and
+ *  ingest is untouched, which is why this refuses rather than failing boot. */
+export function createUnavailableCommandGateway(): CommandGateway {
+  return {
+    // Nothing to list, nothing claimable. Every arm answers falsely-quiet rather
+    // than throwing, because the poll loop swallows throws — which is exactly how
+    // this stayed invisible — and a refusal an operator can read belongs on the
+    // console's status surface, not in a log line nobody opens.
+    listOpen: () => Promise.resolve([]),
+    claim: () => Promise.resolve(false),
+    complete: () => Promise.resolve(false),
+    reject: () => Promise.resolve(false),
+  };
+}
+
 export function createCommandGateway(db: HxDb): CommandGateway {
   return {
     async listOpen(): Promise<CommandRow[]> {

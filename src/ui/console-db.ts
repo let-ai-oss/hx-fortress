@@ -134,6 +134,9 @@ export function externalContainmentBanner(): string[] {
     "The audit tamper fence is void for the same reason: that role can INSERT, amend or delete rows " +
       "in hx.admin_audit, so a drained record is no longer evidence a Postgres-level adversary could " +
       "not have produced.",
+    "And the command plane is not installed at all: the five routines it drives are created only on the " +
+      "embedded Postgres, so start, stop, update, rotate and migrate are terminal-only here. Everything " +
+      "this console READS works; a command submitted from it would sit unclaimed until its deadline.",
     "To restore both, run the daemon under a role that does not own the tables, and give the console " +
       "its own limited-role DSN with `hx-fortress ui config set databaseUrl --stdin`.",
   ];

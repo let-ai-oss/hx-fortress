@@ -61,7 +61,7 @@ import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/
 import { forgetCopiedSessions } from "../console/migration-store";
 import { addForgetPending, readForgetPending, removeForgetPending } from "../console/runtime-files";
 import { migrationIsRunning } from "../console/migration-runner";
-import { createCommandGateway } from "../console/command-gateway";
+import { createCommandGateway, createUnavailableCommandGateway } from "../console/command-gateway";
 import { pollCommands, runBootFence } from "../console/commands";
 import { createCommandExecutors } from "../console/executors";
 import { getServiceManager } from "../service";
@@ -70,6 +70,7 @@ import { downloadBaseFromCloudUrl } from "../update";
 import { readConsoleAdvertisement } from "../ui/advertise";
 import { runAuditForFortress } from "../console/audit-runner";
 import { holdMigration, runMigrationCommand } from "../console/migration-runner";
+import { readPgJson } from "./postgres/pg-json";
 import { buildDirectStore } from "../modules/session-vault/store";
 import { purgeInactiveRoster, replaceRoster } from "../console/roster";
 import {
@@ -1025,13 +1026,29 @@ export async function runFortressHost(
     return pollInFlight;
   }
 
+  /** Whether the five SECURITY DEFINER routines exist to be called.
+   *
+   *  `ensureAppRoles` creates them, and it is wired only into the embedded
+   *  Postgres path — there is no role split on an operator's own database. The
+   *  gateway called them regardless, so on an external DSN every claim raised
+   *  42883, every poll pass swallowed it, and a command minted from the console
+   *  sat at `requested` until its deadline while the daemon reported healthy.
+   *  Read once and cached: pg.json does not change under a running daemon. */
+  let commandPlaneInstalledCache: boolean | null = null;
+  async function commandPlaneIsInstalled(): Promise<boolean> {
+    commandPlaneInstalledCache ??= (await readPgJson(paths.pgJson).catch(() => null))?.mode !== "external";
+    return commandPlaneInstalledCache;
+  }
+
   async function drivePollPass(): Promise<void> {
     const db = resolveHxDb();
     if (!db || !postgres.isReady()) return;
     try {
       await pollCommands(
         {
-          gateway: createCommandGateway(db),
+          gateway: (await commandPlaneIsInstalled())
+            ? createCommandGateway(db)
+            : createUnavailableCommandGateway(),
           inFlightPath: paths.commandsInFlight,
           claimedBy,
           logger: consoleLog,
@@ -1221,7 +1238,9 @@ export async function runFortressHost(
     try {
       await daemonAudit.run("system.command_fence", { engine: "command fence" }, async () => {
         const fence = await runBootFence({
-          gateway: createCommandGateway(db),
+          gateway: (await commandPlaneIsInstalled())
+            ? createCommandGateway(db)
+            : createUnavailableCommandGateway(),
           inFlightPath: paths.commandsInFlight,
           claimedBy,
           logger: consoleLog,
