@@ -20,8 +20,10 @@
 // bug a shared wire contract exists to make impossible. Asking the union for its
 // answer frames means a direction flip fails this build.
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+
+import { writePrivateJson } from "../host/private-json";
 
 import type { FortressQueryResultPayload, HubToFortressFrame } from "../protocol";
 
@@ -218,10 +220,7 @@ export class RoutingPostureCache {
   }
 
   async write(snapshot: RoutingPostureSnapshot): Promise<void> {
-    await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
-    await rename(tmp, this.file);
+    await writePrivateJson(this.file, snapshot, { pretty: true });
   }
 
   /** Record an unavailable answer WITH its timestamp. Leaving the previous good

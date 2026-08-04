@@ -10,8 +10,10 @@
 // "asked" and nothing else would leave an operator unable to tell a sweep that
 // removed nothing from one that never ran.
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
+
+import { writePrivateJson } from "../host/private-json";
 
 /** The same signal the audit intents ride. One channel, several intents: the
  *  daemon applies whichever files are present when it wakes. */
@@ -38,12 +40,7 @@ export function rosterPurgeResultPath(runtimeRoot: string): string {
   return path.join(runtimeRoot, "roster-purge.json");
 }
 
-async function writeJson(file: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await rename(tmp, file);
-}
+const writeJson = (file: string, value: unknown): Promise<void> => writePrivateJson(file, value);
 
 async function readJson<T>(file: string): Promise<T | null> {
   try {

@@ -10,9 +10,9 @@
 // present would drive a warning that is always on, which is a warning nobody
 // reads.
 
-import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { writePrivateJson } from "../host/private-json";
 import { CONSOLE_GRANT_SKEW_SECONDS } from "./sso-grant";
 
 export interface ClockSkewRecord {
@@ -35,10 +35,6 @@ export async function writeClockSkew(
     allowedSeconds: CONSOLE_GRANT_SKEW_SECONDS,
     measuredAt: now.toISOString(),
   };
-  const file = clockSkewPath(runtimeRoot);
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-  await rename(tmp, file);
+  await writePrivateJson(clockSkewPath(runtimeRoot), record);
   return record;
 }

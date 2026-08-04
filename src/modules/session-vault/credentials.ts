@@ -19,12 +19,13 @@
 // partial credential set. Writers take an O_EXCL lock and advance a monotonic
 // `version`, which is also how the console knows to drop its cached copy.
 
-import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 
+import { writePrivateJson } from "../../host/private-json";
 import {
   LOCK_WAIT_MS,
   MAX_CAS_RETRIES,
@@ -113,13 +114,14 @@ export async function readVaultCredentials(): Promise<VaultCredentials | null> {
   }
 }
 
+/** Through the shared private writer: it makes the vault home 0700, chmods the
+ *  temporary file BEFORE the rename rather than the live file after it, and
+ *  gives every write its own temporary name. The copy here used one fixed
+ *  `credentials.json.tmp` for every writer, so a leftover from a crash was
+ *  re-opened at whatever mode it already had and renamed over the most
+ *  sensitive file on the box. */
 async function writeAtomic(file: string, creds: VaultCredentials): Promise<void> {
-  // 0700 the vault home so the 0600 credentials.json sits in an owner-only dir.
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(creds, null, 2)}\n`, { mode: 0o600 });
-  await rename(tmp, file);
-  await chmod(file, 0o600).catch(() => {});
+  await writePrivateJson(file, creds, { pretty: true });
 }
 
 export async function writeVaultCredentials(creds: VaultCredentials): Promise<void> {

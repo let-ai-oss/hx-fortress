@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -120,6 +120,21 @@ describe("the version CAS", () => {
 
     const result = await updateVaultCredentials((c) => ({ ...(c as VaultCredentials), bucket: "x" }));
     expect(result.version).toBe(1);
+  });
+
+  test("a temporary file left behind at a loose mode cannot publish that mode", async () => {
+    // A crash mid-write leaves the temporary path behind. Re-opened, `mode` on
+    // writeFile is ignored — it applies at CREATION — so the leftover's mode is
+    // what the rename publishes onto the most sensitive file on the box. Every
+    // write takes its own name and is chmod'd before the rename.
+    const file = credentialsPath();
+    await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    await writeFile(`${file}.tmp`, "{}\n", { mode: 0o644 });
+    await writeVaultCredentials(CREDS);
+    // Untouched: the write went through a name of its own, so a foreign inode's
+    // mode is never what the rename publishes.
+    expect(await readFile(`${file}.tmp`, "utf8")).toBe("{}\n");
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
   });
 
   test("a FRESH lock whose owner no longer exists is reclaimed at once", async () => {

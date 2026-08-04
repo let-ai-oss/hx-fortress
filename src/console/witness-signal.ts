@@ -14,8 +14,10 @@
 // The published files are the same pattern as status.json and metrics.json: the
 // daemon writes, everyone else reads.
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
+
+import { writePrivateJson } from "../host/private-json";
 
 /** The signal the terminal sends. SIGUSR2 is unused elsewhere in the daemon. */
 export const WITNESS_SIGNAL = "SIGUSR2" as const;
@@ -52,12 +54,7 @@ export function auditAcksPath(runtimeRoot: string): string {
   return path.join(runtimeRoot, "audit-acks.json");
 }
 
-async function writeJson(file: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await rename(tmp, file);
-}
+const writeJson = (file: string, value: unknown): Promise<void> => writePrivateJson(file, value);
 
 async function readJson<T>(file: string): Promise<T | null> {
   try {
