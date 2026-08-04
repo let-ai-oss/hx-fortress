@@ -33,7 +33,12 @@ export interface RouteSpec {
   path: string;
   prefix?: boolean;
   cls: RouteClass;
-  /** Which meter this route draws from. Absent = unmetered (/healthz alone). */
+  /** Which meter this route draws from, when it draws from one.
+   *
+   *  Absent on MOST routes, not on /healthz alone: the meters exist for the
+   *  expensive and the guessable — sign-in, the SSO exchange, the store probe,
+   *  the exports — and a plain read answered from this host's own Postgres is
+   *  bounded by the session it needs rather than by a bucket. */
   bucket?: BucketName;
   /** Public routes only: does an attempt reach the audit spool? */
   audited?: boolean;

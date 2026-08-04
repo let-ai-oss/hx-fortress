@@ -159,7 +159,14 @@ With the bundled Postgres, the console's database role holds:
 - `SELECT` and `INSERT` on the command queue and the audit table, and `SELECT`
   and nothing else on every table the daemon's engines own.
 
-A console compromise is therefore not a transcript disclosure. The whole matrix
+A console compromise is therefore not a transcript disclosure **through the
+database**: there is no grant it could use to read one. That is the whole claim
+the matrix supports, and the residual is stated rather than implied — the
+console process holds the storage credential and builds a direct store from it
+(it needs one to sign the HEAD that proves a session's object exists), and it
+runs as the same uid as the daemon, so anything that uid can read it can read.
+Code execution in the console process is therefore a bucket-credential
+compromise; it is simply not a *privilege* the database grants. The whole matrix
 is asserted against a live catalog on every pull request, on the second boot —
 the blanket grant that every boot re-issues must not undo a revoke.
 
