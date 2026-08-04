@@ -20,7 +20,13 @@ import type { SQL } from "drizzle-orm";
 
 import { validateCommandParams } from "../src/console/command-params";
 import { consumeCredentialRef } from "../src/console/cmd-creds";
-import { readInFlight } from "../src/console/runtime-files";
+import {
+  addInFlight,
+  readInFlight,
+  readPauseAnchor,
+  removeInFlight,
+  stampPauseAnchor,
+} from "../src/console/runtime-files";
 import { AuditSpool } from "../src/console/audit-spool";
 import { ConsoleAudit } from "../src/ui/audit-writer";
 import { createConsoleWritePort } from "../src/ui/console-write-port";
@@ -352,6 +358,47 @@ describe("the in-flight file", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the runtime files two writers share", () => {
+  let inFlightPath = "";
+  let anchorPath = "";
+  let dir = "";
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "hx-cmd-rt-"));
+    inFlightPath = path.join(dir, "commands-inflight.json");
+    anchorPath = path.join(dir, "pause-anchor.json");
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("concurrent adds all survive — a read-modify-write is not a write", async () => {
+    const ids = Array.from({ length: 25 }, (_, i) => `id-${i}`);
+    // Overlapping in earnest: one poll pass outliving its interval is enough,
+    // and every one of these reads the set before any of them has written it
+    // back. Unserialized, all but the last are silently dropped — and the file
+    // is what decides which running rows may be re-driven after a crash.
+    await Promise.all(ids.map((id) => addInFlight(inFlightPath, id)));
+    expect((await readInFlight(inFlightPath)).size).toBe(ids.length);
+
+    await Promise.all(ids.slice(0, 10).map((id) => removeInFlight(inFlightPath, id)));
+    expect((await readInFlight(inFlightPath)).size).toBe(15);
+  });
+
+  test("concurrent anchor stamps agree on one episode", async () => {
+    const at = new Date("2026-08-01T00:00:00.000Z");
+    const stamped = await Promise.all(
+      Array.from({ length: 12 }, () => stampPauseAnchor(anchorPath, "episode-1", at)),
+    );
+    // The anchor bounds how long a pause may hold the write gate shut, so a
+    // torn write here is a barrier that silently stops binding.
+    for (const anchor of stamped) expect(anchor.episodeId).toBe("episode-1");
+    expect(await readPauseAnchor(anchorPath)).toEqual({
+      episodeId: "episode-1",
+      firstObservedAt: at.toISOString(),
+    });
   });
 });
 

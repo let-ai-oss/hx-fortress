@@ -9,12 +9,47 @@
 //     store-write gate closed, and is the SOLE such bound on an external
 //     Postgres, where no role split exists to grant against.
 
+import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+/**
+ * One update at a time per FILE.
+ *
+ * Every writer here is a read-modify-write — read the set, add an id, write the
+ * set — so two overlapping calls do not merely race on the temporary file, they
+ * lose an entry: the second read happens before the first write lands, and the
+ * id it was supposed to add is gone from what it writes back. Overlap is
+ * reachable on both files: the command poll can run alongside itself if a pass
+ * outlives its interval, and the pause anchor is driven by the 5s status
+ * refresh and a migration's quarter-second gate refresh at once.
+ *
+ * In-process only, which is all that is needed: these files have exactly one
+ * writing process by design, and the pid+random temporary name below is what
+ * keeps a second one from clobbering a partial write.
+ */
+const updates = new Map<string, Promise<unknown>>();
+
+function serialized<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const previous = updates.get(filePath) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  updates.set(filePath, settled);
+  void settled.then(() => {
+    if (updates.get(filePath) === settled) updates.delete(filePath);
+  });
+  return next;
+}
+
 async function writePrivateJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.${process.pid}.tmp`;
+  // Unique per write, not per process: a pid is not unique across PID
+  // namespaces, and a shared temporary path turns one writer's rename into
+  // another's ENOENT.
+  const tmp = `${filePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   await writeFile(tmp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
   await chmod(tmp, 0o600).catch(() => {});
   await rename(tmp, filePath);
@@ -49,16 +84,20 @@ export async function readInFlight(filePath: string): Promise<Set<string>> {
 }
 
 export async function addInFlight(filePath: string, id: string): Promise<void> {
-  const ids = await readInFlight(filePath);
-  if (ids.has(id)) return;
-  ids.add(id);
-  await writePrivateJson(filePath, [...ids]);
+  await serialized(filePath, async () => {
+    const ids = await readInFlight(filePath);
+    if (ids.has(id)) return;
+    ids.add(id);
+    await writePrivateJson(filePath, [...ids]);
+  });
 }
 
 export async function removeInFlight(filePath: string, id: string): Promise<void> {
-  const ids = await readInFlight(filePath);
-  if (!ids.delete(id)) return;
-  await writePrivateJson(filePath, [...ids]);
+  await serialized(filePath, async () => {
+    const ids = await readInFlight(filePath);
+    if (!ids.delete(id)) return;
+    await writePrivateJson(filePath, [...ids]);
+  });
 }
 
 // ── Pause anchor ────────────────────────────────────────────────────────────
@@ -93,11 +132,13 @@ export async function stampPauseAnchor(
   episodeId: string,
   at: Date,
 ): Promise<PauseAnchor> {
-  const existing = await readPauseAnchor(filePath);
-  if (existing?.episodeId === episodeId) return existing;
-  const anchor: PauseAnchor = { episodeId, firstObservedAt: at.toISOString() };
-  await writePrivateJson(filePath, anchor);
-  return anchor;
+  return await serialized(filePath, async () => {
+    const existing = await readPauseAnchor(filePath);
+    if (existing?.episodeId === episodeId) return existing;
+    const anchor: PauseAnchor = { episodeId, firstObservedAt: at.toISOString() };
+    await writePrivateJson(filePath, anchor);
+    return anchor;
+  });
 }
 
 /** Cleared once no episode is in force, so nothing later anchors to an earlier

@@ -11,6 +11,7 @@
 
 import { validateCommandParams, type CommandParams } from "./command-params";
 import { addInFlight, readInFlight, removeInFlight } from "./runtime-files";
+import { STATUS_STALE_MS } from "../daemon-state";
 import type { ConsoleCommandKind } from "../host/postgres/console-plane";
 import type { ScopedLogger } from "../host/types";
 
@@ -292,8 +293,14 @@ export async function pollCommands(
 
 /** How stale a status heartbeat may be before the console refuses to submit a
  *  command. A command nobody is polling for would sit until its deadline and
- *  then be rejected — telling the operator up front is the honest answer. */
-export const HEARTBEAT_FRESH_MS = 15_000;
+ *  then be rejected — telling the operator up front is the honest answer.
+ *
+ *  The SAME fact daemonState() calls stale, aliased rather than restated: these
+ *  two decide "is the daemon still there" for coupled surfaces — one refuses the
+ *  submission, the other renders the state that explains the refusal — and two
+ *  copies of the number is how a console comes to refuse a command while showing
+ *  a daemon it calls running. */
+export const HEARTBEAT_FRESH_MS = STATUS_STALE_MS;
 
 export function heartbeatFresh(writtenAt: string | null | undefined, now: Date = new Date()): boolean {
   if (!writtenAt) return false;
