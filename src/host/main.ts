@@ -58,7 +58,7 @@ import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/gua
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 import { awaitParkDrain, drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
 import { forgetCopiedSessions } from "../console/migration-store";
-import { addForgetPending, readForgetPending, writeForgetPending } from "../console/runtime-files";
+import { addForgetPending, readForgetPending, removeForgetPending } from "../console/runtime-files";
 import { migrationIsRunning } from "../console/migration-runner";
 import { createCommandGateway } from "../console/command-gateway";
 import { pollCommands, runBootFence } from "../console/commands";
@@ -68,7 +68,7 @@ import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-contro
 import { downloadBaseFromCloudUrl } from "../update";
 import { readConsoleAdvertisement } from "../ui/advertise";
 import { runAuditForFortress } from "../console/audit-runner";
-import { runMigrationCommand } from "../console/migration-runner";
+import { holdMigration, runMigrationCommand } from "../console/migration-runner";
 import { buildDirectStore } from "../modules/session-vault/store";
 import { purgeInactiveRoster, replaceRoster } from "../console/roster";
 import {
@@ -676,7 +676,9 @@ export async function runFortressHost(
             });
             return false;
           });
-        if (cleared) await writeForgetPending(forgetPendingPath, []);
+        // Only what this attempt actually deleted — a concurrent drain may have
+        // appended more since the snapshot, and those have not been cleared.
+        if (cleared) await removeForgetPending(forgetPendingPath, pending);
       }
     }
     if (result.replayed > 0 || result.failed > 0) {
@@ -832,6 +834,13 @@ export async function runFortressHost(
           ),
       }),
     runMigration: async ({ command, target, credentialRef }) => {
+      // Taken SYNCHRONOUSLY, before the first await below: `migrationInFlight`
+      // is only set once the runner is entered, so without this the preamble
+      // itself — a drain await and a sequential-scan DELETE — runs in a window
+      // where the replay's guard still reads false and a 5s tick can start a
+      // fresh drain into the bucket this run is about to walk.
+      const release = holdMigration();
+      try {
       // Settle both hazards before the run reads its copy records.
       //
       // A drain already under way writes sidecars into the store this run is
@@ -848,7 +857,7 @@ export async function runFortressHost(
         const db = postgres.isReady() ? resolveHxDb() : null;
         if (!db) throw new Error("sidecar copy records are pending a clear and the database is not reachable");
         await forgetCopiedSessions(db, stale);
-        await writeForgetPending(forgetPendingPath, []);
+        await removeForgetPending(forgetPendingPath, stale);
       }
       return await runMigrationCommand(
         {
@@ -880,6 +889,9 @@ export async function runFortressHost(
         },
         { command, target },
       );
+      } finally {
+        release();
+      }
     },
     setCloudWitness: (enabled) => applyCloudWitness(enabled),
     acknowledgeFinding: async ({ org, sessionId, reason }) => {

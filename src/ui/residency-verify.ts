@@ -141,6 +141,8 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
         anyDestinationRecord: input.witness.anyDestinationRecord,
         ingestChannel: input.row?.ingestChannel ?? null,
         acknowledged: input.witness.acknowledged,
+        // This arm is built only when a run actually asked, so by construction.
+        witnessAnswered: true,
       })
     : null;
   checks.push(

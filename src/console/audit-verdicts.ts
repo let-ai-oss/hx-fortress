@@ -18,6 +18,7 @@ export type ResidencyVerdict =
   | "also_at_letai"
   | "not_delivered_here"
   | "no_record"
+  | "residency_unchecked"
   | "unknown_provenance"
   | "not_applicable";
 
@@ -34,6 +35,10 @@ export interface VerdictInput {
   ingestChannel: string | null;
   /** An acknowledgement already exists for this session. */
   acknowledged: boolean;
+  /** The witness ANSWERED for this run. When it did not, `letaiCopy` and
+   *  `anyDestinationRecord` are absences of an answer rather than answers, and a
+   *  session missing from this bucket cannot be told apart from benign legacy. */
+  witnessAnswered: boolean;
 }
 
 /** Eligibility, fail-private: only a cloud-relayed session may have its id sent
@@ -50,6 +55,11 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";
   }
   if (input.fortressPresent) return input.letaiCopy ? "also_at_letai" : "confirmed";
+  // Absent from this bucket, and nobody answered. `no_record` would assert that
+  // let.ai holds no delivery record — a positive claim about a question never
+  // put — and it is the verdict remediation calls benign legacy, so the incident
+  // this audit exists to surface would read as nothing to do.
+  if (!input.witnessAnswered) return "residency_unchecked";
   if (input.anyDestinationRecord) return "not_delivered_here";
   return "no_record";
 }
@@ -58,6 +68,9 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
  *  also_at_letai fails it; an acknowledged one does not. */
 export function sessionCheckPasses(verdict: ResidencyVerdict, acknowledged: boolean): boolean {
   if (verdict === "not_delivered_here") return false;
+  // Fails, because the object really is missing from this fortress. What is
+  // unknown is only WHY, and an unknown is not a pass on a compliance surface.
+  if (verdict === "residency_unchecked") return false;
   if (verdict === "also_at_letai") return acknowledged;
   return true;
 }
@@ -74,6 +87,7 @@ export const VERDICT_HEADLINE: Record<ResidencyVerdict, string> = {
   also_at_letai: "held here, and a historical let.ai copy exists",
   not_delivered_here: "should be on this fortress, and is not",
   no_record: "no destination record at let.ai — predates per-destination tracking",
+  residency_unchecked: "missing from this fortress, and the witness did not answer",
   unknown_provenance: "upload channel unknown — not verified with let.ai",
   not_applicable: "not checked with let.ai — uploaded directly; id never sent",
 };
@@ -85,6 +99,8 @@ export const VERDICT_CAUSE: Record<ResidencyVerdict, string> = {
   also_at_letai: "bytes at let.ai predate this fortress, or the session is also attributed to a let.ai-hosted org",
   not_delivered_here: "let.ai recorded this fortress as a destination and the object never arrived",
   no_record: "this session was uploaded before let.ai recorded per-destination delivery",
+  residency_unchecked:
+    "the object is not in this organization's bucket, and no answer came back about whether let.ai ever routed it here",
   unknown_provenance:
     "this session's row predates channel tracking, or it was recovered after an index outage",
   not_applicable: "this session was uploaded straight to this fortress; its id was never sent to let.ai",
@@ -97,6 +113,8 @@ export const VERDICT_REMEDIATION: Record<ResidencyVerdict, string> = {
   not_delivered_here:
     "re-upload the session from the client that holds it, or ask let.ai to re-deliver it; this one is not acknowledgeable",
   no_record: "nothing to do — it is benign legacy, and it qualifies the verdict rather than failing it",
+  residency_unchecked:
+    "the object is missing from this fortress and the cloud witness did not answer, so it cannot be told apart from benign legacy; re-run the audit once let.ai is reachable, or with the cloud witness on",
   unknown_provenance:
     "nothing to do per session; the share of these qualifies every verdict this run produces",
   not_applicable: "nothing to do — this fortress is the only place these bytes were ever sent",
@@ -118,6 +136,7 @@ export interface RollUpCounts {
   alsoAtLetaiAcknowledged: number;
   notDeliveredHere: number;
   noRecord: number;
+  residencyUnchecked: number;
   unknownProvenance: number;
   notApplicable: number;
 }
@@ -172,6 +191,11 @@ export function rollUp(
   }
   if (counts.notApplicable > 0) {
     notes.push(`${counts.notApplicable} uploaded directly and never named to let.ai`);
+  }
+  if (counts.residencyUnchecked > 0) {
+    notes.push(
+      `${counts.residencyUnchecked} missing here that the witness could not account for`,
+    );
   }
   if (counts.noRecord > 0) {
     notes.push(`${counts.noRecord} predating per-destination tracking`);

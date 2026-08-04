@@ -175,6 +175,31 @@ export async function addForgetPending(
   });
 }
 
+/**
+ * Drop exactly these keys from the pending set, leaving anything added since.
+ *
+ * Clearing the file wholesale after a successful DELETE discards entries a
+ * SECOND drain appended while the first was still awaiting its statement — and
+ * those were never cleared, so a resumed run skips their sessions and carries
+ * stale sidecars over the cut. That is the loss this file exists to prevent.
+ */
+export async function removeForgetPending(
+  filePath: string,
+  keys: readonly SessionKey[],
+): Promise<void> {
+  const drop = new Set(keys.map((k) => `${k.userId}/${k.family}/${k.sessionId}`));
+  await serialized(filePath, async () => {
+    const left = (await readForgetPending(filePath)).filter(
+      (k) => !drop.has(`${k.userId}/${k.family}/${k.sessionId}`),
+    );
+    if (left.length === 0) {
+      await unlink(filePath).catch(() => {});
+      return;
+    }
+    await writePrivateJson(filePath, left);
+  });
+}
+
 export async function writeForgetPending(filePath: string, keys: readonly SessionKey[]): Promise<void> {
   await serialized(filePath, async () => {
     if (keys.length === 0) {

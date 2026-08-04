@@ -46,6 +46,8 @@ export interface WitnessClientDeps {
   /** Test seam. Real runs wait on a timer; a test hands back a resolved promise
    *  so it can prove the retry happens without spending the wait. */
   wait?: (ms: number) => Promise<void>;
+  /** Test seam for the wall-clock ceiling. */
+  now?: () => number;
 }
 
 // Sizing the allowance has now gone wrong twice in opposite directions, so state
@@ -108,9 +110,22 @@ export function createWitnessClient(
     const batches = Math.ceil(ids.length / batchSize);
     let waitsLeft = batches + EXTRA_WAITS;
     const totalWaitCap = Math.min(batches * WAIT_MS_PER_BATCH + 10_000, MAX_TOTAL_WAIT_MS);
+    // WALL-CLOCK, not accumulated sleep. A hub that answers slowly without ever
+    // refusing spends no waits at all, so a sleep-only ceiling does not bound it
+    // — and `run_audit` executes inside the command plane's single serial pass,
+    // so a sweep that runs long holds every other command behind it until they
+    // age out on their request deadline.
+    const startedAt = deps.now?.() ?? Date.now();
+    const elapsed = (): number => (deps.now?.() ?? Date.now()) - startedAt;
     let waitedMs = 0;
     for (let from = 0; from < ids.length; from += batchSize) {
       const batch = ids.slice(from, from + batchSize);
+      if (elapsed() > totalWaitCap) {
+        deps.onUnavailable?.(
+          `the sweep of ${batches} batches did not finish within ${Math.round(totalWaitCap / 1000)}s`,
+        );
+        return null;
+      }
       let result: FortressQueryResultPayload | null = null;
       while (result === null) {
         try {

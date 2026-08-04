@@ -58,8 +58,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: true,
         ingestChannel: "tunnel",
-        acknowledged: false,
-      }),
+        acknowledged: false, witnessAnswered: true, }),
     ).toBe("not_delivered_here");
     // No destination record at all is benign legacy, and its own verdict.
     expect(
@@ -68,8 +67,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "tunnel",
-        acknowledged: false,
-      }),
+        acknowledged: false, witnessAnswered: true, }),
     ).toBe("no_record");
   });
 
@@ -79,8 +77,7 @@ describe("the verdict matrix", () => {
       letaiCopy: true,
       anyDestinationRecord: true,
       ingestChannel: "tunnel",
-      acknowledged: false,
-    });
+      acknowledged: false, witnessAnswered: true, });
     expect(verdict).toBe("also_at_letai");
     // Per SESSION it fails until acknowledged...
     expect(sessionCheckPasses(verdict, false)).toBe(false);
@@ -98,8 +95,7 @@ describe("the verdict matrix", () => {
       letaiCopy: false,
       anyDestinationRecord: false,
       ingestChannel: "reconciled",
-      acknowledged: false,
-    });
+      acknowledged: false, witnessAnswered: true, });
     expect(verdict).toBe("unknown_provenance");
     expect(unknownProvenanceCause("reconciled")).toContain("index outage");
     expect(unknownProvenanceCause(null)).toContain("predates channel tracking");
@@ -110,8 +106,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "gateway",
-        acknowledged: false,
-      }),
+        acknowledged: false, witnessAnswered: true, }),
     ).toBe("not_applicable");
     expect(VERDICT_HEADLINE.not_applicable).toContain("id never sent");
   });
@@ -125,6 +120,7 @@ describe("the fleet roll-up", () => {
     alsoAtLetaiAcknowledged: 0,
     notDeliveredHere: 0,
     noRecord: 0,
+    residencyUnchecked: 0,
     unknownProvenance: 0,
     notApplicable: 0,
   };
@@ -233,6 +229,29 @@ describe("one audit run", () => {
     expect(result.counts.sessionsChecked).toBe(many.length);
     // Reported on all 50, so all 50 had to be asked about.
     expect(asked.length).toBe(many.length);
+  });
+
+  test("a witness that could not answer does not make a missing transcript benign", async () => {
+    // The failure this guards: with `witness === null`, both witness facts became
+    // `false` for every row, so a session genuinely absent from this bucket fell
+    // through to `no_record` — "benign legacy, nothing to do" — and the run
+    // reported 0 failing. The one verdict that fails a roll-up, downgraded to the
+    // one that does not, from a question nobody answered.
+    const missing = Array.from({ length: 3 }, (_, i) => row({ sessionId: `m${i}` }));
+    const result = await runResidencyAudit(
+      deps({
+        sessions: async () => missing,
+        listCanonical: async () => new Set<string>(),
+        headCanonical: async () => false,
+        askWitness: async () => null,
+      }),
+    );
+
+    expect(result.witness).toBe("unavailable");
+    expect(result.counts.noRecord).toBe(0);
+    expect(result.counts.residencyUnchecked).toBe(3);
+    // And it has to reach the operator as something to act on.
+    expect(failingFindings(result.findings).length).toBe(3);
   });
 
   test("a switched-off witness is never read as 'no copies'", async () => {

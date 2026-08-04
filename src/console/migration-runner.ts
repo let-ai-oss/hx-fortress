@@ -72,6 +72,23 @@ export type MigrationCommand = (typeof MIGRATION_COMMANDS)[number];
  *  it, pinning every staging signature at a minute until the daemon restarted. */
 let migrationInFlight = false;
 
+/** Held from the moment a migration command begins its PREAMBLE, before any
+ *  await. `migrationInFlight` is only set once the runner is entered, which is
+ *  after the preamble has already awaited a drain and a sequential-scan DELETE —
+ *  a window in which the replay's guard still reads false and a fresh drain can
+ *  start writing sidecars into the bucket the run is about to walk. */
+let migrationHold = 0;
+
+export function holdMigration(): () => void {
+  migrationHold += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    migrationHold -= 1;
+  };
+}
+
 export const MIGRATION_BUSY_REFUSAL =
   "a storage migration is already running on this fortress — wait for its answer. The run that " +
   "holds the pause is the one that releases it.";
@@ -82,7 +99,7 @@ export const MIGRATION_BUSY_REFUSAL =
  *  takes and arms no pause at all — the pause belongs to the swap — so anything
  *  gating on the row alone is unguarded for the whole expensive phase. */
 export function migrationIsRunning(): boolean {
-  return migrationInFlight;
+  return migrationInFlight || migrationHold > 0;
 }
 
 export function isMigrationCommand(value: unknown): value is MigrationCommand {

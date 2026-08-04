@@ -154,6 +154,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
     alsoAtLetaiAcknowledged: 0,
     notDeliveredHere: 0,
     noRecord: 0,
+    residencyUnchecked: 0,
     unknownProvenance: 0,
     notApplicable: 0,
   };
@@ -181,6 +182,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
       anyDestinationRecord: witness?.known.has(row.sessionId) ?? false,
       ingestChannel: row.ingestChannel,
       acknowledged: ack,
+      witnessAnswered: witness !== null,
     });
     countVerdict(counts, verdict, ack);
     findings.push({
@@ -230,6 +232,9 @@ function countVerdict(counts: RollUpCounts, verdict: ResidencyVerdict, acknowled
     case "not_delivered_here":
       counts.notDeliveredHere += 1;
       return;
+    case "residency_unchecked":
+      counts.residencyUnchecked += 1;
+      break;
     case "no_record":
       counts.noRecord += 1;
       return;
