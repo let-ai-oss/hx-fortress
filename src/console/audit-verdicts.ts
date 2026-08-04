@@ -19,7 +19,9 @@ export type ResidencyVerdict =
   | "not_delivered_here"
   | "no_record"
   | "missing_here"
+  | "lanes_hold_it"
   | "residency_unchecked"
+  | "residency_unwitnessable"
   | "unknown_provenance"
   | "not_applicable";
 
@@ -45,6 +47,10 @@ export interface VerdictInput {
    *  or never received them, and exempting it on the theory that they live
    *  elsewhere would erase the only surface that says so. */
   hasLaneObject: boolean;
+  /** This session's id may be SENT at all. An unattributed row is withheld by
+   *  design — `org_id IS NULL` means attribution was absent, so on a host that
+   *  ever served a second organization it may not be this one's. */
+  witnessAskable: boolean;
   /** The witness ANSWERED for this run. When it did not, `letaiCopy` and
    *  `anyDestinationRecord` are absences of an answer rather than answers, and a
    *  session missing from this bucket cannot be told apart from benign legacy. */
@@ -68,8 +74,23 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
   // The lane object is CHECKED. Exempting on the theory that the bytes live
   // elsewhere, without looking, would silently erase a session whose parent and
   // every lane are empty.
-  if (!input.fortressPresent && !input.hasOwnTranscript && input.hasLaneObject) {
-    return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";
+  if (
+    !input.fortressPresent &&
+    !input.hasOwnTranscript &&
+    input.hasLaneObject &&
+    // ...and the hub is not saying it routed a parent transcript here. Moving
+    // this ahead of the eligibility gate made it catch tunnel rows too, and
+    // without this clause it swallowed `not_delivered_here` — the one incident
+    // R8/R9 says is never downgraded. The hub writes its destination row inside
+    // the parent commit, independently of the forward to this fortress, so "stub
+    // with lanes" and "the parent never arrived" are reachable at once. Gateway
+    // and reconciled rows are never asked, so this is already false for them.
+    !input.anyDestinationRecord
+  ) {
+    // Its own verdict, not `unknown_provenance`: the channel IS recorded, and
+    // saying otherwise states a false fact on a compliance surface and inflates
+    // the unknown-provenance count.
+    return "lanes_hold_it";
   }
   if (!witnessEligible(input.ingestChannel)) {
     // Presence FIRST, inside this arm. Whether the object is still in the bucket
@@ -94,8 +115,19 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
   // let.ai holds no delivery record — a positive claim about a question never
   // put — and it is the verdict remediation calls benign legacy, so the incident
   // this audit exists to surface would read as nothing to do.
+  // Two different silences. "Nobody could answer" is recoverable — re-run when
+  // let.ai is reachable. "This id is never sent" is not: an unattributed session
+  // is deliberately withheld, so telling the operator to re-run leaves the fleet
+  // verdict stuck at failed with an instruction that can never clear it.
+  if (!input.witnessAskable) return "residency_unwitnessable";
   if (!input.witnessAnswered) return "residency_unchecked";
   if (input.anyDestinationRecord) return "not_delivered_here";
+  // Gone, and the hub holds no delivery record. `no_record` reads as benign
+  // legacy — "predates per-destination tracking, nothing to do" — and says
+  // nothing about the absent transcript, so a row that claims a transcript whose
+  // bytes are missing would PASS. The identical facts on a gateway row return
+  // `missing_here` and fail; only the channel differed.
+  if (input.hasOwnTranscript) return "missing_here";
   return "no_record";
 }
 
@@ -109,6 +141,7 @@ export function sessionCheckPasses(verdict: ResidencyVerdict, acknowledged: bool
   // Fails, because the object really is missing from this fortress. What is
   // unknown is only WHY, and an unknown is not a pass on a compliance surface.
   if (verdict === "residency_unchecked") return false;
+  if (verdict === "residency_unwitnessable") return false;
   if (verdict === "also_at_letai") return acknowledged;
   return true;
 }
@@ -125,7 +158,9 @@ export const VERDICT_HEADLINE: Record<ResidencyVerdict, string> = {
   also_at_letai: "held here, and a historical let.ai copy exists",
   not_delivered_here: "should be on this fortress, and is not",
   no_record: "no destination record at let.ai — predates per-destination tracking",
+  lanes_hold_it: "no transcript of its own — its agent lanes hold the bytes, and they are here",
   missing_here: "this fortress claims this session, and its transcript is not in the bucket",
+  residency_unwitnessable: "missing from this fortress, and not a session let.ai can be asked about",
   residency_unchecked: "missing from this fortress, and the witness did not answer",
   unknown_provenance: "upload channel unknown — not verified with let.ai",
   not_applicable: "not checked with let.ai — uploaded directly; id never sent",
@@ -138,7 +173,10 @@ export const VERDICT_CAUSE: Record<ResidencyVerdict, string> = {
   also_at_letai: "bytes at let.ai predate this fortress, or the session is also attributed to a let.ai-hosted org",
   not_delivered_here: "let.ai recorded this fortress as a destination and the object never arrived",
   no_record: "this session was uploaded before let.ai recorded per-destination delivery",
+  lanes_hold_it: "the parent row records no turns and at least one agent-lane object exists for it",
   missing_here: "the session row is live here and no canonical object exists under its prefix",
+  residency_unwitnessable:
+    "the object is not in this organization's bucket, and the session has no attribution, so its id is withheld from let.ai by design",
   residency_unchecked:
     "the object is not in this organization's bucket, and no answer came back about whether let.ai ever routed it here",
   unknown_provenance:
@@ -153,8 +191,12 @@ export const VERDICT_REMEDIATION: Record<ResidencyVerdict, string> = {
   not_delivered_here:
     "re-upload the session from the client that holds it, or ask let.ai to re-deliver it; this one is not acknowledgeable",
   no_record: "nothing to do — it is benign legacy, and it qualifies the verdict rather than failing it",
+  lanes_hold_it:
+    "nothing to do — this session records no turns of its own; its bytes are under its agent lanes, which are present",
   missing_here:
     "the transcript is gone from this fortress's own bucket; restore it from a client that still holds the session, or from a bucket version if object versioning is on",
+  residency_unwitnessable:
+    "the transcript is missing here and this session carries no organization attribution, so its id is never sent to let.ai; restore it from a client that still holds the session, or attribute the session and re-run",
   residency_unchecked:
     "the object is missing from this fortress and the cloud witness did not answer, so it cannot be told apart from benign legacy; re-run the audit once let.ai is reachable, or with the cloud witness on",
   unknown_provenance:
@@ -179,7 +221,9 @@ export interface RollUpCounts {
   notDeliveredHere: number;
   noRecord: number;
   missingHere: number;
+  lanesHoldIt: number;
   residencyUnchecked: number;
+  residencyUnwitnessable: number;
   unknownProvenance: number;
   notApplicable: number;
 }
@@ -227,6 +271,13 @@ export function rollUp(
     return {
       verdict: "failed",
       qualification: `${n} session${n === 1 ? "" : "s"} this fortress claims ${n === 1 ? "is" : "are"} not in its bucket`,
+    };
+  }
+  if (counts.residencyUnwitnessable > 0) {
+    const n = counts.residencyUnwitnessable;
+    return {
+      verdict: "failed",
+      qualification: `${n} session${n === 1 ? "" : "s"} missing here that let.ai cannot be asked about — ${n === 1 ? "it carries" : "they carry"} no organization attribution, so ${n === 1 ? "its id is" : "their ids are"} withheld by design`,
     };
   }
   if (counts.residencyUnchecked > 0) {

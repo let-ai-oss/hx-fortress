@@ -74,17 +74,41 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: true,
         ingestChannel: "tunnel",
-        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("not_delivered_here");
-    // No destination record at all is benign legacy, and its own verdict.
+    // No destination record, but the row claims a transcript and the bytes are
+    // gone: that is a LOSS, not benign legacy. `no_record` renders as "predates
+    // per-destination tracking, nothing to do" and says nothing about the absent
+    // object, so this would have passed the check — while the identical facts on
+    // a gateway row returned `missing_here` and failed. Only the channel differed.
     expect(
       verdictFor({
         fortressPresent: false,
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "tunnel",
-        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
+    ).toBe("missing_here");
+    // `no_record` keeps the case it was written for: a session with no transcript
+    // of its own, which the hub has no record of either.
+    expect(
+      verdictFor({
+        fortressPresent: false,
+        letaiCopy: false,
+        anyDestinationRecord: false,
+        ingestChannel: "tunnel",
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: false, hasLaneObject: false, }),
     ).toBe("no_record");
+    // And the stub exemption must never swallow a hub delivery record — the
+    // incident is reachable even when the lanes are present.
+    expect(
+      verdictFor({
+        fortressPresent: false,
+        letaiCopy: false,
+        anyDestinationRecord: true,
+        ingestChannel: "tunnel",
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: false, hasLaneObject: true, }),
+    ).toBe("not_delivered_here");
   });
 
   test("a copy at let.ai is a SEPARATE, weaker finding", () => {
@@ -93,7 +117,7 @@ describe("the verdict matrix", () => {
       letaiCopy: true,
       anyDestinationRecord: true,
       ingestChannel: "tunnel",
-      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
+      acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
     expect(verdict).toBe("also_at_letai");
     // Per SESSION it fails until acknowledged...
     expect(sessionCheckPasses(verdict, false)).toBe(false);
@@ -111,7 +135,7 @@ describe("the verdict matrix", () => {
       letaiCopy: false,
       anyDestinationRecord: false,
       ingestChannel: "reconciled",
-      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
+      acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
     expect(verdict).toBe("unknown_provenance");
     expect(unknownProvenanceCause("reconciled")).toContain("index outage");
     expect(unknownProvenanceCause(null)).toContain("predates channel tracking");
@@ -122,7 +146,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "gateway",
-        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
+        acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("not_applicable");
     expect(VERDICT_HEADLINE.not_applicable).toContain("id never sent");
   });
@@ -137,7 +161,9 @@ describe("the fleet roll-up", () => {
     notDeliveredHere: 0,
     noRecord: 0,
     missingHere: 0,
+    lanesHoldIt: 0,
     residencyUnchecked: 0,
+    residencyUnwitnessable: 0,
     unknownProvenance: 0,
     notApplicable: 0,
   };
@@ -327,6 +353,23 @@ describe("one audit run", () => {
     // The HUB's id shape, not the bare session id: let.ai keys its rows on
     // `${userId}:${family}:${sessionId}`, and a bare id matches nothing there.
     expect([...asked]).toEqual(["u1:claude:mine"]);
+  });
+
+  test("a withheld id is failed by its own name, not by one it can never clear", async () => {
+    // An unattributed session is never sent, so "re-run once let.ai is reachable"
+    // is an instruction that can never take effect — the fleet verdict would sit
+    // at failed forever with an unactionable remedy.
+    const result = await runResidencyAudit(
+      deps({
+        sessions: async () => [row({ sessionId: "orphan", orgAttributed: false })],
+        listCanonical: async () => new Set<string>(),
+        headCanonical: async () => false,
+      }),
+    );
+    expect(result.counts.residencyUnwitnessable).toBe(1);
+    expect(result.counts.residencyUnchecked).toBe(0);
+    expect(result.verdict).toBe("failed");
+    expect(result.qualification).toContain("withheld by design");
   });
 
   test("a witness that could not answer does not make a missing transcript benign", async () => {

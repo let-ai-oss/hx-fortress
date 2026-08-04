@@ -142,7 +142,7 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
         ingestChannel: input.row?.ingestChannel ?? null,
         acknowledged: input.witness.acknowledged,
         // This arm is built only when a run actually asked, so by construction.
-        witnessAnswered: true,
+        witnessAskable: true, witnessAnswered: true,
         // This surface is opened for one session the operator picked, and it has
         // already reported the object check on its own line above; the verdict
         // here is about the witness, so the parent-stub exemption does not apply.

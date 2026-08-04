@@ -209,7 +209,9 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
     notDeliveredHere: 0,
     noRecord: 0,
     missingHere: 0,
+    lanesHoldIt: 0,
     residencyUnchecked: 0,
+    residencyUnwitnessable: 0,
     unknownProvenance: 0,
     notApplicable: 0,
   };
@@ -241,6 +243,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
       acknowledged: ack,
       // Per ROW: a row excluded from the ask was not answered about, whatever
       // the run as a whole managed.
+      witnessAskable: asked.has(witnessIdOf(row)),
       witnessAnswered: witness !== null && asked.has(witnessIdOf(row)),
       hasOwnTranscript: row.eventCount > 0,
       hasLaneObject: laneOwners.has(`${row.userId}/${row.family}/${row.sessionId}`),
@@ -311,8 +314,14 @@ function countVerdict(counts: RollUpCounts, verdict: ResidencyVerdict, acknowled
     case "missing_here":
       counts.missingHere += 1;
       break;
+    case "lanes_hold_it":
+      counts.lanesHoldIt += 1;
+      break;
     case "residency_unchecked":
       counts.residencyUnchecked += 1;
+      break;
+    case "residency_unwitnessable":
+      counts.residencyUnwitnessable += 1;
       break;
     case "no_record":
       counts.noRecord += 1;

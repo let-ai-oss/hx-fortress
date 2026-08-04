@@ -89,7 +89,9 @@ const EMPTY_COUNTS: RollUpCounts = {
   notDeliveredHere: 0,
   noRecord: 0,
   missingHere: 0,
+    lanesHoldIt: 0,
   residencyUnchecked: 0,
+    residencyUnwitnessable: 0,
   unknownProvenance: 0,
   notApplicable: 0,
 };

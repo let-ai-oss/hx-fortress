@@ -659,20 +659,35 @@ export async function runFortressHost(
   // withdraws the refusal. It also does not survive the restart that an ENOSPC
   // or EIO makes likely. So the marker is a file, written before the sidecars
   // are rewritten and removed only once the pending set is on disk.
-  const replayMarkerDir = path.join(paths.runtimeRoot, "replay-incomplete");
+  // `.d`, because `replay-incomplete` was a FILE in the previous build and this
+  // is now a directory. An upgraded host that carried an outstanding marker would
+  // otherwise hit ENOTDIR on the readdir — swallowed, so the refusal silently
+  // lifts — and EEXIST on the mkdir, which re-parks every entry forever. A new
+  // name cannot collide with either.
+  const replayMarkerDir = path.join(paths.runtimeRoot, "replay-incomplete.d");
+  const legacyReplayMarker = path.join(paths.runtimeRoot, "replay-incomplete");
   const awaitReplay = async (): Promise<void> => {
     await replayInFlight?.catch(() => {});
     // A DIRECTORY, one file per unfinished drain. A single file is overwritten by
     // the next drain's own marker, so its read-back matches and the unlink
     // succeeds — withdrawing an outstanding refusal that drain never earned.
-    const outstanding = await readdir(replayMarkerDir).catch(() => [] as string[]);
-    if (outstanding.length > 0) {
+    const outstanding = await readdir(replayMarkerDir).catch((err: NodeJS.ErrnoException) =>
+      // ENOENT is the only "none". Anything else means the path exists and could
+      // not be read, which is an outstanding marker we cannot count — refuse.
+      err?.code === "ENOENT" ? ([] as string[]) : (["unreadable"] as string[]),
+    );
+    // A marker left by the previous build, before this became a directory.
+    const legacy = await readdir(paths.runtimeRoot)
+      .then((names) => names.includes("replay-incomplete"))
+      .catch(() => false);
+    if (outstanding.length > 0 || legacy) {
       throw new Error(
-        `${outstanding.length} parked-artifact replay(s) rewrote session sidecars but could not record ` +
+        `${outstanding.length + (legacy ? 1 : 0)} parked-artifact replay(s) rewrote session sidecars but could not record ` +
           "which sessions, so a migration resumed under the same id could skip them and cut over stale " +
           "ones. Nothing clears this on its own — the entries those drains consumed are already gone, so " +
           "a later replay has nothing to redo. Re-copy the affected sessions with a fresh migration run " +
-          `(a new run id re-carries everything), then remove ${replayMarkerDir} to allow it.`,
+          `(a new run id re-carries everything), then remove ${replayMarkerDir} (and ${legacyReplayMarker} ` +
+          "if a previous build left one) to allow it.",
       );
     }
   };
@@ -1076,9 +1091,11 @@ export async function runFortressHost(
     try {
       await daemonAudit.run(
         "system.audit_witness",
-        { engine: "audit witness", kind: intent.enabled ? "on" : "off" },
+        { engine: "audit witness", kind: intent.enabled === undefined ? "reconfirm" : intent.enabled ? "on" : "off" },
         async () => {
-          await applyCloudWitness(intent.enabled);
+          // Only when the writer meant to change it. An omitted `enabled` is a
+          // reconcile that carries acknowledgements and nothing else.
+          if (intent.enabled !== undefined) await applyCloudWitness(intent.enabled);
           for (const row of intent.reconfirm ?? []) {
             const db = postgres.isReady() ? resolveHxDb() : null;
             if (!db) break;

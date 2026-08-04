@@ -23,7 +23,11 @@ import { writePrivateJson } from "../host/private-json";
 export const WITNESS_SIGNAL = "SIGUSR2" as const;
 
 export interface WitnessIntent {
-  enabled: boolean;
+  /** Absent when the writer is not changing the setting. A reconcile that only
+   *  re-confirms acknowledgements must not carry a value it had to guess: the
+   *  published mirror is written by an explicit toggle, so on a host that never
+   *  ran one it is simply missing, and `?? false` there turns the witness OFF. */
+  enabled?: boolean;
   at: string;
   /** Acknowledgements the corrective pass asks to be re-confirmed, if any. */
   reconfirm?: Array<{ org: string; sessionId: string; reason: string }>;

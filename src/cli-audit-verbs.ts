@@ -188,9 +188,10 @@ async function acksVerb(args: readonly string[], deps: AuditVerbDeps): Promise<n
   }
   const pid = await daemonPidOf(deps);
   await writeWitnessIntent(paths.runtimeRoot, {
-    // The witness setting is not being changed here; the intent file is the
-    // channel, and its current value is re-asserted rather than guessed.
-    enabled: (await readPublishedAuditSettings(paths.runtimeRoot))?.cloudWitness ?? false,
+    // The witness setting is not being changed here, so it is OMITTED rather
+    // than re-asserted. The published mirror only exists on a host where someone
+    // ran an explicit toggle, so `?? false` was a guess — and one that switched
+    // the witness off on every fortress that had never touched it.
     at: (deps.now ?? ((): Date => new Date()))().toISOString(),
     reconfirm: unmatched.map((ack) => ({
       org: ack.org,
