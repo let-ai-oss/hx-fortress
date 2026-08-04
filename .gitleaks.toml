@@ -33,4 +33,5 @@ description = "credentialRef fixtures — 32-hex indirection ids, which are not 
 paths = [
   '''test/console-commands\.test\.ts''',
   '''test/console-runtime-files\.test\.ts''',
+  '''test/console-audit-trail\.test\.ts''',
 ]

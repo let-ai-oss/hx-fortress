@@ -631,7 +631,7 @@ describe("a budget refusal is a wait, not a failure", () => {
         asked.push(...ids);
         return {
           kind: "residencyWitness",
-          residencyWitness: ids.map((sessionId) => ({ sessionId, letaiCopy: true, hubRoutedHere: true })),
+          residencyWitness: ids.map((sessionId) => ({ sessionId, letaiCopy: true, hubRoutedHere: true, anyDestinationRecord: true })),
         };
       },
     });
