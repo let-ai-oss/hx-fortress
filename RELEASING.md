@@ -101,6 +101,15 @@ On a container `hx-fortress ui disable` refuses while `FORTRESS_UI_ENABLE` is
 set, and `systemctl` / `launchctl` mean nothing there. Unsetting the variable and
 redeploying is the equivalent act.
 
+**Before upgrading a container, check how it is started.** The image's
+`ENTRYPOINT` is now `hx-fortress container-run`, and it REFUSES unless it is
+pid 1 — it is what receives the runtime's SIGTERM and what orphans are
+re-parented to, and started under an init wrapper it can do neither. So a
+deployment that runs the image with `docker run --init`, with a shell wrapper,
+or with its own `entrypoint:` override will come up refusing on the first boot
+after the upgrade. Drop the wrapper, or run `hx-fortress host` directly as the
+entrypoint and supervise the console yourself.
+
 ## The untrusted window
 
 An older binary re-grants the daemon's write role full DML on its first boot,
