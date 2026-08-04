@@ -34,9 +34,12 @@ const MODULE_STATES = new Set<ModuleState>([
   "stopping",
   "failed",
 ]);
-const PG_PHASES = new Set<PostgresPhase>([
+/** Phases this build knows about — exported for tests. The parser deliberately
+ *  does NOT reject phases outside this set (cross-version tolerance). */
+export const KNOWN_PG_PHASES = new Set<PostgresPhase>([
   "acquiring",
   "initializing",
+  "retrying",
   "ready",
   "failed",
 ]);
@@ -91,7 +94,12 @@ function parseStatus(value: unknown): HostStatusSnapshot {
     if (!isRecord(value.postgres)) {
       throw new Error("postgres must be an object");
     }
-    if (!PG_PHASES.has(value.postgres.phase as PostgresPhase)) {
+    // Unknown phases PASS THROUGH as their raw string instead of throwing:
+    // the 0.16.1 reader crashed the status command and the TUI launch the
+    // moment a newer host wrote a phase it didn't know ("retrying") — a
+    // display surface must tolerate cross-version skew. Known phases still
+    // validate via PG_PHASES (kept for exhaustiveness + tests).
+    if (typeof value.postgres.phase !== "string" || value.postgres.phase.length === 0) {
       throw new Error("postgres.phase is invalid");
     }
     assertNullableString(value.postgres.reason, "postgres.reason");

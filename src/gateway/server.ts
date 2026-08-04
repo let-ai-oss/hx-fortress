@@ -28,6 +28,8 @@ import {
 import { isSessionDeleted } from "../ingest/delete";
 import { ingestAgentCommit, ingestCommit, maxIso, type IngestAttribution } from "../ingest/ingest";
 import { signalReconcile } from "../ingest/reconcile-signal";
+import { sanitizeDbError } from "../host/postgres/sanitize";
+import { retryOnceOnTransientDbError } from "../host/postgres/pg-errors";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestNotification } from "../host/types";
 import type { Embedder } from "../modules/embed-worker/openai";
@@ -226,29 +228,37 @@ async function ingestCommitMetadata(
   commit: CommitOutput,
   meta: Record<string, unknown> | null,
 ): Promise<void> {
-  const db = deps.db();
-  if (!db) {
+  if (!deps.db()) {
     // Canonical is durable but the index can't be written now → row-less. Nudge
     // the guarantor (symmetric with the tunnel path's PG-down branch).
     signalReconcile();
     return;
   }
   try {
-    await ingestCommit(db, {
-      attribution: attributionFromClaims(claims),
-      key,
-      chunkId,
-      replace,
-      chunkText,
-      totalBytes: commit.totalBytes,
-      componentCount: commit.componentCount,
-      meta,
+    // One transient-class retry (connection kill / advisory-lock 57014),
+    // re-resolving so it lands on a post-rotation pool. This whole path runs
+    // post-200 inside deferPostCommit — without the retry, a maxLifetime kill
+    // here leaves a permanently unindexed chunk the guarantor cannot see (it
+    // reconciles ROW-LESS sessions only).
+    await retryOnceOnTransientDbError(async () => {
+      const db = deps.db();
+      if (!db) throw new Error("postgres_not_ready");
+      await ingestCommit(db, {
+        attribution: attributionFromClaims(claims),
+        key,
+        chunkId,
+        replace,
+        chunkText,
+        totalBytes: commit.totalBytes,
+        componentCount: commit.componentCount,
+        meta,
+      });
     });
     deps.notify?.({ userExternalId: key.userId, orgExternalId: claims.org ?? null });
   } catch (err) {
     deps.logger.error("hx metadata ingest failed", {
       sessionId: key.sessionId,
-      error: err instanceof Error ? err.message : String(err),
+      error: sanitizeDbError(err),
     });
     // Row-less canonical: nudge the guarantor to re-index it soon.
     signalReconcile();
@@ -266,30 +276,34 @@ async function ingestAgentCommitMetadata(
   commit: CommitOutput,
   meta: Record<string, unknown> | null,
 ): Promise<void> {
-  const db = deps.db();
-  if (!db) {
+  if (!deps.db()) {
     // Row-less canonical (PG not ready) → nudge the guarantor, as above.
     signalReconcile();
     return;
   }
   try {
-    await ingestAgentCommit(db, {
-      attribution: attributionFromClaims(claims),
-      key,
-      agentId,
-      chunkId,
-      replace,
-      chunkText,
-      totalBytes: commit.totalBytes,
-      componentCount: commit.componentCount,
-      meta,
+    // Same transient-class retry as the parent path (post-200, guarantor-blind).
+    await retryOnceOnTransientDbError(async () => {
+      const db = deps.db();
+      if (!db) throw new Error("postgres_not_ready");
+      await ingestAgentCommit(db, {
+        attribution: attributionFromClaims(claims),
+        key,
+        agentId,
+        chunkId,
+        replace,
+        chunkText,
+        totalBytes: commit.totalBytes,
+        componentCount: commit.componentCount,
+        meta,
+      });
     });
     deps.notify?.({ userExternalId: key.userId, orgExternalId: claims.org ?? null });
   } catch (err) {
     deps.logger.error("hx agent metadata ingest failed", {
       sessionId: key.sessionId,
       agentId,
-      error: err instanceof Error ? err.message : String(err),
+      error: sanitizeDbError(err),
     });
     // Row-less canonical: nudge the guarantor to re-index it soon.
     signalReconcile();
@@ -316,7 +330,7 @@ function deferPostCommit(
     // try/log, so without this its errors would vanish.
     logger.error("post-commit work failed", {
       laneKey,
-      error: err instanceof Error ? err.message : String(err),
+      error: sanitizeDbError(err),
     });
   });
   postCommitChains.set(laneKey, next);
@@ -566,7 +580,7 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
       } catch (err) {
         deps.logger.error("gateway handler failed", {
           path: url.pathname,
-          error: err instanceof Error ? err.message : String(err),
+          error: sanitizeDbError(err),
         });
         return json({ error: "internal_error" }, 500);
       }

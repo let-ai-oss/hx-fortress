@@ -1,4 +1,5 @@
-import type { PostgresPhase, PostgresProvider } from "../types";
+import type { PostgresPhase, PostgresProvider, ScopedLogger } from "../types";
+import { sanitizeDbError } from "./sanitize";
 
 export interface EmbeddedDeps {
   /** Download/extract the binaries; resolves to the `bin/` directory. */
@@ -67,7 +68,7 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
         reason = null;
       } catch (error) {
         phase = "failed";
-        reason = error instanceof Error ? error.message : String(error);
+        reason = sanitizeDbError(error);
       }
     },
     async stop() {
@@ -92,26 +93,134 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
   };
 }
 
+export interface ExternalPostgresOptions {
+  logger?: ScopedLogger;
+  /** Background re-probe cadence (ms) after a failed attempt. Default 15 s,
+   *  with capped backoff (15 → 30 → 60 s). */
+  retryMs?: number;
+  maxRetryMs?: number;
+  /** Outer deadline for one WHOLE migrate attempt (probe already succeeded):
+   *  the per-batch SET LOCAL bounds each statement server-side; this bounds a
+   *  hang the batches can't see (a black-holed connect mid-run, a never-settling
+   *  extension probe). Default: the migration statement timeout + 60 s margin.
+   *  Per-migration journaling makes successive attempts converge incrementally,
+   *  so a legitimately long multi-migration run finishes across attempts. */
+  migrateDeadlineMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** External-PG provider (component 3 of the PG-layer resilience design).
+ *
+ *  The old shape ran ONE boot probe, swallowed its failure into phase "failed"
+ *  and left `dsn()` null forever — a fortress that raced its database's boot
+ *  (or hit one transient DNS blip) stayed PG-less until a human redeployed.
+ *  Now: `start()` returns after the FIRST attempt so the tunnel opens either
+ *  way, and an INFINITE background loop (each attempt time-bounded — a finite
+ *  attempt cap would recreate the dsn-null-forever incident) re-probes until
+ *  probe + migrations succeed. Phase is "retrying" between attempts and flips
+ *  to "ready" ONLY after migrate; `dsn()` is non-null from ready. */
 export function createExternalPostgres(
   url: string,
-  probeReady: () => Promise<boolean>,
-  migrate?: () => Promise<void>,
+  probeReady: () => Promise<void>,
+  migrate: () => Promise<void>,
+  options: ExternalPostgresOptions = {},
 ): PostgresProvider {
+  const logger = options.logger;
+  const retryMs = options.retryMs ?? 15_000;
+  const maxRetryMs = options.maxRetryMs ?? 60_000;
+  const migrateDeadlineMs = options.migrateDeadlineMs ?? 360_000;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
   let phase: PostgresPhase = "initializing";
   let reason: string | null = null;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let attemptBusy = false;
+  let attempts = 0;
+  let listener: ((snapshot: { phase: PostgresPhase; reason: string | null }) => void) | null = null;
+
+  const setPhase = (p: PostgresPhase, r: string | null): void => {
+    phase = p;
+    reason = r;
+    // stop() suppresses emissions so a late background flip can't write status
+    // after the runtime's final "stopped" snapshot.
+    if (!stopped) listener?.({ phase, reason });
+  };
+
+  /** One bounded migrate attempt. The loser of the outer race keeps running
+   *  detached with a PURE-SWALLOW observer: it never mutates phase/reason and
+   *  never re-fires the ready path — its work is safe to complete server-side
+   *  (per-batch advisory lock serializes it against the retry; the journal's
+   *  same-batch PRIMARY KEY makes a late duplicate apply roll back atomically). */
+  const raceMigrate = async (): Promise<void> => {
+    const attempt = migrate();
+    attempt.catch(() => {}); // observer — Bun exits on unhandled rejections
+    let timedOut = false;
+    const won = await Promise.race([
+      attempt.then(
+        () => true,
+        () => false,
+      ),
+      sleep(migrateDeadlineMs).then(() => {
+        timedOut = true;
+        return false;
+      }),
+    ]);
+    if (won) return;
+    if (timedOut) throw new Error(`migrate attempt exceeded ${migrateDeadlineMs}ms`);
+    // The attempt itself rejected — surface its (sanitized) reason.
+    return attempt;
+  };
+
+  const runAttempt = async (): Promise<boolean> => {
+    if (attemptBusy) return false; // single-flight per attempt
+    attemptBusy = true;
+    attempts += 1;
+    try {
+      await probeReady();
+      await raceMigrate();
+      setPhase("ready", null);
+      logger?.info("external postgres ready", { attempts });
+      return true;
+    } catch (error) {
+      const message = sanitizeDbError(error);
+      setPhase("retrying", message);
+      logger?.error("external postgres attempt failed — will retry", {
+        attempt: attempts,
+        error: message,
+      });
+      return false;
+    } finally {
+      attemptBusy = false;
+    }
+  };
+
+  const backoff = (): number => Math.min(retryMs * 2 ** Math.min(attempts - 1, 2), maxRetryMs);
+
+  const scheduleRetry = (): void => {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      void runAttempt().then((ok) => {
+        if (!ok) scheduleRetry();
+      });
+    }, backoff());
+    (timer as { unref?: () => void }).unref?.();
+  };
+
   return {
     async start() {
-      try {
-        if (!(await probeReady())) throw new Error("external postgres unreachable");
-        if (migrate) await migrate();
-        phase = "ready";
-        reason = null;
-      } catch (error) {
-        phase = "failed";
-        reason = error instanceof Error ? error.message : String(error);
-      }
+      // Returns after the FIRST attempt either way — the tunnel must open even
+      // while the database is still down (the loop keeps retrying behind it).
+      const ok = await runAttempt();
+      if (!ok) scheduleRetry();
     },
-    async stop() {},
+    async stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
     status() {
       return { phase, reason };
     },
@@ -122,6 +231,9 @@ export function createExternalPostgres(
     // the operator's single URL. Least-privilege there is the operator's job.
     dsn() {
       return phase === "ready" ? url : null;
+    },
+    onPhaseChange(l) {
+      listener = l;
     },
   };
 }

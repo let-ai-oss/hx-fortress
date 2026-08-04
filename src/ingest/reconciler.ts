@@ -14,6 +14,7 @@
 // here → left null / never demotes a real org). Paced, single-flight is the
 // caller's responsibility (the scheduler), non-throwing per session.
 
+import { sanitizeDbError } from "../host/postgres/sanitize";
 import { and, eq, isNull } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
@@ -213,7 +214,7 @@ export async function reconcileOrphans(
       res.errors += 1;
       if (laneIdx < 0) failedParents.add(baseKey); // parent threw → defer its lanes this pass
       opts.logger?.warn?.("reconciler: skipped one orphan", {
-        err: String(err),
+        err: sanitizeDbError(err),
         sessionId: key.sessionId,
         family: key.family,
       });
@@ -227,7 +228,7 @@ export async function reconcileOrphans(
       const tc = await correctTitles(db, store, { sleep, logger: opts.logger });
       res.titlesCorrected = tc.corrected;
     } catch (err) {
-      opts.logger?.warn?.("reconciler: title correction pass failed", { err: String(err) });
+      opts.logger?.warn?.("reconciler: title correction pass failed", { err: sanitizeDbError(err) });
     }
   }
 

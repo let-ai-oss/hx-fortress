@@ -1,3 +1,4 @@
+import { sanitizeDbError } from "./postgres/sanitize";
 import type {
   Clock,
   CloudConnection,
@@ -47,6 +48,15 @@ export class HostRuntime {
     this.state = "starting";
     const startedAt = this.clock().toISOString();
     this.startedAt = startedAt;
+    // The external provider's re-probe loop flips retrying → ready long after
+    // start() returned; without this rewrite a recovered fortress would report
+    // "retrying" in status.json until its next lifecycle transition. Subscribed
+    // before postgres.start() so no transition is missed; writes go through the
+    // same single-writer queue as the lifecycle snapshots (the temp file is
+    // PID-scoped — two same-process writers would race the rename).
+    this.dependencies.postgres.onPhaseChange?.(() => {
+      void this.writeStatus(this.clock().toISOString());
+    });
     await this.writeStatus(startedAt);
 
     try {
@@ -108,25 +118,36 @@ export class HostRuntime {
     await this.writeStatus(this.clock().toISOString());
   }
 
-  private async writeStatus(updatedAt: string): Promise<void> {
-    // Secret-free vault view (Low) — only included when a vault is configured, so
-    // a snapshot without one keeps its exact prior shape.
-    const vault = this.dependencies.vaultStatus?.() ?? null;
-    const snapshot: HostStatusSnapshot = {
-      schemaVersion: 1,
-      host: {
-        state: this.state,
-        pid: this.pid,
-        startedAt: this.startedAt,
-        updatedAt,
-        error: this.error,
-      },
-      connection: this.dependencies.connection.status(),
-      postgres: this.dependencies.postgres.status(),
-      modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
-      ...(vault ? { vault } : {}),
-    };
+  /** Serialize ALL same-process status writes (lifecycle transitions + the
+   *  provider's background phase flips): FileStatusStore's temp path is
+   *  PID-scoped, so two concurrent writers would interleave write/rename.
+   *  Never rejects — writeStatusNow is fully non-throwing. */
+  private statusQueue: Promise<void> = Promise.resolve();
+  private writeStatus(updatedAt: string): Promise<void> {
+    const next = this.statusQueue.then(() => this.writeStatusNow(updatedAt));
+    this.statusQueue = next;
+    return next;
+  }
+
+  private async writeStatusNow(updatedAt: string): Promise<void> {
     try {
+      // Secret-free vault view (Low) — only included when a vault is configured,
+      // so a snapshot without one keeps its exact prior shape.
+      const vault = this.dependencies.vaultStatus?.() ?? null;
+      const snapshot: HostStatusSnapshot = {
+        schemaVersion: 1,
+        host: {
+          state: this.state,
+          pid: this.pid,
+          startedAt: this.startedAt,
+          updatedAt,
+          error: this.error,
+        },
+        connection: this.dependencies.connection.status(),
+        postgres: this.dependencies.postgres.status(),
+        modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
+        ...(vault ? { vault } : {}),
+      };
       await this.dependencies.statusStore.write(snapshot);
     } catch (error) {
       this.dependencies.logger.error(
@@ -149,6 +170,9 @@ export class HostRuntime {
   }
 }
 
+/** status.json's host.error is a local surface, but a driver error passing
+ *  through here can embed the DSN or (via drizzle's wrapper) the failing SQL +
+ *  bound params — sanitize once for every host.error write. */
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return sanitizeDbError(error);
 }

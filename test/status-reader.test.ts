@@ -68,13 +68,34 @@ describe("FileStatusReader", () => {
       "Invalid Fortress status: modules[0].id is invalid",
     );
 
+    // Postgres phases are TOLERANT: an unknown phase passes through as its raw
+    // string (a 0.16.1 reader crashed the status/TUI surface the moment a newer
+    // host wrote "retrying" — display surfaces must survive version skew). Only
+    // a non-string/empty phase is invalid.
     await writeStatus({
       ...snapshot(),
-      postgres: { phase: "bogus", reason: null },
+      postgres: { phase: "phase-from-the-future", reason: null },
+    });
+    const skewed = await new FileStatusReader(statusPath).read();
+    expect(skewed?.postgres.phase).toBe("phase-from-the-future" as never);
+
+    await writeStatus({
+      ...snapshot(),
+      postgres: { phase: "", reason: null },
     });
     await expect(new FileStatusReader(statusPath).read()).rejects.toThrow(
       "Invalid Fortress status: postgres.phase is invalid",
     );
+  });
+
+  test("accepts the retrying phase (external provider re-probe loop)", async () => {
+    await writeStatus({
+      ...snapshot(),
+      postgres: { phase: "retrying", reason: "external postgres attempt failed" },
+    });
+    const status = await new FileStatusReader(statusPath).read();
+    expect(status?.postgres.phase).toBe("retrying");
+    expect(status?.postgres.reason).toBe("external postgres attempt failed");
   });
 
   async function writeStatus(value: unknown): Promise<void> {
