@@ -102,16 +102,27 @@ export async function applyBootstrapUser(args: {
   }
   const now = args.now?.() ?? new Date();
   const file = await args.users.load();
-  const existing = file.users.find((user) => user.login === login && !user.deletedAt);
+  // A TOMBSTONE COUNTS. Matching only live users let a soft-deleted login fall
+  // through to `create`, which rebuilds the list with `.filter(u => u.login !==
+  // login)` and drops the tombstone the users file documents as load-bearing —
+  // so an operator removed for cause was restored with a fresh 24-hour setup
+  // link on the next container redeploy, and the trail could no longer resolve
+  // the removal.
+  const existing = file.users.find((user) => user.login === login);
   if (existing) {
     // `ui user create` would fail here, and resetting on a redeploy is a
     // takeover, so the command is printed rather than run.
     return {
       created: false,
-      lines: [
-        `console account ${login} already exists — leaving it alone`,
-        `to issue a fresh setup link: hx-fortress ui user reset ${login}`,
-      ],
+      lines: existing.deletedAt
+        ? [
+            `console account ${login} was removed on ${existing.deletedAt} — not re-creating it`,
+            `if that removal is to be undone, do it deliberately: hx-fortress ui user create ${login} --role operator`,
+          ]
+        : [
+            `console account ${login} already exists — leaving it alone`,
+            `to issue a fresh setup link: hx-fortress ui user reset ${login}`,
+          ],
     };
   }
   const created = await args.users.create(login, "operator", now);

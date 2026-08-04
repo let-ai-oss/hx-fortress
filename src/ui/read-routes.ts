@@ -103,11 +103,11 @@ export const READ_ROUTES: readonly RouteSpec[] = [
     // others answer from this host alone.
     ...(path === READ_PATHS.verify ? { bucket: "storeOp" as const } : {}),
   })),
-  { method: "GET", path: READ_AUDITED_PATHS.report, cls: "read-audited" },
-  { method: "GET", path: READ_AUDITED_PATHS.reportPdf, cls: "read-audited" },
-  { method: "GET", path: READ_AUDITED_PATHS.logsExport, cls: "read-audited" },
-  { method: "GET", path: READ_AUDITED_PATHS.auditExport, cls: "read-audited" },
-  { method: "POST", path: READ_AUDITED_PATHS.proofCopyAck, cls: "read-audited" },
+  { method: "GET", path: READ_AUDITED_PATHS.report, cls: "read-audited", bucket: "auditedRead" },
+  { method: "GET", path: READ_AUDITED_PATHS.reportPdf, cls: "read-audited", bucket: "auditedRead" },
+  { method: "GET", path: READ_AUDITED_PATHS.logsExport, cls: "read-audited", bucket: "auditedRead" },
+  { method: "GET", path: READ_AUDITED_PATHS.auditExport, cls: "read-audited", bucket: "auditedRead" },
+  { method: "POST", path: READ_AUDITED_PATHS.proofCopyAck, cls: "read-audited", bucket: "auditedRead" },
 ];
 
 // -- The port -----------------------------------------------------------------

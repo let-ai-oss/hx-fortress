@@ -178,12 +178,19 @@ export async function watchLines(
       }
       if (signal.aborted) break;
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, pollMs);
-        const abort = (): void => {
+        // Removed on the TIMER path too. `{ once: true }` only unregisters when
+        // the event fires, so every ordinary poll left a listener behind — ten a
+        // second at the default interval, for the life of a follower. Both real
+        // followers are long-lived: `hx-fortress logs` follows unconditionally,
+        // and the console's Logs tab holds an SSE stream open.
+        const done = (): void => {
           clearTimeout(timer);
+          signal.removeEventListener("abort", abort);
           resolve();
         };
-        signal.addEventListener("abort", abort, { once: true });
+        const abort = (): void => done();
+        const timer = setTimeout(done, pollMs);
+        signal.addEventListener("abort", abort);
       });
     }
     // One last pass so a line written just before the abort is not lost.

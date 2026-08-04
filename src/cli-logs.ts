@@ -42,14 +42,19 @@ export function parseLogsArgs(args: readonly string[]): ParsedLogsArgs {
   let follow = true;
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (arg === "--lines") {
+    // `-n` too, because that is what `help` publishes and what the console's
+    // Command Line panel renders. Consuming only `--lines` left `-n` matched by
+    // the `startsWith("-")` skip below while its VALUE fell through to the
+    // module filter: `hx-fortress logs -n 100` filtered to a module named "100",
+    // printed nothing, and followed forever.
+    if (arg === "--lines" || arg === "-n") {
       const value = Number(args[i + 1]);
       if (Number.isFinite(value) && value >= 0) linesBack = Math.trunc(value);
       i += 1;
       continue;
     }
-    if (arg.startsWith("--lines=")) {
-      const value = Number(arg.slice("--lines=".length));
+    if (arg.startsWith("--lines=") || arg.startsWith("-n=")) {
+      const value = Number(arg.slice(arg.indexOf("=") + 1));
       if (Number.isFinite(value) && value >= 0) linesBack = Math.trunc(value);
       continue;
     }

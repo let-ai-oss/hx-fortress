@@ -107,10 +107,24 @@ export function credentialsVersion(creds: VaultCredentials | null): number {
 export async function readVaultCredentials(): Promise<VaultCredentials | null> {
   const file = credentialsPath();
   if (!existsSync(file)) return null;
+  const text = await readFile(file, "utf8").catch((err: NodeJS.ErrnoException) => {
+    if (err?.code === "ENOENT") return null;
+    throw err;
+  });
+  if (text === null) return null;
   try {
-    return JSON.parse(await readFile(file, "utf8")) as VaultCredentials;
-  } catch {
-    return null;
+    return JSON.parse(text) as VaultCredentials;
+  } catch (err) {
+    // ABSENT and UNPARSEABLE are different answers. Returning null for both made
+    // `updateVaultCredentials` read `expected = 0`, pass its own CAS re-read
+    // (also null), and write `{ ...next, version: 1 }` — dropping every field the
+    // mutator does not carry, `openaiApiKey` included, and rewinding the CAS
+    // counter. A torn write became permanent loss. The repo's own JsonCasStore
+    // refuses on corrupt input for exactly this reason.
+    throw new Error(
+      `${file} exists but is not valid JSON, so this fortress will not overwrite it`,
+      { cause: err },
+    );
   }
 }
 

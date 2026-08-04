@@ -66,9 +66,21 @@ export function consoleUpdateGate(
   trustedKeys: readonly TrustedSigningKey[] = TRUSTED_SIGNING_KEYS,
   enforcing: boolean = CONSOLE_SIGNATURE_ENFORCE,
 ): ConsoleUpdateGate {
-  if (hasProductionAnchor(trustedKeys)) return { enforce: true, warning: null };
-  if (enforcing) throw new Error(productionAnchorRefusal());
-  return { enforce: false, warning: UNSIGNED_BUILD_WARNING };
+  // BOTH conditions. Enforcing on the anchor alone made the release runbook's own
+  // sequence break the Update button: rung 8 bakes production anchors while its
+  // acceptance criterion is that the assets still carry no `.sig`, and signing
+  // does not start until rung 12 — a separate later release. For that whole
+  // window every console-initiated update failed on a missing signature, which
+  // is the outcome this file names as the one to avoid.
+  //
+  // The refusal keeps its own case: asking for enforcement with nothing to
+  // enforce with is a misconfiguration, not a posture.
+  if (enforcing && !hasProductionAnchor(trustedKeys)) throw new Error(productionAnchorRefusal());
+  if (hasProductionAnchor(trustedKeys) && enforcing) return { enforce: true, warning: null };
+  return {
+    enforce: false,
+    warning: hasProductionAnchor(trustedKeys) ? null : UNSIGNED_BUILD_WARNING,
+  };
 }
 
 /** The detached-signature sidecar written next to an artifact as `<name>.sig`.

@@ -50,6 +50,12 @@ export const BUCKETS = {
    *  route that reaches the object store is still a read, but it is the one that
    *  can be made to cost money and latency from outside. */
   storeOp: { limit: 60, windowMs: 60_000 },
+  /** The read routes that leave a record of themselves. Keyed remote-key. Each
+   *  call appends to `hx.admin_audit`, which no role holds DELETE on and nothing
+   *  sweeps — so an unmetered one lets a READONLY session grow the embedded
+   *  Postgres without bound and without an operator remedy short of dropping the
+   *  database. Generous, because these are legitimate operator exports. */
+  auditedRead: { limit: 60, windowMs: 60_000 },
 } as const satisfies Record<string, BucketPolicy>;
 
 export type BucketName = keyof typeof BUCKETS;

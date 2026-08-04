@@ -195,11 +195,15 @@ describe("the console's verification posture", () => {
     expect(consoleUpdateGate()).toEqual({ enforce: false, warning: UNSIGNED_BUILD_WARNING });
   });
 
-  test("with a production anchor baked in, the console path enforces", () => {
-    const gateResult = consoleUpdateGate([
-      { keyid: `${PRODUCTION_KEYID_PREFIX}2026-08`, publicKey: "AAAA", production: true },
-    ]);
-    expect(gateResult).toEqual({ enforce: true, warning: null });
+  test("an anchor alone does NOT enforce — the flag has to be on too", () => {
+    // The runbook bakes production anchors at rung 8, whose acceptance criterion
+    // is that the assets still carry no `.sig`; signing starts at rung 12, a
+    // separate later release. Enforcing on the anchor alone made every
+    // console-initiated update fail on a missing signature for that whole
+    // window — the outcome the gate exists to avoid.
+    const anchors = [{ keyid: `${PRODUCTION_KEYID_PREFIX}2026-08`, publicKey: "AAAA", production: true }];
+    expect(consoleUpdateGate(anchors, false)).toEqual({ enforce: false, warning: null });
+    expect(consoleUpdateGate(anchors, true)).toEqual({ enforce: true, warning: null });
   });
 
   test("enforcement against development-only anchors is a NAMED refusal", () => {

@@ -130,7 +130,7 @@ END $$`);
 
   test("re-running every 0015+ file on an already-migrated cluster is a clean no-op", async () => {
     const exec = makeMigrationExec(dsn);
-    for (const migration of migrations.filter((m) => /^00(1[5-8])_/.test(m.name))) {
+    for (const migration of migrations.filter((m) => /^00(1[5-9]|2[0-9])_/.test(m.name))) {
       await exec.exec(migration.sql);
     }
   });

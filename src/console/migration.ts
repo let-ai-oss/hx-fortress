@@ -547,7 +547,22 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
       result.switched = true;
 
       result.phase = "verifying";
-      const missing = await verifyTarget(deps);
+      let missing: string[];
+      try {
+        missing = await verifyTarget(deps);
+      } catch (err) {
+        // The cut ALREADY HAPPENED. Letting this throw discarded the whole
+        // result, so the run recorded "failed at switching" while the
+        // credentials named the target and the daemon served it — telling the
+        // operator to retry a swap that is done. The rebind path three blocks up
+        // has exactly this guard; verification lacked it.
+        result.phase = "done";
+        result.aborted =
+          `the switch completed, but this run could not verify the new bucket (${
+            err instanceof Error ? err.message : String(err)
+          }). Nothing is lost — the source still holds everything — but the move is unverified; re-run the audit.`;
+        return result;
+      }
       result.phase = "done";
       if (missing.length > 0) {
         // The swap already happened, so this is a report and not a rollback: the

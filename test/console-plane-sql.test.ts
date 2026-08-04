@@ -41,7 +41,7 @@ describe("migrations 0015+", () => {
     // migration could not GRANT to a role that does not exist yet on a fresh
     // cluster, could never be corrected once applied (name-keyed journal), and
     // its OWNER TO aborts the upgrade on an external Postgres.
-    const later = migrations.filter((m) => /^00(1[5-8])_/.test(m.name));
+    const later = migrations.filter((m) => /^00(1[5-9]|2[0-9])_/.test(m.name));
     expect(later.length).toBeGreaterThan(0);
     for (const migration of later) {
       const sql = statementsOnly(migration.sql);
