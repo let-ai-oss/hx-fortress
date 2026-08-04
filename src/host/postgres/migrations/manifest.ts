@@ -35,6 +35,7 @@ import sql0018Roster from "./0018_roster.sql" with { type: "text" };
 import sql0019MigrationRuns from "./0019_migration_runs.sql" with { type: "text" };
 import sql0020ResidencyUnchecked from "./0020_residency_unchecked.sql" with { type: "text" };
 import sql0021MissingHere from "./0021_missing_here.sql" with { type: "text" };
+import sql0022CloudWitnessDefault from "./0022_cloud_witness_default.sql" with { type: "text" };
 import sql0016AuditRefFile from "./0016_audit_ref_file.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
@@ -97,4 +98,5 @@ export const migrations: Migration[] = [
   { name: "0019_migration_runs", sql: sql0019MigrationRuns },
   { name: "0020_residency_unchecked", sql: sql0020ResidencyUnchecked },
   { name: "0021_missing_here", sql: sql0021MissingHere },
+  { name: "0022_cloud_witness_default", sql: sql0022CloudWitnessDefault },
 ];

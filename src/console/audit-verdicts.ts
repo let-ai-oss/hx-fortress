@@ -38,8 +38,13 @@ export interface VerdictInput {
   acknowledged: boolean;
   /** This session records turns of its own. A turn-less parent stub keeps its
    *  bytes under the agent-lane prefixes, so no object under the parent prefix
-   *  is expected and its absence is not a loss. */
+   *  is expected. */
   hasOwnTranscript: boolean;
+  /** At least one `:a:<agentId>` lane object exists for this session. Checked
+   *  rather than assumed: a stub with no lane objects either has lost its bytes
+   *  or never received them, and exempting it on the theory that they live
+   *  elsewhere would erase the only surface that says so. */
+  hasLaneObject: boolean;
   /** The witness ANSWERED for this run. When it did not, `letaiCopy` and
    *  `anyDestinationRecord` are absences of an answer rather than answers, and a
    *  session missing from this bucket cannot be told apart from benign legacy. */
@@ -53,6 +58,19 @@ export function witnessEligible(ingestChannel: string | null): boolean {
 }
 
 export function verdictFor(input: VerdictInput): ResidencyVerdict {
+  // Ahead of the eligibility gate, because a session with no transcript of its
+  // own has no expected object on ANY channel. Placing it inside the ineligible
+  // arm left a tunnel-channel stub — which `ingestAgentCommit` creates whenever a
+  // child chunk arrives first over the tunnel — failing the fleet verdict, with
+  // remediation telling the operator to restore data that was never under that
+  // prefix.
+  //
+  // The lane object is CHECKED. Exempting on the theory that the bytes live
+  // elsewhere, without looking, would silently erase a session whose parent and
+  // every lane are empty.
+  if (!input.fortressPresent && !input.hasOwnTranscript && input.hasLaneObject) {
+    return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";
+  }
   if (!witnessEligible(input.ingestChannel)) {
     // Presence FIRST, inside this arm. Whether the object is still in the bucket
     // is a local fact that needs no witness, and the engine has already paid a
@@ -66,7 +84,7 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     // has verdicts that say MORE than "missing" — not_delivered_here when let.ai
     // recorded a delivery here, residency_unchecked when nobody answered — and
     // testing presence ahead of the gate would make both unreachable.
-    if (!input.fortressPresent && input.hasOwnTranscript) return "missing_here";
+    if (!input.fortressPresent) return "missing_here";
     // Present, and never named to let.ai, so there is nothing to ask about — and
     // one whose channel is unknown must not be assumed to be either.
     return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";

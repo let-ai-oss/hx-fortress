@@ -126,6 +126,22 @@ export function canonicalKeyOf(row: AuditSessionRow): string {
   return [row.userId, row.family, row.sessionId, "canonical.ndjson"].join("/");
 }
 
+/**
+ * The id the HUB knows this session by.
+ *
+ * let.ai keys its attribution and destination rows on `sessionRowId`, which is
+ * `${userId}:${family}:${sessionId}` — not the bare session id. Sending the bare
+ * one produced a well-formed, non-null answer in which every field was false for
+ * every id, because nothing could match: `also_at_letai` became unreachable, and
+ * so did `not_delivered_here`, which is the one verdict that fails a roll-up and
+ * the incident this audit exists to raise. A lost transcript read as benign
+ * legacy instead. Both sides were internally consistent, which is why it took a
+ * cross-repo trace to see.
+ */
+export function witnessIdOf(row: AuditSessionRow): string {
+  return [row.userId, row.family, row.sessionId].join(":");
+}
+
 export function ackKey(org: string, sessionId: string): string {
   return [org, sessionId].join(" ");
 }
@@ -161,11 +177,28 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   // filter exists for. Naming them buys nothing either: the hub answers all-false
   // for an id outside its reach, which reads back as benign legacy.
   const eligible = rows.filter((r) => witnessEligible(r.ingestChannel) && r.orgAttributed);
-  const witness = deps.askWitness ? await deps.askWitness(eligible.map((r) => r.sessionId)) : null;
+  // Which rows were actually ASKED about. `witnessAnswered` is otherwise a
+  // property of the run, so a row excluded from the ask still entered the verdict
+  // with both witness facts false and `witnessAnswered: true` — hard negatives
+  // from a question nobody put, which is the downgrade this engine already
+  // condemns two comments above.
+  const asked = new Set(eligible.map(witnessIdOf));
+  const witness = deps.askWitness ? await deps.askWitness(eligible.map(witnessIdOf)) : null;
   // Off (nobody asked) and unavailable (asked, unanswered) are different facts
   // about this organization, and the run reports which one it was.
   const witnessState: WitnessState = witness ? "attested" : deps.askWitness ? "unavailable" : "off";
   const acknowledged = await deps.acknowledged();
+
+  // Which sessions have at least one `:a:<agentId>` lane object in the bucket.
+  // `listCanonical` already enumerates lanes as their composite session id, so
+  // this costs one pass over a set the engine is holding anyway.
+  const laneOwners = new Set<string>();
+  for (const key of present) {
+    const parts = key.split("/");
+    const sid = parts[2] ?? "";
+    const lane = sid.indexOf(":a:");
+    if (lane > 0) laneOwners.add(`${parts[0]}/${parts[1]}/${sid.slice(0, lane)}`);
+  }
 
   const findings: AuditFinding[] = [];
   const counts: RollUpCounts = {
@@ -200,12 +233,17 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
     const ack = acknowledged.has(ackKey(row.org, row.sessionId));
     const verdict = verdictFor({
       fortressPresent,
-      letaiCopy: witness?.copies.has(row.sessionId) ?? false,
-      anyDestinationRecord: witness?.known.has(row.sessionId) ?? false,
+      // Looked up under the SAME id the ask carried. Sending the hub's composite
+      // and reading back under the bare one is the same defect twice over.
+      letaiCopy: witness?.copies.has(witnessIdOf(row)) ?? false,
+      anyDestinationRecord: witness?.known.has(witnessIdOf(row)) ?? false,
       ingestChannel: row.ingestChannel,
       acknowledged: ack,
-      witnessAnswered: witness !== null,
+      // Per ROW: a row excluded from the ask was not answered about, whatever
+      // the run as a whole managed.
+      witnessAnswered: witness !== null && asked.has(witnessIdOf(row)),
       hasOwnTranscript: row.eventCount > 0,
+      hasLaneObject: laneOwners.has(`${row.userId}/${row.family}/${row.sessionId}`),
     });
     countVerdict(counts, verdict, ack);
     findings.push({

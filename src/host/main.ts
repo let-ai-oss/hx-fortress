@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -659,20 +659,20 @@ export async function runFortressHost(
   // withdraws the refusal. It also does not survive the restart that an ENOSPC
   // or EIO makes likely. So the marker is a file, written before the sidecars
   // are rewritten and removed only once the pending set is on disk.
-  const replayMarkerPath = path.join(paths.runtimeRoot, "replay-incomplete");
+  const replayMarkerDir = path.join(paths.runtimeRoot, "replay-incomplete");
   const awaitReplay = async (): Promise<void> => {
     await replayInFlight?.catch(() => {});
-    const marked = await access(replayMarkerPath).then(
-      () => true,
-      () => false,
-    );
-    if (marked) {
+    // A DIRECTORY, one file per unfinished drain. A single file is overwritten by
+    // the next drain's own marker, so its read-back matches and the unlink
+    // succeeds — withdrawing an outstanding refusal that drain never earned.
+    const outstanding = await readdir(replayMarkerDir).catch(() => [] as string[]);
+    if (outstanding.length > 0) {
       throw new Error(
-        "a parked-artifact replay rewrote session sidecars but could not record which sessions, so a " +
-          "migration resumed under the same id could skip them and cut over stale ones. The daemon " +
-          "retries the replay on its own; this clears once one completes. If it does not, the cause is " +
-          `whatever stopped a small write to ${paths.runtimeRoot} (a full or read-only disk is the usual ` +
-          `one) — fix that, then remove ${replayMarkerPath} to allow the migration.`,
+        `${outstanding.length} parked-artifact replay(s) rewrote session sidecars but could not record ` +
+          "which sessions, so a migration resumed under the same id could skip them and cut over stale " +
+          "ones. Nothing clears this on its own — the entries those drains consumed are already gone, so " +
+          "a later replay has nothing to redo. Re-copy the affected sessions with a fresh migration run " +
+          `(a new run id re-carries everything), then remove ${replayMarkerDir} to allow it.`,
       );
     }
   };
@@ -707,10 +707,13 @@ export async function runFortressHost(
     // must not be rewritten either, because the refusal is the only thing
     // standing between an unrecorded rewrite and a migration cutting over it.
     const token = randomUUID();
+    const markerPath = path.join(replayMarkerDir, token);
     let raised = false;
     const result = await drainParkedArtifacts(parkedArtifactsPath, async (entry) => {
       if (!raised) {
-        await writeFile(replayMarkerPath, token, { mode: 0o600 });
+        await mkdir(replayMarkerDir, { recursive: true, mode: 0o700 });
+        // `wx`: never clobber another drain's outstanding marker.
+        await writeFile(markerPath, "", { mode: 0o600, flag: "wx" });
         raised = true;
       }
       await store.writeArtifact(entry.key, entry.name, entry.text);
@@ -728,11 +731,8 @@ export async function runFortressHost(
     // Pending keys are written before the attempt and cleared only on success,
     // so a failure is retried on the next replay rather than lost.
     const pending = await addForgetPending(forgetPendingPath, result.rewrote);
-    if (raised) {
-      // Only if it is still OURS. Another drain may have raised its own since.
-      const held = await readFile(replayMarkerPath, "utf8").catch(() => null);
-      if (held === token) await unlink(replayMarkerPath).catch(() => {});
-    }
+    // Ours alone, by name.
+    if (raised) await unlink(markerPath).catch(() => {});
     parkLatch.settle(result.failed);
     if (pending.length > 0) {
       const replayDb = postgres.isReady() ? resolveHxDb() : null;

@@ -147,6 +147,7 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
         // already reported the object check on its own line above; the verdict
         // here is about the witness, so the parent-stub exemption does not apply.
         hasOwnTranscript: true,
+        hasLaneObject: false,
       })
     : null;
   checks.push(

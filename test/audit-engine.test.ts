@@ -46,6 +46,13 @@ import type { SessionStore } from "../src/modules/session-vault/store/types";
 
 const ORG = "org-1";
 
+/** The hub's key for a fixture session — `${userId}:${family}:${sessionId}`.
+ *  Fixtures used to key their answers on the bare session id, which is the same
+ *  id the engine (wrongly) sent, so the matrix passed with either shape. */
+function hubId(sessionId: string, userId = "u1", family = "claude"): string {
+  return `${userId}:${family}:${sessionId}`;
+}
+
 function row(over: Partial<AuditSessionRow> = {}): AuditSessionRow {
   return {
     org: ORG,
@@ -67,7 +74,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: true,
         ingestChannel: "tunnel",
-        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, }),
+        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("not_delivered_here");
     // No destination record at all is benign legacy, and its own verdict.
     expect(
@@ -76,7 +83,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "tunnel",
-        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, }),
+        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("no_record");
   });
 
@@ -86,7 +93,7 @@ describe("the verdict matrix", () => {
       letaiCopy: true,
       anyDestinationRecord: true,
       ingestChannel: "tunnel",
-      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, });
+      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
     expect(verdict).toBe("also_at_letai");
     // Per SESSION it fails until acknowledged...
     expect(sessionCheckPasses(verdict, false)).toBe(false);
@@ -104,7 +111,7 @@ describe("the verdict matrix", () => {
       letaiCopy: false,
       anyDestinationRecord: false,
       ingestChannel: "reconciled",
-      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, });
+      acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
     expect(verdict).toBe("unknown_provenance");
     expect(unknownProvenanceCause("reconciled")).toContain("index outage");
     expect(unknownProvenanceCause(null)).toContain("predates channel tracking");
@@ -115,7 +122,7 @@ describe("the verdict matrix", () => {
         letaiCopy: false,
         anyDestinationRecord: false,
         ingestChannel: "gateway",
-        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, }),
+        acknowledged: false, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, }),
     ).toBe("not_applicable");
     expect(VERDICT_HEADLINE.not_applicable).toContain("id never sent");
   });
@@ -173,7 +180,7 @@ describe("one audit run", () => {
     sessions: async () => [row()],
     listCanonical: async () => new Set([canonicalKeyOf(row())]),
     headCanonical: async () => true,
-    askWitness: async () => ({ copies: new Set<string>(), known: new Set(["s1"]) }),
+    askWitness: async () => ({ copies: new Set<string>(), known: new Set([hubId("s1")]) }),
     acknowledged: async () => new Set<string>(),
     postureFresh: async () => true,
     sleep: async () => {},
@@ -190,7 +197,7 @@ describe("one audit run", () => {
           heads.push(r.sessionId);
           return false;
         },
-        askWitness: async () => ({ copies: new Set<string>(), known: new Set(["missing"]) }),
+        askWitness: async () => ({ copies: new Set<string>(), known: new Set([hubId("missing")]) }),
       }),
     );
     expect(heads).toEqual(["missing"]);
@@ -268,16 +275,35 @@ describe("one audit run", () => {
     // and that session's transcript lives under `<sid>:a:<agentId>`, never under
     // the parent prefix. Flagging its absence tells an operator to restore data
     // that was never there, and fails the whole fleet verdict for it.
-    const stub = [row({ sessionId: "p1", ingestChannel: "gateway", eventCount: 0 })];
+    // On every channel, and only when a lane object is actually there.
+    for (const channel of ["tunnel", "gateway", "reconciled", null]) {
+      const stub = [row({ sessionId: "p1", ingestChannel: channel, eventCount: 0 })];
+      const lane = canonicalKeyOf(row({ sessionId: "p1:a:agent-1" }));
+      const result = await runResidencyAudit(
+        deps({
+          sessions: async () => stub,
+          listCanonical: async () => new Set([lane]),
+          headCanonical: async () => false,
+        }),
+      );
+      expect([channel, result.counts.missingHere]).toEqual([channel, 0]);
+      expect([channel, result.verdict]).not.toEqual([channel, "failed"]);
+    }
+  });
+
+  test("a stub with NO lane object is still a loss — the exemption is checked, not assumed", async () => {
+    // Exempting on the theory that the bytes live under the lanes, without
+    // looking, erases a session whose parent AND every lane are empty.
+    const orphan = [row({ sessionId: "p2", ingestChannel: "gateway", eventCount: 0 })];
     const result = await runResidencyAudit(
       deps({
-        sessions: async () => stub,
+        sessions: async () => orphan,
         listCanonical: async () => new Set<string>(),
         headCanonical: async () => false,
       }),
     );
-    expect(result.counts.missingHere).toBe(0);
-    expect(result.verdict).not.toBe("failed");
+    expect(result.counts.missingHere).toBe(1);
+    expect(result.verdict).toBe("failed");
   });
 
   test("an unattributed session's id is never named to let.ai", async () => {
@@ -298,7 +324,9 @@ describe("one audit run", () => {
         },
       }),
     );
-    expect([...asked]).toEqual(["mine"]);
+    // The HUB's id shape, not the bare session id: let.ai keys its rows on
+    // `${userId}:${family}:${sessionId}`, and a bare id matches nothing there.
+    expect([...asked]).toEqual(["u1:claude:mine"]);
   });
 
   test("a witness that could not answer does not make a missing transcript benign", async () => {
@@ -339,7 +367,7 @@ describe("one audit run", () => {
 
   test("an acknowledged copy stays out of the failing list across runs", async () => {
     const withCopy = deps({
-      askWitness: async () => ({ copies: new Set(["s1"]), known: new Set(["s1"]) }),
+      askWitness: async () => ({ copies: new Set([hubId("s1")]), known: new Set([hubId("s1")]) }),
       acknowledged: async () => new Set(["org-1 s1"]),
     });
     for (let pass = 0; pass < 2; pass += 1) {
