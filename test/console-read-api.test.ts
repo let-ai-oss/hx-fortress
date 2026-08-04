@@ -1,8 +1,9 @@
 // The console read API: what it may read, what it may not, and what it says when
 // it cannot.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -72,6 +73,12 @@ import {
 } from "../src/ui/read-routes";
 import { gate } from "../src/ui/routes";
 import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
+import { createConsoleMount } from "../src/ui/console-mount";
+import { UiRuntime } from "../src/ui/runtime";
+import {
+  updateVaultCredentials,
+  writeVaultCredentials,
+} from "../src/modules/session-vault/credentials";
 import type { EgressInputs } from "../src/ui/egress";
 
 const dialect = new PgDialect();
@@ -945,5 +952,78 @@ describe("the app keeps working while streams are open", () => {
     } finally {
       registry.closeAll();
     }
+  });
+});
+
+describe("the console follows credentials.json", () => {
+  let home = "";
+  let root = "";
+  let previousHome: string | undefined;
+
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(os.tmpdir(), "hx-mount-home-"));
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-mount-root-"));
+    previousHome = process.env.HOME;
+    process.env.HOME = home;
+    await writeVaultCredentials({
+      store: "s3",
+      bucket: "the-original-bucket",
+      region: "us-east-1",
+      openaiApiKey: "sk-embedding-key",
+    });
+  });
+
+  afterEach(async () => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function mount(): ReturnType<typeof createConsoleMount> {
+    return createConsoleMount({
+      paths: fortressPaths(root),
+      runtime: new UiRuntime({
+        uiRoot: path.join(root, "ui"),
+        uiConfigFile: path.join(root, "ui", "ui.json"),
+        cmdCredsDir: path.join(root, "runtime", "cmd-creds"),
+        env: {},
+      }),
+      boundPort: 8788,
+      serviceManager: "container",
+      env: {},
+    });
+  }
+
+  test("a migration swap moves the bucket the compliance surface names, with no restart", async () => {
+    const console_ = mount();
+    await console_.ready;
+    expect((await console_.port.facts()).storage.bucket).toBe("the-original-bucket");
+
+    // The daemon cuts over: same file, new bucket, version bumped. Read once at
+    // boot, this console would keep asserting the previous bucket — a false
+    // statement about where this appliance's data lives, on the surface whose
+    // whole deliverable is that statement — and would sign with a key the
+    // provider has already revoked.
+    await updateVaultCredentials(() => ({
+      store: "s3",
+      bucket: "the-bucket-it-was-moved-to",
+      region: "eu-west-1",
+    }));
+    const after = (await console_.port.facts()).storage;
+    expect([after.bucket, after.region]).toEqual(["the-bucket-it-was-moved-to", "eu-west-1"]);
+  });
+
+  test("credentials reach this process through the stripped view, never the raw file", () => {
+    // Asserted over the source because the console's copy is private to the
+    // mount: the embedding key lives in the same file, belongs to the daemon's
+    // worker, and has no signing use here — so it must not enter this process at
+    // all. The view that strips it existed and nothing called it.
+    const source = readFileSync(
+      path.join(import.meta.dir, "..", "src", "ui", "console-mount.ts"),
+      "utf8",
+    );
+    expect(source).toContain("storeCredentialsForConsole(");
+    expect(source).not.toMatch(/\breadVaultCredentials\s*\(/);
   });
 });

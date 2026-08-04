@@ -24,7 +24,11 @@ import { readFile } from "node:fs/promises";
 
 import { FileCredentialStore, type CloudCredential } from "../cloud/credentials";
 import { redactedMessage } from "./redact";
-import { readVaultCredentials, type VaultCredentials } from "../modules/session-vault/credentials";
+import {
+  LiveCredentialsReader,
+  storeCredentialsForConsole,
+  type VaultCredentials,
+} from "../modules/session-vault/credentials";
 import { buildDirectStore } from "../modules/session-vault/store";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import { AuditSpool } from "../console/audit-spool";
@@ -175,7 +179,42 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
   let vaultBucket: { provider: string; name: string; region: string | null } | null = null;
   let downloadBase: string | null = null;
 
-  const bucket = (): { provider: string; name: string; region: string | null } | null => vaultBucket;
+  /**
+   * credentials.json as it is NOW, not as it was when this console started.
+   *
+   * The daemon is the file's single writer and it rewrites it twice in this
+   * appliance's life: a rotation, and the cut at the end of a storage migration.
+   * Read once at boot, the console goes on signing with a key the provider has
+   * already revoked, and — worse for a compliance surface — goes on naming the
+   * bucket this fortress has stopped storing anything in. That is a false
+   * statement about where the data lives, on the one product whose deliverable
+   * is that statement.
+   *
+   * The reader hands back the SAME object while the file's identity and mtime
+   * are unchanged, so reference equality is the whole invalidation rule.
+   */
+  const liveCredentials = new LiveCredentialsReader();
+  let lastCredentials: VaultCredentials | null = null;
+  const syncVaultCredentials = async (): Promise<void> => {
+    const fresh = await liveCredentials.read().catch(() => null);
+    if (fresh === lastCredentials) return;
+    lastCredentials = fresh;
+    // The console holds the STORAGE block and nothing else. The embedding key
+    // lives in the same file, belongs to the daemon's worker, and has no signing
+    // use here — so it never enters this process's memory.
+    vaultCredentials = fresh ? storeCredentialsForConsole(fresh) : null;
+    vaultBucket = fresh
+      ? { provider: fresh.store, name: fresh.bucket, region: fresh.region ?? null }
+      : null;
+    // Rebuilt lazily against whatever the file now names: a store bound to the
+    // old credential is a client for a bucket this appliance no longer serves.
+    directStore = null;
+  };
+
+  const bucket = async (): Promise<{ provider: string; name: string; region: string | null } | null> => {
+    await syncVaultCredentials();
+    return vaultBucket;
+  };
 
   /** One object's size, for the per-session residency proof. Bounded here rather
    *  than by the store: a bucket that stops answering must cost this request a
@@ -185,6 +224,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     sessionId: string;
     userId: string;
   }): Promise<number | null> => {
+    await syncVaultCredentials();
     if (!vaultCredentials) throw new Error("this fortress has no object-store credential");
     directStore ??= buildDirectStore(vaultCredentials);
     const store = directStore;
@@ -236,7 +276,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       cloudUrl: cloud,
       downloadBase: cloud ? downloadBaseFromCloudUrl(cloud) : null,
       postgresBinariesUrl: env.FORTRESS_PG_BINARIES_URL ?? DEFAULT_PG_BINARIES_URL,
-      bucket: bucket(),
+      bucket: await bucket(),
       rosterRetentionDays: rosterInactivePurgeDays(fortress),
       // The console never holds the embedding key, so the row is present only
       // when the daemon's own configuration names an endpoint.
@@ -295,16 +335,9 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
         if (credential?.orgId) universe.orgExternalId = credential.orgId;
       })
       .catch(() => {}),
-    readVaultCredentials()
-      .then((creds) => {
-        if (creds) {
-          vaultCredentials = creds;
-          vaultBucket = { provider: creds.store, name: creds.bucket, region: creds.region ?? null };
-        }
-      })
-      .catch(() => {
-        // No vault credentials is a state the storage panel already renders.
-      }),
+    // First read only; every later one is driven by whoever needs the answer.
+    // No vault credential at all is a state the storage panel already renders.
+    syncVaultCredentials(),
     daemonConfig().then((config) => {
       const url = config?.cloud.url ?? null;
       downloadBase = url ? downloadBaseFromCloudUrl(url) : null;

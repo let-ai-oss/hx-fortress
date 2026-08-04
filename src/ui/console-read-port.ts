@@ -138,7 +138,11 @@ export interface ConsoleReadPortDeps {
     family: string;
     sessionId: string;
   }) => Promise<number | null>;
-  bucket: () => { provider: string; name: string; region: string | null } | null;
+  /** The bucket this fortress serves from RIGHT NOW. Asked rather than held: a
+   *  rotation or a migration swap moves it under a console that is already
+   *  running, and a compliance surface naming the previous one is a false
+   *  statement about where the data lives. */
+  bucket: () => Promise<{ provider: string; name: string; region: string | null } | null>;
   streams: EventStreamRegistry;
   /** What an opened stream carries. */
   producer: EventProducer;
@@ -338,7 +342,7 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     async facts(): Promise<ConsoleFactsView> {
       const [pg] = await query<ConsolePostgresFacts>(() => consolePostgresFactsQuery(deps.universe));
       const [embeddings] = await query<ConsoleEmbeddingFacts>(() => consoleEmbeddingFactsQuery());
-      const bucket = deps.bucket();
+      const bucket = await deps.bucket();
       const facts = await bucketFacts();
       return {
         postgres: pg ?? null,
@@ -495,7 +499,7 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         posture(),
         identity(),
       ]);
-      const bucket = deps.bucket();
+      const bucket = await deps.bucket();
       return {
         generatedAt: now().toISOString(),
         version: FORTRESS_VERSION,
