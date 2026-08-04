@@ -80,7 +80,7 @@ import {
   RoutingPostureCache,
   routingPosturePath,
 } from "../cloud/fortress-query";
-import { readAcknowledgements } from "../console/audit-store";
+import { readAcknowledgements, sweepAuditRuns } from "../console/audit-store";
 import {
   clearWitnessIntent,
   publishAcks,
@@ -998,14 +998,37 @@ export async function runFortressHost(
     void applyRosterPurgeIntent();
   });
 
-  const rosterTimer = setInterval(() => void sweepRoster(), 24 * 60 * 60_000);
+  const rosterTimer = setInterval(() => {
+    void sweepRoster();
+    void sweepAuditHistory();
+  }, 24 * 60 * 60_000);
   (rosterTimer as { unref?: () => void }).unref?.();
 
   const commandTimer = setInterval(() => void pollConsolePlane(), 1_000);
   (commandTimer as { unref?: () => void }).unref?.();
 
+  /** Residency runs and their findings age out at AUDIT_RETENTION_DAYS. Driven
+   *  from the same daily pass as the roster's retention, because a retention
+   *  nothing calls is a number in a constant, not a policy — hx.audit_runs grew
+   *  for the life of the database. Acknowledgements are NOT swept: a run is
+   *  re-derivable by running the audit again, and an acknowledgement is a fact
+   *  about an operator's decision nothing else records. */
+  async function sweepAuditHistory(): Promise<void> {
+    const db = postgres.isReady() ? resolveHxDb() : null;
+    if (!db) return;
+    try {
+      const removed = await sweepAuditRuns(db);
+      if (removed > 0) consoleLog.info("swept expired residency audit runs", { removed });
+    } catch (err) {
+      consoleLog.error("the audit retention sweep failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   async function bootConsolePlane(): Promise<void> {
     await refreshPause();
+    await sweepAuditHistory();
     // A restart is the one way out of a pause that leaves nothing to observe an
     // edge on: the park survives the process, the pause row does not have to.
     // Idempotent, and a no-op on the overwhelming majority of boots where the

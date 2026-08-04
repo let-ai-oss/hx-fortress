@@ -35,7 +35,7 @@
 import { createHash } from "node:crypto";
 
 import { awaitQuiesced, type IngestQuiesce } from "./pause-gate";
-import { STAGING_PUT_TTL_S } from "../modules/session-vault/store/limits";
+
 import type { SessionKey, SessionStore } from "../modules/session-vault/store/types";
 
 /** What a run is allowed to do. `plan` writes nothing at all; `copy` moves the
@@ -596,6 +596,3 @@ async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
   return missing;
 }
 
-/** The staging TTL a drain has to run off, stated where the engine reads it so
- *  the two cannot drift. */
-export const DRAIN_RUNOFF_S = STAGING_PUT_TTL_S;

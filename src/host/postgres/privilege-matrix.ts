@@ -196,14 +196,22 @@ export function privilegeMatrixViolations(actual: Record<string, unknown>): stri
 }
 
 /**
- * The live probe behind the console's containment banner. Reports which role the
- * console is actually connected as and whether the transition routines exist,
- * so the banner states a fact rather than an assumption:
+ * The containment ORACLE, and what it is for.
+ *
+ * It reports which role a connection is actually made as and whether the
+ * transition routines exist, and it collapses that to one of two words:
  *
  *   • `isolated`    — connected as hx_ui with the apparatus present;
  *   • `unavailable` — anything else (an external Postgres has no apparatus at
- *                     all, and running as the daemon role means the console
- *                     could bypass the machine with direct DML).
+ *                     all, and running as the daemon role means the caller could
+ *                     bypass the machine with direct DML).
+ *
+ * NOT WIRED INTO THE CONSOLE, deliberately. The banner the console renders is
+ * decided by the resolved DSN's mode, which it already knows without a query;
+ * this exists so the two live-cluster suites can PROVE the property against a
+ * real Postgres rather than restate the intent — embedded must answer
+ * `isolated`, an external DSN must answer `unavailable`. Wiring it to the banner
+ * would make a per-poll catalog query out of a fact the console already holds.
  */
 export function containmentProbeQuery(): string {
   const names = CONSOLE_ROUTINES.map((r) => `'${r.name}'`).join(", ");

@@ -82,6 +82,10 @@ export const READ_PATHS = {
   events: EVENTS_PATH,
 } as const;
 
+/** The five read routes that leave a record of themselves. Enumerated HERE and
+ *  nowhere else: the effect-class test compares the registered route set against
+ *  exactly these paths, so a sixth cannot be added by accident and one of these
+ *  cannot be quietly demoted to a plain read. */
 export const READ_AUDITED_PATHS = {
   report: "/ui/api/report",
   reportPdf: "/ui/api/report.pdf",
@@ -89,17 +93,6 @@ export const READ_AUDITED_PATHS = {
   auditExport: "/ui/api/audit/export",
   proofCopyAck: "/ui/api/report/proof-copy",
 } as const;
-
-/** The five, enumerated. The effect-class test compares the registered route set
- *  against exactly this list, so a sixth cannot be added by accident and one of
- *  these cannot be quietly demoted to a plain read. */
-export const READ_AUDITED_ROUTE_IDS: readonly string[] = [
-  "report payload",
-  "report PDF",
-  "logs export",
-  "audit export",
-  "proof-copy ack",
-];
 
 export const READ_ROUTES: readonly RouteSpec[] = [
   ...Object.values(READ_PATHS).map((path) => ({

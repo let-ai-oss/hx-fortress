@@ -48,26 +48,7 @@ export const SESSION_COLUMN_CLASSES: ReadonlyMap<string, ColumnClass> = new Map(
   [...UI_SESSION_COLUMNS, ...CONTENT_COLUMNS].map((c) => [c, classifySessionColumn(c)]),
 );
 
-/** Tables the console may read. Anything else is denied — the console renders
- *  counts and locations, and every table below is countable without opening a
- *  transcript. */
-export const CONSOLE_READABLE_TABLES: readonly string[] = [
-  "sessions",
-  "users",
-  "orgs",
-  "projects",
-  "repos",
-  "devices",
-  "models",
-  "session_facts",
-  "deleted_sessions",
-  "embeddings",
-  "admin_audit",
-  "console_commands",
-  "ingest_control",
-  "audit_acks",
-  "audit_settings",
-];
+
 
 /** Tables no console query may name. `turns` and `tool_calls` hold the bodies;
  *  `v_turn_search` is an owner-rights view over them, which would read straight
@@ -98,37 +79,6 @@ export const CONSOLE_SEARCH_FIELDS: readonly string[] = [
   "git_branch",
   "repo",
   "session_id",
-];
-
-/** Everything the console projects from hx.sessions, in the order it selects
- *  them. Column-for-column inside the grant. */
-export const CONSOLE_SESSION_COLUMNS: readonly string[] = [
-  "id",
-  "session_id",
-  "family",
-  "title",
-  "title_source",
-  "cwd",
-  "git_branch",
-  "source_path",
-  "ingest_channel",
-  "event_count",
-  "user_text_count",
-  "assistant_count",
-  "tool_call_count",
-  "input_tokens",
-  "output_tokens",
-  "cache_read_tokens",
-  "cache_creation_tokens",
-  "est_cost_usd",
-  "bytes_uploaded",
-  "chunk_count",
-  "first_event_at",
-  "last_activity_at",
-  "org_id",
-  "user_id",
-  "device_id",
-  "repo_id",
 ];
 
 /** True when a rendered SQL string names anything the console may not read.
