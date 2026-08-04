@@ -722,7 +722,9 @@ export async function runFortressHost(
    *  is what CREATES hx.reject_command, and Postgres resolves the function at
    *  parse time, so the statement errors even against zero rows. */
   /** Rows the boot fence found still ours; only these may be re-claimed. */
-  let redriveIds: ReadonlySet<string> = new Set();
+  /** One-shot permission to re-claim the rows this daemon was running when it
+   *  died. Spent by the poll on use — see RedriveTickets. */
+  let redriveIds = new Set<string>();
   /** pid + a boot-unique id. Observability only — never a security predicate. */
   const claimedBy = `${process.pid}:${randomUUID()}`;
   /** Set by the update executor once a new binary is in place; acted on only
@@ -833,12 +835,26 @@ export async function runFortressHost(
   });
 
   /**
-   * One poll pass over the command queue.
+   * One poll pass over the command queue, SINGLE-FLIGHT.
    *
    * The daemon is the only executor: the console can ask, and the write role
    * cannot even ask. A pass that finds nothing costs one indexed SELECT.
+   *
+   * The timer fires once a second and a pass runs for as long as the work takes
+   * — an update download, a full residency audit, a bucket copy. Without the
+   * latch those overlap: the same claimable row is picked up by every tick that
+   * lands while the first executor is still running, so one row becomes N
+   * concurrent executions of the same side effect.
    */
-  async function pollConsolePlane(): Promise<void> {
+  let pollInFlight: Promise<void> | null = null;
+  function pollConsolePlane(): Promise<void> {
+    pollInFlight ??= drivePollPass().finally(() => {
+      pollInFlight = null;
+    });
+    return pollInFlight;
+  }
+
+  async function drivePollPass(): Promise<void> {
     const db = resolveHxDb();
     if (!db || !postgres.isReady()) return;
     try {

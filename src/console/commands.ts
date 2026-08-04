@@ -194,15 +194,31 @@ async function record(
 }
 
 /**
+ * Permission to re-claim a RUNNING row, spent on use.
+ *
+ * A plain `Set<string>` is one. Modelled as a consumable rather than as a
+ * membership test because a re-drive is one-shot: the boot fence says "this row
+ * was mine when I died, drive it once", and the claim routine permits
+ * running→running only for a named id. Left standing, the same id is re-claimed
+ * and re-executed on EVERY poll — a re-driven audit starts a fresh full run once
+ * a second, and a re-driven update downloads N binaries concurrently onto one
+ * path.
+ */
+export interface RedriveTickets {
+  has(id: string): boolean;
+  delete(id: string): unknown;
+}
+
+/**
  * One poll pass: drive every eligible row to a terminal state.
  *
  * `redrive` names the rows the boot fence already decided may be re-claimed —
  * the daemon's in-flight file is the only thing that decides that, and the
- * routine merely PERMITS the transition it asserts.
+ * routine merely PERMITS the transition it asserts, once.
  */
 export async function pollCommands(
   deps: CommandDriverDeps,
-  redrive: ReadonlySet<string> = new Set(),
+  redrive: RedriveTickets = new Set<string>(),
 ): Promise<number> {
   const clock = deps.clock ?? ((): Date => new Date());
   const rows = await deps.gateway.listOpen();
@@ -246,6 +262,10 @@ export async function pollCommands(
       await removeInFlight(deps.inFlightPath, row.id);
       continue;
     }
+    // The ticket is spent the instant the claim lands, before the executor is
+    // entered: what follows can take minutes, and the permission must not still
+    // be sitting there when it returns.
+    if (isRedrive) redrive.delete(row.id);
     // The claim record is fsynced BEFORE the executor runs: an intent that never
     // reached disk describes work the console can never corroborate.
     await record(deps, row, "claimed", { accepted: true });

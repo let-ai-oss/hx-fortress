@@ -267,6 +267,25 @@ describe("the poll pass", () => {
     expect(ran).toEqual([]);
   });
 
+  test("a re-drive is spent on use — the second poll leaves the row alone", async () => {
+    const gateway = fakeGateway([row({ id: "mine", status: "running" })]);
+    const ran: string[] = [];
+    const tickets = new Set(["mine"]);
+    await pollCommands(deps(gateway, ran), tickets);
+    expect(gateway.calls[0]).toBe("claim:mine:true");
+    expect(ran).toEqual(["self_test"]);
+
+    // The row is terminal by now, but the permission is what has to be gone: a
+    // ticket that survived would re-claim any running row of the same id on the
+    // very next tick — and the poll runs once a second, forever.
+    expect(tickets.has("mine")).toBe(false);
+    gateway.rows[0].status = "running";
+    gateway.calls.length = 0;
+    await pollCommands(deps(gateway, ran), tickets);
+    expect(gateway.calls).toEqual([]);
+    expect(ran).toEqual(["self_test"]);
+  });
+
   test("a running row NOT in the in-flight file is never re-driven", async () => {
     const gateway = fakeGateway([row({ id: "planted", status: "running" })]);
     const ran: string[] = [];
