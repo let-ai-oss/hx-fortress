@@ -16,7 +16,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 
 import { cliAuditAct, CliAudit, CLI_ACTOR } from "../src/cli-audit";
-import { AUDIT_ACTIONS, MAX_ACTOR_CHARS } from "../src/console/audit-actions";
+import { AUDIT_ACTIONS, MAX_ACTOR_CHARS, sanitizeParams } from "../src/console/audit-actions";
 import {
   assertSpoolOwnership,
   AuditSpool,
@@ -1112,5 +1112,33 @@ describe("the console's own surfaces", () => {
     // The checks-performed text is the SERVER's, never invented in the tab.
     expect(verify).toContain("check.detail");
     expect(verify).toContain("check.state");
+  });
+});
+
+
+describe("what a command submission is allowed to record", () => {
+  test("the credential REFERENCE reaches the trail, because it is not the credential", () => {
+    // D15's corroboration is two-sided or it is nothing: the daemon records
+    // consuming a reference, and the console's submission record has to carry
+    // the same id or the two cannot be tied together. The reference names a
+    // 0600 file; the secret it points at never travels on the command.
+    const out = sanitizeParams("console.command.submit", {
+      commandKind: "rotate_credentials",
+      credentialRef: "0123456789abcdef0123456789abcdef",
+    });
+    expect(out?.credentialRef).toBe("0123456789abcdef0123456789abcdef");
+  });
+
+  test("the secret-shaped belt still holds for everything else", () => {
+    const out = sanitizeParams("console.command.submit", {
+      commandKind: "rotate_credentials",
+      // Neither is on the allowlist, and both are secret-shaped: two independent
+      // reasons to drop them, and the carve-out above must not have loosened either.
+      secret: "hunter2",
+      apiKey: "sk-live-not-a-real-key",
+    });
+    expect(out?.secret).toBeUndefined();
+    expect(out?.apiKey).toBeUndefined();
+    expect(Object.keys(out ?? {})).toEqual(["commandKind"]);
   });
 });

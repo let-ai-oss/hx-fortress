@@ -64,7 +64,12 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "console.audit.integrity_error": ["spoolFileId", "seq", "field"],
   "console.command.disputed": ["commandKind", "arm", "expectedDigest", "records"],
   "console.command.outcome": ["commandKind", "terminalStatus", "resultDigest", "accepted", "transition", "reason"],
-  "console.command.submit": ["commandKind", "commandId", "phase", "scope", "enabled", "org", "session", "sessionId"],
+  // `credentialRef` is on this list on purpose: it NAMES the indirection, and the
+  // whole reason the reference exists is that the secret it points at never
+  // travels on the command. Without it in the trail the corroboration D15 rests
+  // on is one-sided — the daemon records consuming a reference the console's own
+  // submission record does not carry.
+  "console.command.submit": ["commandKind", "commandId", "credentialRef", "phase", "scope", "enabled", "org", "session", "sessionId"],
   "console.service.": ["action", "manager", "pid", "state"],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
   "cli.update": ["binPath", "asset", "version"],
@@ -109,7 +114,11 @@ export function sanitizeParams(
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(params)) {
-    if (!allowed.includes(key) || SECRET_KEYS.test(key)) continue;
+    // The one carve-out, and it is the same one `command-params.ts` makes: a
+    // credentialRef is 32 hex naming a file, not a credential, and the belt
+    // below would otherwise drop the very field the allowlist just admitted.
+    if (!allowed.includes(key)) continue;
+    if (key !== "credentialRef" && SECRET_KEYS.test(key)) continue;
     if (value === null || typeof value === "number" || typeof value === "boolean") {
       out[key] = value;
     } else if (typeof value === "string") {

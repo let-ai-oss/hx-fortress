@@ -46,8 +46,8 @@ export function People(): React.ReactElement {
       <div className="kicker">Operate</div>
       <h1>Adoption</h1>
       <p className="lede">
-        Who this organization employs, what let.ai reports they have installed, and what has actually
-        reached this fortress.
+        Who this organization employs, which of their machines have worked here, and what has
+        actually reached this fortress.
       </p>
 
       <div className="stats">
@@ -290,7 +290,11 @@ function RosterLine({
 }): React.ReactElement {
   return (
     <div className={person.active ? "row linkrow" : "row linkrow dimf"} onClick={onOpen}>
-      <span className={person.sessions > 0 ? "dot" : person.installed > 0 ? "dot warn" : "dot offd"}></span>
+      {/* No "installed but silent" state: `installed` counts machines that have
+          produced a session attributed to THIS organization, so it cannot be
+          above zero while `sessions` is zero. The middle dot this used to render
+          was unreachable the moment the roster was scoped to one tenant. */}
+      <span className={person.sessions > 0 ? "dot" : "dot offd"}></span>
       <div className="who">
         <b>{person.displayName}</b>
         <div className="sub">

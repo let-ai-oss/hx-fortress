@@ -9,9 +9,9 @@
 //     store-write gate closed, and is the SOLE such bound on an external
 //     Postgres, where no role split exists to grant against.
 
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { readFile, unlink } from "node:fs/promises";
+
+import { writePrivateJson } from "../host/private-json";
 
 /**
  * One update at a time per FILE.
@@ -42,17 +42,6 @@ function serialized<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
     if (updates.get(filePath) === settled) updates.delete(filePath);
   });
   return next;
-}
-
-async function writePrivateJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  // Unique per write, not per process: a pid is not unique across PID
-  // namespaces, and a shared temporary path turns one writer's rename into
-  // another's ENOENT.
-  const tmp = `${filePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await chmod(tmp, 0o600).catch(() => {});
-  await rename(tmp, filePath);
 }
 
 async function readJson<T>(filePath: string): Promise<T | null> {
