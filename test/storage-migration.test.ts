@@ -27,9 +27,11 @@ import {
   MIGRATION_COMMANDS,
   describeMigration,
   isMigrationCommand,
+  migrationIsRunning,
   runMigrationCommand,
   type MigrationRunnerDeps,
 } from "../src/console/migration-runner";
+import { mintCredentialRef, writeCredentialRef } from "../src/console/cmd-creds";
 import { IngestQuiesce } from "../src/console/pause-gate";
 import { MIGRATION_PHASES, validateCommandParams } from "../src/console/command-params";
 import { createCommandExecutors } from "../src/console/executors";
@@ -930,6 +932,60 @@ describe("arm, swap, resume", () => {
     await expect(
       runMigrationCommand(runnerDeps(), { command: "resume", target: null }),
     ).resolves.toContain("normal lifetime");
+  });
+
+  test("a rotation submitted while the copy runs is refused, though no pause exists yet", async () => {
+    let release = (): void => {};
+    const held = new Promise<void>((r) => (release = r));
+    const copying = runMigrationCommand(
+      runnerDeps({
+        targetCredentials: async () => {
+          await held;
+          return TARGET_CREDS;
+        },
+      }),
+      { command: "arm", target: TARGET_CREDS.bucket },
+    );
+    const cmdCredsDir = path.join(home, "cmd-creds");
+    const ref = mintCredentialRef();
+    await writeCredentialRef(cmdCredsDir, ref, {
+      target: "storage",
+      credentials: { store: "s3", bucket: "a-third-bucket", region: "us-east-1" },
+    });
+    const executors = createCommandExecutors({
+      logger: LOGGER,
+      store: () => null,
+      downloadBaseUrl: async () => null,
+      service: {} as unknown as ServiceManager,
+      cmdCredsDir,
+      env: {},
+      // NO database, so nothing here can consult the pause row: the copy phase
+      // arms no pause (the pause belongs to the swap), and the latch is the only
+      // thing that knows a migration is under way. Without it this rotation
+      // rewrites credentials.json under a run about to name the target bucket,
+      // and live ingest lands in a third bucket the swap orphans.
+      db: () => null,
+      rebindStore: async () => {},
+      setCloudCredential: async () => {
+        throw new Error("not wired");
+      },
+      status: async () => null,
+      embeddingEndpoint: () => null,
+      runAudit: async () => {
+        throw new Error("not wired");
+      },
+      runMigration: async () => "moved",
+      setCloudWitness: async () => {},
+      acknowledgeFinding: async () => {},
+      onBinarySwapped: () => {},
+    });
+    await expect(
+      executors.rotate_credentials({ id: "c1", params: {}, credentialRef: ref }),
+    ).rejects.toThrow("a storage migration is in progress");
+    release();
+    await copying;
+    // The refusal lasts exactly as long as the run does.
+    expect(migrationIsRunning()).toBe(false);
   });
 
   test("resume on a fortress that was never paused says so instead of failing", async () => {

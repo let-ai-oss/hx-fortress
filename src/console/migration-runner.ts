@@ -76,6 +76,15 @@ export const MIGRATION_BUSY_REFUSAL =
   "a storage migration is already running on this fortress — wait for its answer. The run that " +
   "holds the pause is the one that releases it.";
 
+/** Whether a storage-migration command is running in THIS process right now.
+ *
+ *  The pause row cannot answer this. An arm copies for as long as the bucket
+ *  takes and arms no pause at all — the pause belongs to the swap — so anything
+ *  gating on the row alone is unguarded for the whole expensive phase. */
+export function migrationIsRunning(): boolean {
+  return migrationInFlight;
+}
+
 export function isMigrationCommand(value: unknown): value is MigrationCommand {
   return typeof value === "string" && (MIGRATION_COMMANDS as readonly string[]).includes(value);
 }

@@ -5,7 +5,7 @@
 import { handleVaultRpc, type VaultAuthz, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
 import { readVaultCredentials, type VaultCredentials } from "./credentials.js";
-import { buildStore, type StorePauseHooks } from "./store.js";
+import { buildDirectStore, buildStore, type StorePauseHooks } from "./store.js";
 import { isIngestPaused } from "../../console/pause-gate.js";
 import type { HxDb } from "../../host/postgres/db.js";
 import { sanitizeDbError } from "../../host/postgres/sanitize.js";
@@ -30,10 +30,10 @@ export interface SessionVaultModule extends Module {
    * — and a throwing init() would leave the module dead until a daemon restart
    * while the HTTP gateway kept ingesting on the old key.
    *
-   * The new store is PROVEN before it is bound. A failure keeps the old one,
-   * leaves the module running, and fails the rotation that asked for it: a
-   * rotation reported as done over a store that cannot write is the outcome this
-   * ordering exists to prevent.
+   * The new credentials are PROVEN before anything is bound to them. A failure
+   * keeps the old store, leaves the module running, and fails the rotation that
+   * asked for it: a rotation reported as done over a store that cannot write is
+   * the outcome this ordering exists to prevent.
    */
   rebindStore(): Promise<void>;
 }
@@ -118,12 +118,21 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       if (!creds) {
         throw new Error("session-vault: no credentials.json to rebind to");
       }
-      const next = bindStore(creds);
-      // Proven against the real bucket before anything points at it. The gate,
-      // the deadlines and the rebuild policy all ride on this object, so a
-      // candidate that cannot write must never become the binding.
-      await next.selfTest();
-      store = next;
+      // Proven against the real bucket before anything points at it — through
+      // the UNGATED backend, which is the only store that can answer while a
+      // pause is armed.
+      //
+      // The one caller that rebinds under a pause is the storage-migration
+      // swap, and it arms that pause itself: probing through the serving store
+      // asks the write gate to admit the very write it was armed to refuse, so
+      // the cut threw `vault_offline:ingest_paused` with credentials.json
+      // already naming the new bucket. The daemon kept writing the old one, the
+      // operator was told the swap failed, and the next restart silently served
+      // the target — without everything written in between. This is the probe
+      // the rotation executor already takes, for the same reason: it proves
+      // CREDENTIALS, not the serving path.
+      await buildDirectStore(creds).selfTest();
+      store = bindStore(creds);
       logger?.info("store rebound onto rotated credentials", {
         kind: creds.store,
         bucket: creds.bucket,

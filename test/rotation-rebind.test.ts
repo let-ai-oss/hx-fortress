@@ -161,6 +161,33 @@ describe("rebindStore", () => {
     }
   });
 
+  test("an ARMED pause does not refuse it — the swap that armed the pause is the caller", async () => {
+    const bucket = startBucket();
+    try {
+      await writeVaultCredentials(credsFor(bucket, "vault-one"));
+      const state = new PauseState();
+      const module = createSessionVaultModule({
+        pause: { state, quiesce: new IngestQuiesce() },
+      });
+      await module.init!(moduleContext());
+
+      // Exactly the state a storage-migration swap is in when it calls this: it
+      // armed the pause itself, the serving store refuses every write, and a
+      // probe taken through that store is a probe of the thing being held still
+      // rather than of the credentials that are about to replace it.
+      state.observe({ pausedUntil: new Date(Date.now() + 60_000), capped: false });
+      await writeVaultCredentials(credsFor(bucket, "vault-two"));
+      await module.rebindStore();
+
+      // Bound, gated, and proven — credentials.json and the running daemon now
+      // name the same bucket, which is the whole point of the cut.
+      expect(isPauseGated(module.getStore())).toBe(true);
+      expect(state.isPaused()).toBe(true);
+    } finally {
+      bucket.stop();
+    }
+  });
+
   test("a candidate that cannot write keeps the OLD store and stays running", async () => {
     const bucket = startBucket();
     try {

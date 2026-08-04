@@ -45,9 +45,14 @@ export function envManagedRefusal(target: RotationTarget): string {
 /** A rotation attempted while a storage migration holds the write gate. A
  *  DISTINCT failure from a broken credential: the credentials may be perfect,
  *  and telling an operator otherwise sends them re-issuing keys mid-migration. */
-export function migrationInProgressRefusal(episodeId: string): string {
-  return `refused — a storage migration is in progress (run ${episodeId})`;
+export function migrationInProgressRefusal(reference: string): string {
+  return `refused — a storage migration is in progress (run ${reference})`;
 }
+
+/** What the refusal names when the migration has armed no pause yet: the copy
+ *  phase holds nothing but the in-process latch, and there is no episode id to
+ *  quote. */
+export const MIGRATION_COPYING_REFERENCE = "copying";
 
 export function isRotationPayload(value: unknown): value is RotationPayload {
   if (!value || typeof value !== "object") return false;

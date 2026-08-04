@@ -17,12 +17,13 @@ import { finishAuditRun, recordFindings, startAuditRun } from "./audit-store";
 import type { RollUpCounts } from "./audit-verdicts";
 import { runCheckup, summarizeCheckup, type CheckupDeps } from "./checkup";
 import { readCurrentEpisode } from "./ingest-control-db";
-import { isMigrationCommand, type MigrationCommand } from "./migration-runner";
+import { isMigrationCommand, migrationIsRunning, type MigrationCommand } from "./migration-runner";
 import {
   applyRotation,
   describeRotation,
   envManagedRefusal,
   isRotationPayload,
+  MIGRATION_COPYING_REFERENCE,
   migrationInProgressRefusal,
 } from "./rotation";
 import { consoleUpdateGate } from "../host/trust/verify";
@@ -91,10 +92,19 @@ const EMPTY_COUNTS: RollUpCounts = {
   notApplicable: 0,
 };
 
-/** A pause is armed and unexpired — the state a storage migration holds the
- *  write gate in. Refusing here, by name, keeps a gated self-test from being
- *  reported as a broken credential. */
+/** A storage migration is under way — either running in this process, or
+ *  holding the write gate through an armed pause. Refusing here, by name, keeps
+ *  a gated self-test from being reported as a broken credential.
+ *
+ *  BOTH terms are needed. The pause belongs to the SWAP, so an arm copies for
+ *  however long the bucket takes with no row for anything to find: a rotation
+ *  submitted during the copy passes a row check and rewrites credentials.json
+ *  under a run that is about to name the target bucket, and live ingest then
+ *  lands in a third bucket the swap orphans. The row covers what the latch
+ *  cannot — a pause armed before this process started, or by anything other
+ *  than the engine. */
 async function assertNotMigrating(deps: ExecutorDeps): Promise<void> {
+  if (migrationIsRunning()) throw new Error(migrationInProgressRefusal(MIGRATION_COPYING_REFERENCE));
   const db = deps.db();
   if (!db) return;
   const row = await readCurrentEpisode(db).catch(() => null);
