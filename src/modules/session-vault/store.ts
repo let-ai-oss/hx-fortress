@@ -122,6 +122,9 @@ export interface StorePauseHooks {
   /** True while a drain is armed — new staging signatures are cut short so the
    *  pre-swap barrier has a bounded floor to wait for. */
   armed?: () => boolean;
+  /** Called once per refused write, for the metric an operator reads to see the
+   *  pause working. */
+  onRefused?: () => void;
 }
 
 /** The concrete backend, wrapped in GuardedStore: every call gets a hard
@@ -165,7 +168,10 @@ export function buildStore(
   });
   const pause = hooks?.pause;
   return pause
-    ? new PauseGatedStore(guarded, pause.state, pause.quiesce, { armed: pause.armed })
+    ? new PauseGatedStore(guarded, pause.state, pause.quiesce, {
+        ...(pause.armed ? { armed: pause.armed } : {}),
+        ...(pause.onRefused ? { onRefused: pause.onRefused } : {}),
+      })
     : guarded;
 }
 

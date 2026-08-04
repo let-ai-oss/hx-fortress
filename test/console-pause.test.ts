@@ -264,6 +264,32 @@ describe("the store-write gate", () => {
     expect(inner.calls).toEqual([]);
   });
 
+  test("every refusal is counted, so the metric is not a flat zero through a pause", async () => {
+    const inner = new RecordingStore();
+    const state = new PauseState();
+    state.observe({ pausedUntil: new Date(NOW.getTime() + 60_000), capped: false });
+    let refused = 0;
+    const gate = new PauseGatedStore(inner, state, new IngestQuiesce(), {
+      clock: () => NOW,
+      onRefused: () => (refused += 1),
+    });
+    for (const call of [
+      () => gate.signStagingUpload(KEY, "c"),
+      () => gate.appendChunkToCanonical(KEY, "c"),
+      () => gate.writeCanonicalText(KEY, "t"),
+      () => gate.deleteSession(KEY),
+    ]) {
+      await expect(call()).rejects.toThrow(/^vault_offline:ingest_paused:/);
+    }
+    // The gate is the only thing that knows a write was turned away. Published
+    // as a flat zero, the console reads "no writes were refused" for the whole
+    // window in which every write was.
+    expect(refused).toBe(4);
+    // A read is not a refusal.
+    await gate.readCanonicalText(KEY);
+    expect(refused).toBe(4);
+  });
+
   test("reads stay open throughout", async () => {
     const inner = new RecordingStore();
     const gate = pausedGate(inner);

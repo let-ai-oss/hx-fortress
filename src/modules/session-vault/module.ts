@@ -171,6 +171,13 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       if (PROBE_INTERVAL_MS > 0) {
         probeTimer = setInterval(() => {
           if (probeBusy || !store) return;
+          // NOT while the gate is shut. The probe is a real bucket WRITE, so a
+          // pause refuses it — and the refusal was logged at ERROR as "store
+          // write-path self-test failed" every minute for the whole pause. That
+          // is the exact line an operator watches for a wedged bucket, printed
+          // for a fortress that is deliberately holding writes, during the one
+          // operation that arms a pause.
+          if (deps.pause?.state.isPaused()) return;
           probeBusy = true;
           void store
             .selfTest()
@@ -179,6 +186,9 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
               probeFailing = false;
             })
             .catch((err: unknown) => {
+              // A pause armed between the check above and the call: still a
+              // deliberate refusal, still not a fault.
+              if (isIngestPaused(err)) return;
               probeFailing = true;
               logger?.error("store write-path self-test failed", {
                 error: err instanceof Error ? err.message : String(err),

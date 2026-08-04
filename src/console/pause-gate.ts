@@ -141,12 +141,17 @@ export interface PauseGatedStoreOptions {
   /** True while a drain is armed — new staging signatures are cut short so the
    *  barrier's floor stays bounded. */
   armed?: () => boolean;
+  /** Called once per REFUSED call. The gate is the only place that knows a write
+   *  was turned away — the counter it feeds is what tells an operator the pause
+   *  is doing something, and published as a flat zero it says the opposite. */
+  onRefused?: () => void;
   clock?: () => Date;
 }
 
 export class PauseGatedStore implements SessionStore {
   private readonly clock: () => Date;
   private readonly armed: () => boolean;
+  private readonly onRefused: () => void;
 
   constructor(
     private readonly inner: SessionStore,
@@ -156,6 +161,7 @@ export class PauseGatedStore implements SessionStore {
   ) {
     this.clock = options.clock ?? ((): Date => new Date());
     this.armed = options.armed ?? ((): boolean => false);
+    this.onRefused = options.onRefused ?? ((): void => {});
   }
 
   /** Refuse BEFORE the call reaches GuardedStore, so a paused write consumes no
@@ -167,7 +173,11 @@ export class PauseGatedStore implements SessionStore {
    *  quiesced would cut a hole in the very snapshot a migration is copying. */
   assertWritable(): void {
     const until = this.state.pausedUntil(this.clock());
-    if (until) throw new IngestPausedError(until);
+    if (!until) return;
+    // Counted HERE, where the refusal actually happens — every entry point goes
+    // through this one line, so no caller has to remember to count.
+    this.onRefused();
+    throw new IngestPausedError(until);
   }
 
   private gated<T>(fn: () => Promise<T>): Promise<T> {
