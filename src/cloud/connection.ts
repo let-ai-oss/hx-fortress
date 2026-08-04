@@ -106,6 +106,11 @@ export interface WsCloudConnectionDeps {
 /** Reject if `p` doesn't settle within `ms` (MC-2517 fortress dispatch ceiling).
  *  The underlying handler isn't cancellable, so a late settle is ignored — but its
  *  rejection is still observed here, so it never surfaces as an unhandled rejection. */
+/** How long composing the identity may take before the connection proceeds with
+ *  a degraded one. Well inside any reconnect cadence: the alternative is a boot
+ *  that never completes. */
+const IDENTITY_DEADLINE_MS = 2_000;
+
 function withDeadline<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(message)), ms);
@@ -281,7 +286,20 @@ export class WsCloudConnection implements CloudConnection {
     const source = this.deps.identity;
     if (typeof source !== "function") return source;
     try {
-      return await source();
+      // BOUNDED. This became an async function that reads ui.json off disk, and
+      // it sits on the boot-critical path: `open()` settles only on
+      // enrolled/welcome/fatal/close, and the runtime awaits it before starting
+      // the HTTP gateway and the session-vault module. A wedged mount (NFS,
+      // FUSE, a bind mount whose backing store went away) makes that read never
+      // settle, so `hello` is never sent, the hub never authenticates — and
+      // nothing times out, because the heartbeat keeps the socket alive past the
+      // reaper. Total silent ingest outage with the status stuck at `starting`.
+      // The degraded identity below is exactly what this arm is for.
+      return await withDeadline(
+        Promise.resolve(source()),
+        IDENTITY_DEADLINE_MS,
+        "composing the fortress identity took too long",
+      );
     } catch (err) {
       this.deps.logger.error("could not compose the fortress identity for this connection", err);
       return { version: "unknown", protocolVersion: 0 };
@@ -356,8 +374,11 @@ export class WsCloudConnection implements CloudConnection {
             ...identity,
           });
         }
-      })();
-      let lastStatsAt = 0;
+        // The heartbeat starts only once the greeting is actually on the wire.
+        // Started outside this closure it kept an UNAUTHENTICATED socket alive —
+        // the hub bumps its liveness watchdog on every frame before dispatch, so
+        // the reaper never fired on a connection that had said nothing.
+        let lastStatsAt = 0;
       const STATS_MIN_INTERVAL_MS = 60_000;
       this.heartbeatTimer = setInterval(() => {
         send({ t: "heartbeat" });
@@ -374,7 +395,8 @@ export class WsCloudConnection implements CloudConnection {
             })
             .catch(() => {});
         }
-      }, this.heartbeatMs);
+        }, this.heartbeatMs);
+      })();
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {

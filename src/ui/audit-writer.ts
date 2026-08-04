@@ -136,16 +136,18 @@ export class ConsoleAudit implements ConsoleExportAudit {
     },
     work: () => Promise<T>,
   ): Promise<T> {
-    const intent = await this.spool
-      .intent(action, {
-        actor: fields.actor ?? null,
-        sessionRef: fields.sessionRef ?? null,
-        params: fields.params ?? null,
-      })
-      .catch((error: unknown) => {
-        this.report(error);
-        return null;
-      });
+    // The intent is a PRECONDITION, not a best-effort log line. This used to
+    // catch the failure to null and run `work()` anyway, which contradicted the
+    // contract three lines above and meant the whole admin surface — stop the
+    // daemon, rotate credentials, export the trail — kept working with nothing
+    // recorded. And because the spool caches its readiness PROMISE, one failure
+    // is permanent for the process, so it is not a blip: it is every action from
+    // then on. An operator who cannot be recorded is refused instead.
+    const intent = await this.spool.intent(action, {
+      actor: fields.actor ?? null,
+      sessionRef: fields.sessionRef ?? null,
+      params: fields.params ?? null,
+    });
     try {
       const result = await work();
       if (intent) await this.spool.outcome(intent, "done").catch((e: unknown) => this.report(e));
