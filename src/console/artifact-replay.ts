@@ -47,7 +47,19 @@ export async function readParkedArtifacts(filePath: string): Promise<ParkedArtif
 export interface ReplayResult {
   replayed: number;
   failed: number;
+  /** Sessions whose sidecars this drain rewrote. A replay is the one writer that
+   *  changes a sidecar without appending the canonical, so a storage migration
+   *  cannot see it by measuring canonical length — it has to be told. */
+  rewrote: SessionKey[];
 }
+
+/** One drain per park path at a time. The rename used to provide this for free:
+ *  a second drain found no file and returned. Reading the orphaned `.draining`
+ *  before the rename — which is what recovers a drain that died — removed that,
+ *  and two overlapping drains would replay every entry twice. Both callers do
+ *  overlap: the 5s pause refresh and a migration's quarter-second gate refresh
+ *  drive the same function. */
+const draining = new Map<string, Promise<ReplayResult>>();
 
 /**
  * Replay every parked write, then truncate.
@@ -61,32 +73,45 @@ export async function drainParkedArtifacts(
   filePath: string,
   write: (entry: ParkedArtifact) => Promise<void>,
 ): Promise<ReplayResult> {
-  const draining = `${filePath}.draining`;
+  const inFlight = draining.get(filePath);
+  if (inFlight) return await inFlight;
+  const run = drainOnce(filePath, write).finally(() => draining.delete(filePath));
+  draining.set(filePath, run);
+  return await run;
+}
+
+async function drainOnce(
+  filePath: string,
+  write: (entry: ParkedArtifact) => Promise<void>,
+): Promise<ReplayResult> {
+  const drainingPath = `${filePath}.draining`;
 
   // Anything already sitting in `.draining` is a previous drain that died between
   // the rename and the finish — its entries are commits already acknowledged to a
   // device, and nothing else in the process ever looks at this path. Read it
   // BEFORE the rename below, because rename overwrites its destination: without
   // this the next drain is what destroys the orphan it should have recovered.
-  const orphaned = await readParkedArtifacts(draining);
+  const orphaned = await readParkedArtifacts(drainingPath);
 
   let renamed = true;
   try {
-    await rename(filePath, draining);
+    await rename(filePath, drainingPath);
   } catch {
     renamed = false;
   }
-  const entries = [...orphaned, ...(renamed ? await readParkedArtifacts(draining) : [])];
+  const entries = [...orphaned, ...(renamed ? await readParkedArtifacts(drainingPath) : [])];
   if (entries.length === 0) {
-    await unlink(draining).catch(() => {});
-    return { replayed: 0, failed: 0 };
+    await unlink(drainingPath).catch(() => {});
+    return { replayed: 0, failed: 0, rewrote: [] };
   }
   let replayed = 0;
+  const rewrote: SessionKey[] = [];
   const stillFailing: ParkedArtifact[] = [];
   for (const entry of entries) {
     try {
       await write(entry);
       replayed += 1;
+      rewrote.push(entry.key);
     } catch {
       stillFailing.push(entry);
     }
@@ -94,8 +119,8 @@ export async function drainParkedArtifacts(
   for (const entry of stillFailing) await parkArtifact(filePath, entry);
   // Unlinked, not truncated: an empty file and a finished drain must not look the
   // same to the recovery above, or a crash mid-drain reads as nothing to recover.
-  await unlink(draining).catch(() => {});
-  return { replayed, failed: stillFailing.length };
+  await unlink(drainingPath).catch(() => {});
+  return { replayed, failed: stillFailing.length, rewrote };
 }
 
 /**

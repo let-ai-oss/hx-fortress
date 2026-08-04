@@ -161,7 +161,7 @@ describe("the artifact replay park", () => {
     const result = await drainParkedArtifacts(file, async (entry) => {
       written.push(entry.name);
     });
-    expect(result).toEqual({ replayed: 1, failed: 0 });
+    expect(result).toEqual({ replayed: 1, failed: 0, rewrote: [KEY] });
     expect(written).toEqual(["session.json"]);
     expect(await readParkedArtifacts(file)).toEqual([]);
   });
@@ -171,12 +171,38 @@ describe("the artifact replay park", () => {
     const result = await drainParkedArtifacts(file, async () => {
       throw new Error("still down");
     });
-    expect(result).toEqual({ replayed: 0, failed: 1 });
+    expect(result).toEqual({ replayed: 0, failed: 1, rewrote: [] });
     expect((await readParkedArtifacts(file)).length).toBe(1);
   });
 
+  test("two drains that overlap replay each entry once, not twice", async () => {
+    // The rename used to provide this for free: the second drain found no file
+    // and returned. Reading the orphaned `.draining` first — which is what
+    // recovers a drain that died — removed that guard, and both callers overlap
+    // by construction (the 5s pause refresh and a migration's 250ms gate refresh
+    // drive the same function).
+    await parkArtifact(file, { key: KEY, name: "session.json", text: "{}", parkedAt: NOW.toISOString() });
+    await parkArtifact(file, { key: KEY, name: "tasks.json", text: "[]", parkedAt: NOW.toISOString() });
+
+    const written: string[] = [];
+    const slow = async (entry: { name: string }): Promise<void> => {
+      await new Promise((r) => setTimeout(r, 5));
+      written.push(entry.name);
+    };
+    const [a, b] = await Promise.all([
+      drainParkedArtifacts(file, slow),
+      drainParkedArtifacts(file, slow),
+    ]);
+
+    expect(written.sort()).toEqual(["session.json", "tasks.json"]);
+    // The second caller joins the first rather than starting its own pass, so it
+    // reports what actually happened rather than a second count of the same work.
+    expect(a).toEqual(b);
+    expect(a.replayed).toBe(2);
+  });
+
   test("draining an empty park is a no-op", async () => {
-    expect(await drainParkedArtifacts(file, async () => {})).toEqual({ replayed: 0, failed: 0 });
+    expect(await drainParkedArtifacts(file, async () => {})).toEqual({ replayed: 0, failed: 0, rewrote: [] });
   });
 
   test("a pause that lapsed on its own deadline still owes a replay", () => {

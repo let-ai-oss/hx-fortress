@@ -13,6 +13,7 @@ import { sql } from "drizzle-orm";
 
 import { sessionRef, type CopiedObject, type MigrationPhase, type MigrationResult } from "./migration";
 import type { HxDb } from "../host/postgres/db";
+import type { SessionKey } from "../modules/session-vault/store/types";
 
 function rows<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
@@ -138,4 +139,39 @@ export async function saveMigrationRun(
                error = ${args.error ?? result?.aborted ?? result?.resumeFailed ?? null}
          WHERE id = ${runId}::uuid`,
   );
+}
+
+/**
+ * Forget that these sessions were copied, so the next delta pass carries them
+ * again.
+ *
+ * A parked-artifact replay is the one writer that changes a sidecar without
+ * appending the canonical, and the delta pass decides what to re-copy by
+ * comparing canonical length. Without this a session whose `session.json` was
+ * replayed after its copy is skipped by every later pass and the new bucket
+ * keeps the stale one — invisibly, because verification checks sidecars for
+ * presence (the target is live by then, so it cannot compare their bytes).
+ *
+ * Across every run, not just the one in flight: the replay does not know which
+ * run copied the session, and a stale record left behind for a run that is
+ * resumed later is the same defect deferred.
+ */
+export async function forgetCopiedSessions(db: HxDb, keys: readonly SessionKey[]): Promise<number> {
+  let forgotten = 0;
+  for (const key of keys) {
+    const result = await db.execute(
+      sql`DELETE FROM hx.migration_objects
+           WHERE user_id = ${key.userId} AND family = ${key.family} AND session_id = ${key.sessionId}`,
+    );
+    forgotten += affectedRows(result);
+  }
+  return forgotten;
+}
+
+/** Rows Postgres reports as changed, across the shapes the driver returns. */
+function affectedRows(result: unknown): number {
+  const r = result as { rowCount?: unknown; count?: unknown } | null;
+  if (typeof r?.rowCount === "number") return r.rowCount;
+  if (typeof r?.count === "number") return r.count;
+  return 0;
 }

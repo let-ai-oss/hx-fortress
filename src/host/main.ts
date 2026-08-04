@@ -57,6 +57,7 @@ import { parseBooleanEnv } from "../env";
 import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
+import { forgetCopiedSessions } from "../console/migration-store";
 import { createCommandGateway } from "../console/command-gateway";
 import { pollCommands, runBootFence } from "../console/commands";
 import { createCommandExecutors } from "../console/executors";
@@ -637,6 +638,19 @@ export async function runFortressHost(
       store.writeArtifact(entry.key, entry.name, entry.text),
     );
     parkLatch.settle(result.failed);
+    // A replay rewrites sidecars without appending a canonical, which is the one
+    // change a storage migration's delta pass cannot see — it measures canonical
+    // length. Forget the copy records so the next pass carries them again.
+    const replayDb = result.rewrote.length > 0 && postgres.isReady() ? resolveHxDb() : null;
+    if (replayDb) {
+      await forgetCopiedSessions(replayDb, result.rewrote).catch((err: unknown) => {
+        consoleLog.warn("could not clear the copy records for replayed sidecars", {
+          sessions: result.rewrote.length,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return 0;
+      });
+    }
     if (result.replayed > 0 || result.failed > 0) {
       consoleLog.info("replayed parked artifact writes", {
         replayed: result.replayed,
