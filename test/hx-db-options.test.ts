@@ -6,12 +6,12 @@ import { probeIntervalMs } from "../src/host/postgres/guarded-db";
 import { guarantorIntervalMs } from "../src/ingest/guarantor";
 
 describe("hxPoolOptions env parsing", () => {
-  test("defaults: 10 s connect, 60 s idle, 10 min lifetime, max 10, 120 s statement_timeout", () => {
+  test("defaults: 10 s connect, 60 s idle, 1 h lifetime, max 10, 120 s statement_timeout", () => {
     const o = hxPoolOptions({});
     expect(o).toEqual({
       connectionTimeout: 10,
       idleTimeout: 60,
-      maxLifetime: 600,
+      maxLifetime: 3600,
       max: 10,
       connection: { statement_timeout: 120_000 },
     });
@@ -33,7 +33,7 @@ describe("hxPoolOptions env parsing", () => {
       FORTRESS_DB_MAX_LIFETIME_MS: "",
     });
     expect(o.connectionTimeout).toBe(10);
-    expect(o.maxLifetime).toBe(600);
+    expect(o.maxLifetime).toBe(3600);
     expect(o.connection).toEqual({ statement_timeout: 120_000 });
   });
 
@@ -45,7 +45,7 @@ describe("hxPoolOptions env parsing", () => {
     });
     expect(o.connectionTimeout).toBe(10);
     expect(o.connection).toEqual({ statement_timeout: 120_000 });
-    expect(o.maxLifetime).toBe(600);
+    expect(o.maxLifetime).toBe(3600);
   });
 
   test("statement_timeout=0 OMITS the startup parameter entirely (pooled-DSN escape hatch)", () => {
@@ -66,7 +66,7 @@ describe("hxPoolOptions env parsing", () => {
   });
 
   test("maxLifetime=0 means the DEFAULT — rotation is a healer, never disableable", () => {
-    expect(hxPoolOptions({ FORTRESS_DB_MAX_LIFETIME_MS: "0" }).maxLifetime).toBe(600);
+    expect(hxPoolOptions({ FORTRESS_DB_MAX_LIFETIME_MS: "0" }).maxLifetime).toBe(3600);
   });
 
   test("connect-timeout=0 means the DEFAULT — a connect bound may never be disabled", () => {

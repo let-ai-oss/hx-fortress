@@ -31,7 +31,7 @@ const msToSec = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
-const DEFAULT_MAX_LIFETIME_MS = 600_000;
+const DEFAULT_MAX_LIFETIME_MS = 3_600_000;
 const DEFAULT_POOL_MAX = 10;
 const DEFAULT_IDLE_TIMEOUT_S = 60;
 
@@ -68,8 +68,12 @@ export interface HxPoolOptions {
  *  Env knobs (ms; set-but-empty ⇒ default): FORTRESS_DB_CONNECT_TIMEOUT_MS
  *  (default 10 000; 0 ⇒ default — a connect bound may never be disabled),
  *  FORTRESS_DB_STATEMENT_TIMEOUT_MS (default 120 000; 0 ⇒ omit the startup
- *  param — pooler escape hatch), FORTRESS_DB_MAX_LIFETIME_MS (default 600 000;
- *  0 ⇒ default — rotation is a healer, never disableable). */
+ *  param — pooler escape hatch), FORTRESS_DB_MAX_LIFETIME_MS (default
+ *  3 600 000 — one hour: rotation is the last-resort healer behind the probe's
+ *  ~3 min rebuild path, and a guarantor RESTORE of a giant session replays the
+ *  whole transcript in one transaction, which must fit inside one connection
+ *  lifetime (a 106 MB session hit the old 10 min wall on day one);
+ *  0 ⇒ default — never disableable). */
 export function hxPoolOptions(
   env: Record<string, string | undefined> = process.env,
   overrides: { max?: number; statementTimeoutMs?: number } = {},
@@ -128,7 +132,7 @@ export interface PurgeDb {
  *  startup param and NO maxLifetime, deliberately. An oversized purge statement
  *  must be allowed to finish server-side even after the cloud abandons the RPC
  *  at 30 s (zombie-convergence: the next parked retry finds `complete: true`);
- *  the shared pools' 120 s timeout / 10 min rotation would convert that into a
+ *  the shared pools' statement timeout / hard rotation would convert that into a
  *  never-converging park loop that re-burns the same delete work every 2 min. */
 export function createPurgeDb(dsn: string): PurgeDb {
   const client = new Bun.SQL(dsn, { max: 1, connectionTimeout: 10 });
