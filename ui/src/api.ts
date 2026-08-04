@@ -12,13 +12,16 @@
 // the reason it could not — never a plausible number.
 
 import { EVENTS_BACKOFF_MS, EVENTS_PATH } from "../../src/ui/events";
+// The header names are the SERVER's, imported across a boundary this file
+// already crosses. Restated here, a rename on one side is a console that stops
+// authenticating with no build error to say so.
+import { SETUP_TOKEN_HEADER } from "../../src/ui/auth-routes";
+import { SESSION_HEADER } from "../../src/ui/sessions";
 
 /** Per TAB, not per browser: localStorage would widen an XSS from "read this
  *  tab" to "read every tab, forever". The visible consequence is that a second
  *  tab signs in again, and the sign-in copy says so. */
 const TOKEN_KEY = "hx-fortress-ui-token";
-const SESSION_HEADER = "x-fortress-ui-token";
-const SETUP_TOKEN_HEADER = "x-setup-token";
 
 export const API = {
   session: "/ui/api/session",

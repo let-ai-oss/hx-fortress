@@ -20,6 +20,8 @@
 // user record as a belt, so a revocation that happened in ANOTHER process (the
 // CLI writing users.json) still lands within one beat.
 
+import { SESSION_HEADER } from "./sessions";
+
 export const EVENTS_PATH = "/ui/api/events";
 
 /** Heartbeat cadence. Also the bound on how long a stream can outlive a
@@ -322,7 +324,7 @@ export const EVENT_STREAM_CLIENT_CONTRACT = {
   path: EVENTS_PATH,
   /** fetch + ReadableStream. EventSource cannot set this header, and cookies are
    *  banned as a session medium. */
-  header: "x-fortress-ui-token",
+  header: SESSION_HEADER,
   /** Held per tab, so a second tab signs in again and an XSS reads one tab. */
   tokenMedium: "sessionStorage",
   /** Sent as the `last-event-id` header on reconnect. */

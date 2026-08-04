@@ -1,5 +1,6 @@
 import React from "react";
 
+import { MIGRATION_PHASES } from "../../../src/console/command-params";
 import { helpEntries } from "../../../src/ui/help";
 import {
   COMMAND_REQUEST_NOTE,
@@ -510,7 +511,11 @@ function CheckupPanel(props: {
 }
 
 /** The three steps an operator drives a bucket move in, and what each one costs
- *  the people uploading to this fortress. */
+ *  the people uploading to this fortress.
+ *
+ *  The keys are the DAEMON's phase names, checked against them rather than
+ *  re-typed: a control whose key drifts mints a row the validator refuses, and
+ *  the operator reads that as a broken fortress. */
 const MIGRATION_STEPS = [
   {
     key: "arm",
@@ -547,6 +552,21 @@ const MIGRATION_STEPS = [
     needsTarget: false,
   },
 ] as const;
+
+/** The controls and the daemon's phases are the same set, in both directions: a
+ *  phase with no control is an engine nobody can reach, and a control with no
+ *  phase mints a row the validator refuses and an operator reads as a broken
+ *  fortress. Both sides are checked at BUILD time — neither is reachable from a
+ *  test that does not open a browser. */
+function assertNoDrift<T extends never>(): void {
+  void 0 as T | undefined;
+}
+assertNoDrift<
+  Exclude<(typeof MIGRATION_PHASES)[number], (typeof MIGRATION_STEPS)[number]["key"]>
+>();
+assertNoDrift<
+  Exclude<(typeof MIGRATION_STEPS)[number]["key"], (typeof MIGRATION_PHASES)[number]>
+>();
 
 const MIGRATION_STATUS_TONE: Record<string, string> = {
   done: "ok",
