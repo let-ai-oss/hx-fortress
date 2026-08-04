@@ -27,14 +27,15 @@ import path from "node:path";
 /** Identifies THIS process in a lock file, so a stale lock can name its owner. */
 const BOOT_ID = randomUUID();
 
-/** A lock held longer than this is treated as abandoned. Well above the ~150ms
- *  an argon2id hash costs inside a user-store write. */
-const LOCK_STALE_MS = 10_000;
+/** A lock held longer than this — by an owner that is still ALIVE — is treated
+ *  as abandoned. Well above the ~150ms an argon2id hash costs inside a user-store
+ *  write. */
+export const LOCK_STALE_MS = 10_000;
 /** How long a writer waits for a live lock before refusing. */
-const LOCK_WAIT_MS = 5_000;
+export const LOCK_WAIT_MS = 5_000;
 /** CAS attempts before the write fails loudly. Retrying forever turns a
  *  contended verb into a hang with no diagnostic. */
-const MAX_CAS_RETRIES = 5;
+export const MAX_CAS_RETRIES = 5;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -118,6 +119,29 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Whether a lock somebody else holds may be taken, and why. Null means respect
+ * it.
+ *
+ * THE one stale-lock rule in this build, for every file that uses the protocol.
+ * Liveness first, then age: a lock whose owner is GONE is reclaimed at once,
+ * because waiting out a timer for a process that no longer exists blocks a verb
+ * for nothing; a lock whose owner is still running is respected until it is
+ * provably older than any real critical section. Two copies of this rule is how
+ * one file ends up waiting a timer the other does not.
+ */
+export async function reclaimableLock(lock: string): Promise<LockReclaim | null> {
+  const info = await stat(lock).catch(() => null);
+  if (!info) return null; // vanished — the retry will take it
+  const owner = parseOwner(await readFile(lock, "utf8").catch(() => ""));
+  if (!owner) return { owner: null, reason: "unreadable" };
+  if (owner.bootId !== BOOT_ID && !pidAlive(owner.pid)) {
+    return { owner, reason: "owner-gone" };
+  }
+  if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return { owner, reason: "stale" };
+  return null;
+}
+
 /** Remove a lock file whatever its state. The `--force-unlock` implementation. */
 export async function forceUnlock(file: string): Promise<boolean> {
   try {
@@ -174,7 +198,7 @@ export class JsonCasStore<T extends { version?: number }> {
         return;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        const reclaim = await this.reclaimable(lock);
+        const reclaim = await reclaimableLock(lock);
         if (reclaim) {
           await unlink(lock).catch(() => {});
           this.opts.onReclaim?.(reclaim);
@@ -189,18 +213,6 @@ export class JsonCasStore<T extends { version?: number }> {
     }
   }
 
-  /** Null when the lock must be respected. */
-  private async reclaimable(lock: string): Promise<LockReclaim | null> {
-    const info = await stat(lock).catch(() => null);
-    if (!info) return null; // vanished — the retry will take it
-    const owner = parseOwner(await readFile(lock, "utf8").catch(() => ""));
-    if (!owner) return { owner: null, reason: "unreadable" };
-    if (owner.bootId !== BOOT_ID && !pidAlive(owner.pid)) {
-      return { owner, reason: "owner-gone" };
-    }
-    if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return { owner, reason: "stale" };
-    return null;
-  }
 
   private async release(): Promise<void> {
     await unlink(lockPathFor(this.opts.file)).catch(() => {});

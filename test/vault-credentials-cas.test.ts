@@ -122,6 +122,24 @@ describe("the version CAS", () => {
     expect(result.version).toBe(1);
   });
 
+  test("a FRESH lock whose owner no longer exists is reclaimed at once", async () => {
+    await writeVaultCredentials(CREDS);
+    const lock = `${credentialsPath()}.lock`;
+    await mkdir(path.dirname(lock), { recursive: true });
+    // Written a moment ago by a process that is gone — a container killed
+    // mid-rotation, a daemon that crashed inside the cut. Age says "respect
+    // it"; liveness says there is nobody to respect. Without the liveness half
+    // this door was shut for the whole stale timer, and it is the door both a
+    // rotation and a migration swap have to pass through.
+    await writeFile(
+      lock,
+      JSON.stringify({ pid: 999_999, bootId: "gone", at: new Date().toISOString() }),
+      { mode: 0o600 },
+    );
+    const result = await updateVaultCredentials((c) => ({ ...(c as VaultCredentials), bucket: "y" }));
+    expect(result.version).toBe(1);
+  });
+
   test("concurrent writers serialize instead of interleaving", async () => {
     await writeVaultCredentials(CREDS);
     const results = await Promise.all([

@@ -25,6 +25,13 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 
+import {
+  LOCK_WAIT_MS,
+  MAX_CAS_RETRIES,
+  reclaimableLock,
+  type LockOwner,
+} from "../../ui/store-lock";
+
 export type VaultStorageKind = "gcs" | "s3";
 
 /** A GCP service-account key JSON (the file GCP hands out), inlined. */
@@ -121,16 +128,11 @@ export async function writeVaultCredentials(creds: VaultCredentials): Promise<vo
 
 // ── Single-writer protocol ──────────────────────────────────────────────────
 
-/** Identifies THIS process in the lock file, so a stale lock names its owner. */
+/** Identifies THIS process in the lock file, so a stale lock names its owner.
+ *  The SHAPE the shared reclaim rule parses — a lock file this one cannot read
+ *  is reclaimable-as-unreadable, which is not what a live writer wants said
+ *  about its own. */
 const BOOT_ID = randomUUID();
-
-/** A lock older than this is treated as abandoned by a killed writer. */
-const LOCK_STALE_MS = 10_000;
-/** How long a writer waits for a live lock before giving up. */
-const LOCK_WAIT_MS = 5_000;
-/** CAS attempts before the write fails loudly. Retrying forever would turn a
- *  contended rotation into a hang with no audit record. */
-const MAX_CAS_RETRIES = 5;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -144,18 +146,24 @@ async function acquireLock(waitMs = LOCK_WAIT_MS): Promise<void> {
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
-      await writeFile(file, JSON.stringify({ pid: process.pid, bootId: BOOT_ID }), {
-        flag: "wx",
-        mode: 0o600,
-      });
+      const owner: LockOwner = {
+        pid: process.pid,
+        bootId: BOOT_ID,
+        at: new Date().toISOString(),
+      };
+      await writeFile(file, JSON.stringify(owner), { flag: "wx", mode: 0o600 });
       return;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // A killed writer leaves its lock behind. Break it once it is provably
-      // older than any real critical section — a lock nobody can clear blocks
-      // sign-in and every CLI verb, which is worse than the race it prevents.
-      const info = await stat(file).catch(() => null);
-      if (info && Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+      // A killed writer leaves its lock behind, and a lock nobody can clear
+      // blocks every rotation and every migration swap — so it is broken, by the
+      // SAME rule the console's user and config stores use rather than by a
+      // second copy of it. The copy here had no liveness check at all: a lock
+      // left by a process that no longer exists held this file for the full
+      // stale timer, on the one door a rotation and a storage-migration cut both
+      // have to pass through.
+      const reclaim = await reclaimableLock(file);
+      if (reclaim) {
         await unlink(file).catch(() => {});
         continue;
       }
