@@ -161,16 +161,24 @@ export function renderSystemdUnit(options: ServiceInstallOptions): string {
     ? `StartLimitIntervalSec=${options.restart.limitIntervalSec}\n` +
       `StartLimitBurst=${options.restart.limitBurst}\n`
     : "";
+  // The restart ceiling belongs to [Unit]. `StartLimitIntervalSec` is a [Unit]
+  // directive: emitted under [Service] systemd logs "Unknown key name … in
+  // section 'Service', ignoring" and drops it, while `StartLimitBurst` survives
+  // as a legacy alias and runs against the 10-second default interval — which
+  // RestartSec=5 never fills. So the ceiling was absent exactly where it is
+  // needed: on the documented rollback, the previous binary has no `ui` verb and
+  // the console unit exits 1 every five seconds forever, appending usage text to
+  // a log nothing rotates.
   return `[Unit]
 Description=HX Fortress
 After=network-online.target
-
+${limits}
 [Service]
 Type=simple
 ExecStart=${executablePath} ${args}
 Restart=on-failure
 RestartSec=5
-${limits}${environment}StandardOutput=append:${serviceLogPath}
+${environment}StandardOutput=append:${serviceLogPath}
 StandardError=append:${serviceLogPath}
 
 [Install]

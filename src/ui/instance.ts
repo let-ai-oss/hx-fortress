@@ -59,7 +59,19 @@ export function machineBootId(): string {
   try {
     cachedBootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   } catch {
-    cachedBootId = `boot-${Math.round(Date.now() / 1000 - os.uptime())}`;
+    // Quantized to the minute, and DERIVED is marked as such.
+    //
+    // `os.uptime()` returns whole seconds while `Date.now()/1000` carries the
+    // fraction, so rounding produced two different ids within one run — and
+    // `proveIdentity` treats a bootId mismatch as conclusive death BEFORE it
+    // consults startTime, so the lock holder was declared dead about half the
+    // time on darwin, which ships a launchd manager. Two consoles then owned one
+    // root: two writers of users.json, two session tables neither could revoke.
+    //
+    // A minute is far coarser than the drift and far finer than a reboot. The
+    // `~` marks it derived so `proveIdentity` can decline to treat a mismatch as
+    // proof of death.
+    cachedBootId = `boot~${Math.floor((Date.now() / 1000 - os.uptime()) / 60)}`;
   }
   return cachedBootId;
 }
@@ -114,7 +126,15 @@ export type IdentityVerdict = "same" | "gone" | "unproven";
  * container is how a console shutdown kills the daemon.
  */
 export function proveIdentity(record: InstanceLockRecord): IdentityVerdict {
-  if (record.bootId !== machineBootId()) return "gone";
+  if (record.bootId !== machineBootId()) {
+    // A DERIVED boot id is not proof of a reboot. Where the kernel publishes one
+    // a mismatch really does mean the machine restarted and every pid is stale.
+    // Where we computed it from uptime it can differ between two live processes,
+    // and treating that as conclusive death is what let a second console unlink
+    // a live holder's lock. Fall through to the pid and start-time checks, which
+    // is what the comment above already claims this does.
+    if (!record.bootId.startsWith("boot~") && !machineBootId().startsWith("boot~")) return "gone";
+  }
   try {
     process.kill(record.pid, 0);
   } catch (err) {

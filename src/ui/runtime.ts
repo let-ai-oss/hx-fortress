@@ -180,7 +180,19 @@ export class UiRuntime {
   hostCheck(req: Request, config: UiConfig, boundPort: number): HostCheck {
     return checkHost(
       req.headers.get("host"),
-      buildHostAllowlist({ bind: config.bind, port: boundPort, publicUrl: config.publicUrl }),
+      // Same precedence the SSO door uses thirty lines up, and the same one
+      // `advertise.ts` publishes. The documented container recipe sets
+      // FORTRESS_UI_PUBLIC_URL rather than writing ui.json, so ignoring it here
+      // meant the hub was handed an origin, armed the launch button, and every
+      // request carrying that Host was refused — while the grant itself would
+      // have been accepted.
+      buildHostAllowlist({
+        bind: config.bind,
+        port: boundPort,
+        publicUrl:
+          normalizedPublicUrl(this.options.env?.FORTRESS_UI_PUBLIC_URL?.trim() || config.publicUrl) ??
+          config.publicUrl,
+      }),
     );
   }
 
