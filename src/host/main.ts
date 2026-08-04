@@ -395,6 +395,14 @@ export async function runFortressHost(
       const db = postgres.isReady() ? resolveHxDb() : null;
       if (!db) throw new Error("the fortress database is not available");
       const applied = await replaceRoster(db, roster);
+      if (applied.stale) {
+        // Not an error, and not an application either — saying "applied … 0
+        // members" would read as let.ai reporting an empty organization.
+        bus.scopeFor("roster").info("ignored a roster older than the one already applied", {
+          asOf: roster.asOf,
+        });
+        return;
+      }
       bus.scopeFor("roster").info("applied the roster let.ai sent", {
         members: applied.received,
         departed: applied.deactivated,

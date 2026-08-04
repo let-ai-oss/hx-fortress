@@ -33,6 +33,9 @@ export interface RosterSyncState {
 export interface RosterApplyResult {
   received: number;
   deactivated: number;
+  /** True when the snapshot was older than the one already applied and nothing
+   *  was written. The caller reports it; it is not an error. */
+  stale?: boolean;
 }
 
 function iso(value: unknown): string | null {
@@ -79,6 +82,21 @@ export async function replaceRoster(
   const ids = members.map((m) => m.externalId);
 
   return await db.transaction(async (tx) => {
+    // `asOf` is the protocol's ordering handle, and this is the receiver the rule
+    // is written for: a snapshot not strictly newer than the one already applied
+    // is dropped whole. Pushes are fire-and-forget and each one awaits an async
+    // build before it is sent, so two of them can reach the wire in the opposite
+    // order to which they were computed. Applying the older one would resurrect
+    // a departed member as active with a cleared purge clock — a full-replacement
+    // payload has no way to express "this is out of date" except by not landing.
+    const priorRows = rows<{ asOf: unknown }>(
+      await tx.execute(sql`SELECT as_of AS "asOf" FROM hx.roster_sync WHERE singleton LIMIT 1`),
+    );
+    const prior = iso(priorRows[0]?.asOf);
+    if (prior !== null && asOf <= prior) {
+      return { received: 0, deactivated: 0, stale: true };
+    }
+
     for (const raw of members) {
       const member = normalize(raw);
       await tx.execute(
@@ -128,7 +146,8 @@ export async function replaceRoster(
           ON CONFLICT (singleton) DO UPDATE SET
             as_of = EXCLUDED.as_of,
             received_at = EXCLUDED.received_at,
-            members = EXCLUDED.members`,
+            members = EXCLUDED.members
+          WHERE EXCLUDED.as_of > hx.roster_sync.as_of`,
     );
     return {
       received: members.length,

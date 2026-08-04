@@ -182,6 +182,24 @@ function fakeDb(recorded: Recorded): HxDb {
   } as unknown as HxDb;
 }
 
+/** A db whose roster_sync already holds `storedAsOf`, for the ordering gate. */
+function fakeDbWithPriorSync(recorded: Recorded, storedAsOf: string): HxDb {
+  const answer = async (statement: SQL) => {
+    const text = render(statement);
+    recorded.statements.push(text);
+    if (text.includes("FROM hx.roster_sync")) return { rows: [{ asOf: storedAsOf }] };
+    return { count: 1 };
+  };
+  const tx = { execute: answer };
+  return {
+    transaction: async (fn: (t: typeof tx) => Promise<unknown>) => {
+      recorded.transactions += 1;
+      return await fn(tx);
+    },
+    execute: answer,
+  } as unknown as HxDb;
+}
+
 function payload(ids: readonly string[], asOf = "2026-07-30T00:00:00.000Z"): RosterSyncPayload {
   return {
     asOf,
@@ -432,5 +450,44 @@ describe("the terminal verb", () => {
         }),
       ).rejects.toThrow(/whole number of days/);
     });
+  });
+});
+
+
+describe("two syncs that arrive out of order", () => {
+  // Pushes are fire-and-forget and each awaits an async build before it is sent,
+  // so the wire order is not the order they were computed in. A full-replacement
+  // payload cannot say "I am out of date" — it can only not land.
+  test("an older snapshot is dropped whole, not applied", async () => {
+    const recorded: Recorded = { statements: [], transactions: 0 };
+    const db = fakeDbWithPriorSync(recorded, "2026-07-30T12:00:00.000Z");
+
+    const result = await replaceRoster(db, payload(["a"], "2026-07-30T09:00:00.000Z"));
+
+    expect(result.stale).toBe(true);
+    expect(result.received).toBe(0);
+    // Nothing was written: no member upsert, no deactivation, no as_of move.
+    expect(recorded.statements.some((s) => s.includes("INSERT INTO hx.roster ("))).toBe(false);
+    expect(recorded.statements.some((s) => s.includes("UPDATE hx.roster"))).toBe(false);
+    expect(recorded.statements.some((s) => s.includes("INSERT INTO hx.roster_sync"))).toBe(false);
+  });
+
+  test("a snapshot with the SAME asOf is stale too — strictly newer, not newer-or-equal", async () => {
+    const recorded: Recorded = { statements: [], transactions: 0 };
+    const db = fakeDbWithPriorSync(recorded, "2026-07-30T12:00:00.000Z");
+    const result = await replaceRoster(db, payload(["a"], "2026-07-30T12:00:00.000Z"));
+    expect(result.stale).toBe(true);
+  });
+
+  test("a newer snapshot applies, and its as_of upsert cannot move the stored value back", async () => {
+    const recorded: Recorded = { statements: [], transactions: 0 };
+    const db = fakeDbWithPriorSync(recorded, "2026-07-30T09:00:00.000Z");
+
+    const result = await replaceRoster(db, payload(["a"], "2026-07-30T12:00:00.000Z"));
+
+    expect(result.stale).toBeUndefined();
+    expect(result.received).toBe(1);
+    const sync = recorded.statements.find((s) => s.includes("INSERT INTO hx.roster_sync"));
+    expect(sync).toContain("WHERE EXCLUDED.as_of > hx.roster_sync.as_of");
   });
 });
