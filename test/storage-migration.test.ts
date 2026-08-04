@@ -504,14 +504,32 @@ describe("proving the copy landed", () => {
     expect(result.aborted).toContain("0 of");
   });
 
-  test("a sidecar the target holds a shorter copy of fails verification too", async () => {
+  test("a sidecar the live target rewrote SHORTER is not a loss, and is not reported as one", async () => {
     const source = seeded(1);
     const target = new MemoryStore("target");
     const h = harness({ source, target });
-    // session.json is rewritten on every commit, so "the name is there" says
-    // nothing about whether the bytes came with it.
+    // Verification runs after the cut, so the target is the live bucket while the
+    // source is frozen. A sidecar is rewritten whole on every commit, and the
+    // rewrite is routinely shorter — a first-message-derived title replaced by
+    // the real one. Reporting that as "did not arrive whole" would put a
+    // fabricated partial-loss on the compliance surface.
     h.deps.rebindStore = async (): Promise<void> => {
       target.artifacts.set(`${sessionRef(key(0))}/session.json`, "{}");
+      h.trace.push("rebind");
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.switched).toBe(true);
+    expect(result.aborted).toBeNull();
+  });
+
+  test("a sidecar the target never received IS reported", async () => {
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const h = harness({ source, target });
+    // Presence is what verification still asserts: an object the source has and
+    // the target does not is a loss whatever is writing to the target.
+    h.deps.rebindStore = async (): Promise<void> => {
+      target.artifacts.delete(`${sessionRef(key(0))}/session.json`);
       h.trace.push("rebind");
     };
     const result = await runStorageMigration(h.deps);

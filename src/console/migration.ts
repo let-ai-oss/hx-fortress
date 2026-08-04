@@ -575,22 +575,28 @@ async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
     if (wanted !== null && landedBytes < wanted) {
       missing.push(`${ref} (${landedBytes} of ${wanted} bytes)`);
     }
+    // Sidecars are checked for PRESENCE, and deliberately not for content.
+    //
+    // By the time this runs the cut has happened, so the target is the live
+    // bucket while the source is frozen — and a sidecar is rewritten whole on
+    // every commit, not appended to. A live rewrite that is SHORTER than the
+    // copy taken before the cut is ordinary (a first-message-derived title
+    // replaced by the real one), so comparing the two sizes reports a session
+    // that is perfectly intact as "did not arrive whole", on the one surface an
+    // auditor reads. There is no measurement that fixes it; the comparison
+    // itself is unsound across a live cut.
+    //
+    // The canonical above is different and still compared: it is append-only, so
+    // a target shorter than the source is a real loss whatever else is writing.
+    // Staleness is the delta pass's job, and it is sound there because a sidecar
+    // only changes on a commit, which also appends the canonical the delta pass
+    // measures.
+    //
+    // It is also what makes this affordable: two listings per session rather
+    // than a full GET of every artifact from both buckets, serially.
     const landed = new Set(await deps.target.listSessionArtifacts(key));
     for (const name of await deps.source.listSessionArtifacts(key)) {
-      if (!landed.has(name)) {
-        missing.push(`${ref}/${name}`);
-        continue;
-      }
-      // Sidecars are small whole-file objects and the interface offers no stat
-      // for them, so the size comes from the read. A source artifact that
-      // vanished between the listing and the read is a delete landing under the
-      // run, and the tombstone replay is what agrees with the target about it.
-      const held = await deps.source.readArtifactText(key, name);
-      if (held === null) continue;
-      const arrived = await deps.target.readArtifactText(key, name);
-      if (arrived === null || Buffer.byteLength(arrived) < Buffer.byteLength(held)) {
-        missing.push(`${ref}/${name}`);
-      }
+      if (!landed.has(name)) missing.push(`${ref}/${name}`);
     }
   }
   return missing;
