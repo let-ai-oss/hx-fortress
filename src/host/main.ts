@@ -381,7 +381,10 @@ export async function runFortressHost(
       bucket: vaultCreds?.bucket ?? undefined,
       gatewayUrl: gateway.gatewayUrl,
       ...(await readConsoleAdvertisement({
-        config: new LiveUiConfig(paths.uiConfig),
+        // Hoisted: constructed per connection, its lastGood cache was always
+        // empty, so the class's documented degradation — fall back to the last
+        // good snapshot on a torn or unreadable re-read — could never engage.
+        config: liveUiConfig,
         env: process.env,
       })),
     }),
@@ -869,6 +872,7 @@ export async function runFortressHost(
    *  died. Spent by the poll on use — see RedriveTickets. */
   let redriveIds = new Set<string>();
   /** pid + a boot-unique id. Observability only — never a security predicate. */
+  const liveUiConfig = new LiveUiConfig(paths.uiConfig);
   const claimedBy = `${process.pid}:${randomUUID()}`;
   /** Set by the update executor once a new binary is in place; acted on only
    *  after the poll pass that wrote the outcome record has returned. */

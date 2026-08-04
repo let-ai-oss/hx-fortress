@@ -90,7 +90,14 @@ export async function replaceRoster(
     // a departed member as active with a cleared purge clock — a full-replacement
     // payload has no way to express "this is out of date" except by not landing.
     const priorRows = rows<{ asOf: unknown }>(
-      await tx.execute(sql`SELECT as_of AS "asOf" FROM hx.roster_sync WHERE singleton LIMIT 1`),
+      // FOR UPDATE: the gate and the write have to be one critical section. Two
+      // pushes racing both read the old marker, both pass, and the OLDER
+      // payload's member rows commit last — resurrecting a departed member as
+      // active with a cleared purge clock, while the marker upsert (correctly
+      // guarded) keeps the NEWER as_of, so the console reports the roster as
+      // current. The hub produces exactly that: eleven call sites nudge with no
+      // debounce, and this receiver dispatches frames concurrently.
+      await tx.execute(sql`SELECT as_of AS "asOf" FROM hx.roster_sync WHERE singleton FOR UPDATE`),
     );
     const prior = iso(priorRows[0]?.asOf);
     if (prior !== null && asOf <= prior) {

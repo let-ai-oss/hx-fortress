@@ -194,7 +194,13 @@ export class ConsumedGrants {
 
   private sweep(now: Date): void {
     for (const [jti, expiry] of this.seen) {
-      if (expiry <= now.getTime()) this.seen.delete(jti);
+      // Retained past `exp` by the same skew the verifier ALLOWS. jwtVerify
+      // accepts a grant until `exp + CONSOLE_GRANT_SKEW_SECONDS`, so dropping the
+      // consumed record at `exp` reopened it for that whole tail — and because
+      // this sweep runs BEFORE the `has(jti)` check, the record was deleted and
+      // re-added on every call, making a spent grant unboundedly redeemable
+      // rather than merely twice.
+      if (expiry + CONSOLE_GRANT_SKEW_SECONDS * 1000 <= now.getTime()) this.seen.delete(jti);
     }
   }
 

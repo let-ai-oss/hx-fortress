@@ -28,11 +28,15 @@ export class FileLogSink implements LogSink {
 
   write(record: LogRecord): void {
     if (!this.dirReady) {
-      mkdirSync(dirname(this.logPath), { recursive: true });
+      // 0700/0600. Every other secret-adjacent writer in this codebase is
+      // explicit about its mode; this one took the umask default, so the daemon
+      // log — which quotes raw driver and SDK errors — and each rotated segment
+      // were world-readable on a multi-user host.
+      mkdirSync(dirname(this.logPath), { recursive: true, mode: 0o700 });
       this.dirReady = true;
     }
     this.rotateIfNeeded();
-    appendFileSync(this.logPath, JSON.stringify(record) + "\n");
+    appendFileSync(this.logPath, JSON.stringify(record) + "\n", { mode: 0o600 });
   }
 
   private rotateIfNeeded(): void {

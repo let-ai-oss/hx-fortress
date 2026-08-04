@@ -15,6 +15,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { sweepCmdCreds } from "../console/cmd-creds";
+import { parsePublicUrl } from "./bind";
 import { ArgonBusyError, ArgonGate } from "./argon-gate";
 import { LiveUiConfig, effectiveUiEnabled, type UiConfig } from "./config";
 import { buildHostAllowlist, checkHost, checkOrigin, type HostCheck } from "./origin";
@@ -69,6 +70,15 @@ export type AuthVerdict =
 export type SignInVerdict =
   | { ok: true; token: string; session: UiSession }
   | { ok: false; status: 401 | 429 | 503; reason: string; retryAfterMs?: number };
+
+/** The origin form, or the input unchanged when it does not parse — the grant
+ *  door's own comparison is what reports a mismatch, and swallowing an
+ *  unparseable value here would hide it. */
+function normalizedPublicUrl(value: string | null | undefined): string | null {
+  if (!value) return value ?? null;
+  const parsed = parsePublicUrl(value);
+  return parsed.ok ? parsed.origin : value;
+}
 
 export class UiRuntime {
   readonly sessions = new SessionTable();
@@ -132,8 +142,14 @@ export class UiRuntime {
       grant,
       publicKey: (await sso?.pinnedKey()) ?? null,
       orgId: (await sso?.orgId()) ?? null,
-      publicUrlOrigin:
+      // NORMALIZED, like every other consumer of this value. The advertisement
+      // sends `parsePublicUrl(...).origin` and the hub re-normalizes on arrival,
+      // so comparing the raw env var here made a single trailing slash a
+      // permanent origin_mismatch — with the operator looking at two settings
+      // that read identically.
+      publicUrlOrigin: normalizedPublicUrl(
         this.options.env?.FORTRESS_UI_PUBLIC_URL?.trim() || config.publicUrl,
+      ),
       ssoEnabled: config.sso,
       now: () => new Date(this.now()),
       ...(sso?.onClockSkew ? { onClockSkew: sso.onClockSkew } : {}),
@@ -235,9 +251,22 @@ export class UiRuntime {
     workbenchSub?: string | null;
   }): Promise<SignInVerdict> {
     const now = this.now();
-    const ceiling = this.limiter.takeGlobalSignIn(now);
-    if (!ceiling.ok) {
-      return { ok: false, status: 429, reason: "too many sign-in attempts right now", retryAfterMs: ceiling.retryAfterMs };
+    // The RESERVATION first. The argon gate advertises that "during a flood from
+    // unknown logins, the operator who knows their password still gets in" — but
+    // the process-wide ceiling ran ahead of it, so 24 source addresses saturated
+    // it and every subsequent sign-in got 429, the real operator included. A
+    // principal with no recent failures skips the ceiling; it exists to bound
+    // strangers, and a clean principal is not one.
+    if (!this.lockouts.isClean(args.remoteKey, now)) {
+      const ceiling = this.limiter.takeGlobalSignIn(now);
+      if (!ceiling.ok) {
+        return {
+          ok: false,
+          status: 429,
+          reason: "too many sign-in attempts right now",
+          retryAfterMs: ceiling.retryAfterMs,
+        };
+      }
     }
     const bucket = this.limiter.take("signIn", `${args.login} ${args.remoteKey}`, now);
     if (!bucket.ok) {

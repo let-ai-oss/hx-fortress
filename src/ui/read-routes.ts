@@ -30,7 +30,7 @@ import {
   type Corroboration,
 } from "./corroboration";
 import { EVENTS_PATH, type EventStreamRegistry, type OpenStreamVerdict } from "./events";
-import { redactValue } from "./redact";
+import { redactCredentials, redactValue } from "./redact";
 import { renderPdf } from "./pdf";
 import type { VerifyResult } from "./residency-verify";
 import { reportLines, REPORT_TITLE, type ReportPayload } from "./report";
@@ -406,7 +406,11 @@ export async function handleReadRoute(
           sessionRef: ctx.sessionId,
           params: { ...parsed.range, lines },
         });
-        const text = await port.logsExport({ ...parsed.range, lines });
+        // Through the redactor, like every other value that leaves this console.
+        // The daemon log quotes raw driver and SDK errors — a connection string
+        // with its password, a rejected object-store key from a rotation — and
+        // this route is reachable by a READONLY session.
+        const text = redactCredentials(await port.logsExport({ ...parsed.range, lines }));
         return new Response(text, {
           status: 200,
           headers: {

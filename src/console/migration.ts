@@ -227,6 +227,18 @@ export async function copySession(
     // nothing left to carry, and the tombstone replay is what agrees with it.
     if (artifact === null) continue;
     await target.writeArtifact(key, name, artifact);
+    // Read back, like the canonical two blocks up. Verification after the cut
+    // can only check a sidecar's PRESENCE — the target is live by then and a
+    // rewrite is legitimately shorter — so copy time is the only moment where
+    // a corrupted sidecar is still detectable. Silent corruption was otherwise
+    // recoverable only because the source is retained, which nobody would know
+    // to do.
+    const arrived = await target.readArtifactText(key, name);
+    if (arrived === null || sha256(arrived) !== sha256(artifact)) {
+      throw new Error(
+        `checksum mismatch after copying ${sessionRef(key)}/${name} — the target holds different bytes`,
+      );
+    }
   }
   return { key, checksum, bytes: Buffer.byteLength(text) };
 }

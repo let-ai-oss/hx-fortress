@@ -300,6 +300,24 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
   });
 
   rows.push({
+    id: "cloud-questions",
+    name: "Questions this fortress asks let.ai",
+    direction: "out",
+    peer: inputs.cloudUrl ?? "not enrolled",
+    carries:
+      "a residency audit's batches of up to 500 session identifiers of the form " +
+      "<userId>:<family>:<sessionId>, and a routing-posture request that carries counts and no ids",
+    gate: "the enrolled organization credential; the fortress asks and the hub answers — nothing here writes",
+    notes: [
+      "The only outbound flow that carries per-session identifiers. Only TUNNEL-channel sessions of this " +
+        "organization are ever named: a session uploaded straight to this fortress was never told to " +
+        "let.ai, so asking about it would disclose it, and an unattributed session is withheld as well.",
+      "Every id named here is one let.ai relayed to this host in the first place, so the question " +
+        "re-confirms what the hub already holds rather than telling it something new.",
+    ],
+  });
+
+  rows.push({
     id: "console-url-advertised",
     name: "Console URL advertised to let.ai",
     direction: "out",

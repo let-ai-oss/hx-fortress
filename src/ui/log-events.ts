@@ -13,6 +13,7 @@
 // server holding any per-client state at all.
 
 import { readLastLines, rotateKeepFromEnv, watchLines } from "../log-tail";
+import { redactCredentials } from "./redact";
 import type { EventProducer, StreamEvent } from "./events";
 
 /** How much history a fresh connection receives before it starts following.
@@ -65,7 +66,7 @@ export function createLogEventProducer(options: LogEventProducerOptions): EventP
         // Already seen by this client. Comparing on the RECORD's own timestamp is
         // what makes the resume point survive a reconnect.
         if (Number.isFinite(since) && ts && Date.parse(ts) <= since) continue;
-        sink({ event: "log", ...(ts ? { id: ts } : {}), data: { line } });
+        sink({ event: "log", ...(ts ? { id: ts } : {}), data: { line: redactCredentials(line) } });
       }
       if (signal.aborted) return;
       sink({ event: "log-backfill-complete", data: { lines: history.length } });
@@ -73,7 +74,11 @@ export function createLogEventProducer(options: LogEventProducerOptions): EventP
         options.logPath,
         (line) => {
           const ts = timestampOf(line);
-          sink({ event: "log", ...(ts ? { id: ts } : {}), data: { line } });
+          // Redacted on the way out, like every other value this console emits.
+          // These are raw daemon log lines — driver errors quote connection
+          // strings, an object-store rejection quotes the key it was handed —
+          // and the stream is reachable by a readonly session.
+          sink({ event: "log", ...(ts ? { id: ts } : {}), data: { line: redactCredentials(line) } });
         },
         signal,
         options.pollMs ? { pollMs: options.pollMs } : {},

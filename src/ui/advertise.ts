@@ -16,8 +16,10 @@ import { effectiveUiEnabled, LiveUiConfig } from "./config";
 import { detectContainer } from "./container";
 
 export interface ConsoleAdvertisement {
-  /** The origin, or null — an explicit clear the hub acts on. */
-  consoleUrl: string | null;
+  /** The origin, or null — an explicit clear the hub acts on. ABSENT when this
+   *  fortress could not read its own config: the three wire states are distinct
+   *  for a reason, and "I could not look" is not "switch it off". */
+  consoleUrl?: string | null;
   runtimeKind: "host" | "container";
 }
 
@@ -43,7 +45,12 @@ export async function readConsoleAdvertisement(
   try {
     config = await deps.config.read();
   } catch {
-    return { consoleUrl: null, runtimeKind };
+    // OMITTED, not null. A null is a deliberate clear: the hub drops the
+    // advertised URL, drops the owner's approval AND suspends their manual
+    // override. An unreadable ui.json — EACCES, EIO, a hand-edit mid-write — is
+    // not a decision to switch the console off, and recovering from one costs
+    // two owner gestures in the workbench even after the file is fine again.
+    return { runtimeKind };
   }
   if (!config.sso) return { consoleUrl: null, runtimeKind };
   if (!effectiveUiEnabled(config, deps.env)) return { consoleUrl: null, runtimeKind };

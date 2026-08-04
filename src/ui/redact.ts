@@ -19,6 +19,19 @@ const BEARER = /\b(bearer|token|authorization)(\s*[=:]\s*|\s+)([A-Za-z0-9._~+/=-
 const QUERY_SECRET = /([?&](?:password|passwd|pwd|token|secret|credential|key)=)([^&\s]+)/gi;
 const PG_PASSWORD_FIELD = /\b(password)(\s*[=:]\s*)('[^']*'|"[^"]*"|\S+)/gi;
 
+// The shapes THIS appliance holds, which the four above do not recognise at all:
+// a GCS service-account JSON, an AWS access key pair, a presigned signature, and
+// PGPASSWORD. credentials.json is made of exactly these, and the daemon log
+// quotes raw SDK errors. Kept in step with `command-params.ts`, which has had
+// the same list all along on the parameter path and did not share it.
+const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+const SERVICE_ACCOUNT = /("private_key"\s*:\s*")((?:[^"\\]|\\.)*)(")/g;
+const AWS_ACCESS_KEY = /\bA(?:KIA|SIA|ROA|IDA)[0-9A-Z]{12,}\b/g;
+const AWS_SECRET_FIELD = /\b(secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key)(\s*[=:]\s*)('[^']*'|"[^"]*"|\S+)/gi;
+const PRESIGNED_SIGNATURE = /\b(X-(?:Goog|Amz)-Signature=)([A-Fa-f0-9]{16,})/gi;
+const PG_PASSWORD_ENV = /\b(PGPASSWORD)(\s*=\s*)(\S+)/g;
+const API_KEY_FIELD = /\b(sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[0-9A-Za-z-]{10,})/g;
+
 /**
  * Redact every credential shape in a string.
  *
@@ -31,7 +44,14 @@ export function redactCredentials(value: string): string {
     .replace(DSN, (_m, scheme: string, user: string) => `${scheme}${user}:${REDACTED}@`)
     .replace(QUERY_SECRET, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(BEARER, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
-    .replace(PG_PASSWORD_FIELD, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`);
+    .replace(PG_PASSWORD_FIELD, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
+    .replace(PRIVATE_KEY_BLOCK, REDACTED)
+    .replace(SERVICE_ACCOUNT, (_m, open: string, _key: string, close: string) => `${open}${REDACTED}${close}`)
+    .replace(AWS_ACCESS_KEY, REDACTED)
+    .replace(AWS_SECRET_FIELD, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
+    .replace(PRESIGNED_SIGNATURE, (_m, prefix: string) => `${prefix}${REDACTED}`)
+    .replace(PG_PASSWORD_ENV, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
+    .replace(API_KEY_FIELD, REDACTED);
 }
 
 /**

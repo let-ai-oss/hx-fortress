@@ -85,7 +85,13 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     // the parent commit, independently of the forward to this fortress, so "stub
     // with lanes" and "the parent never arrived" are reachable at once. Gateway
     // and reconciled rows are never asked, so this is already false for them.
-    !input.anyDestinationRecord
+    !input.anyDestinationRecord &&
+    // ...and that "no destination record" is an ANSWER, not an absence. It is
+    // false-by-default whenever the witness returned null or the row was never
+    // asked about, so without this the exemption sat ahead of the
+    // residency_unchecked guards and turned an unanswered question into a pass —
+    // the same substitution this file condemns a few lines below.
+    (!witnessEligible(input.ingestChannel) || input.witnessAnswered)
   ) {
     // Its own verdict, not `unknown_provenance`: the channel IS recorded, and
     // saying otherwise states a false fact on a compliance surface and inflates
