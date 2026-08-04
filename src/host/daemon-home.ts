@@ -82,7 +82,13 @@ export function resolveDaemonHome(options: ResolveDaemonHomeOptions): DaemonHome
   if (exists(credentialsUnder(current))) {
     return { home: current, adopted: null, searched };
   }
-  for (const candidate of options.candidates ?? CONTAINER_HOME_CANDIDATES) {
+  // The passwd home FIRST, ahead of the container paths. Credentials live at
+  // ~/.let/session-vault on every deployment (D11), and $HOME is only the first
+  // guess at what ~ means: a unit or supervisor that starts the daemon with a
+  // different HOME than the shell the operator enrolled from leaves the file
+  // exactly here, under a directory a container-only candidate list never looks
+  // at. Adopting it is what that install's own `~` already resolved to.
+  for (const candidate of [homedir(), ...(options.candidates ?? CONTAINER_HOME_CANDIDATES)]) {
     if (candidate === current) continue;
     searched.push(candidate);
     if (!exists(credentialsUnder(candidate))) continue;

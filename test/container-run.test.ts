@@ -386,9 +386,25 @@ describe("where the daemon's credentials are", () => {
   });
 
   test("a fresh volume adopts nothing and keeps the home it was given", () => {
-    const resolution = resolveDaemonHome({ env: { HOME: "/data" }, exists: () => false });
+    const resolution = resolveDaemonHome({
+      env: { HOME: "/data" },
+      exists: () => false,
+      homedir: () => "/home/ada",
+    });
     expect(resolution).toMatchObject({ home: "/data", adopted: null });
-    expect(resolution.searched).toEqual(["/data", "/root", "/"]);
+    expect(resolution.searched).toEqual(["/data", "/home/ada", "/root", "/"]);
+  });
+
+  test("a daemon started under a different HOME adopts the operator's own home", () => {
+    const resolution = resolveDaemonHome({
+      env: { HOME: "/var/lib/hx-fortress" },
+      homedir: () => "/home/ada",
+      // Where the enroll wizard put them: `~` for the account that ran it.
+      // Credentials live at ~/.let/session-vault on every deployment, and a
+      // candidate list of container paths alone never looks at a host's.
+      exists: (file) => file === credentialsUnder("/home/ada"),
+    });
+    expect([resolution.home, resolution.adopted]).toEqual(["/home/ada", "/home/ada"]);
   });
 
   test("an EMPTY .let is not a home — the file is what makes one", () => {
