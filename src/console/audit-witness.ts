@@ -24,11 +24,7 @@
 // budget that keeps it from becoming an outage of it.
 
 import type { WitnessAnswer } from "./audit-engine";
-import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
-
-/** Ids per question. D6's ceiling: large enough that a fortress of any size asks
- *  a handful of questions, small enough that one lost answer costs one batch. */
-export const WITNESS_BATCH_SIZE = 500;
+import { WITNESS_MAX_IDS, type FortressQueryPayload, type FortressQueryResultPayload } from "../protocol";
 
 export interface WitnessClientDeps {
   /** The tunnel's bounded ask. Absent on a transport that cannot ask at all,
@@ -49,7 +45,12 @@ export interface WitnessClientDeps {
 export function createWitnessClient(
   deps: WitnessClientDeps,
 ): (ids: readonly string[]) => Promise<WitnessAnswer | null> {
-  const batchSize = deps.batchSize ?? WITNESS_BATCH_SIZE;
+  // The cap comes from the protocol package, not from a local 500. It is part of
+  // the contract — a request carrying more MUST be refused rather than shortened
+  // — and two repositories that release separately, each holding its own copy of
+  // the number, are one release apart from a question the asking side believes
+  // is whole and the answering side silently truncates.
+  const batchSize = deps.batchSize ?? WITNESS_MAX_IDS;
   return async (ids) => {
     const ask = deps.request;
     if (!ask) {

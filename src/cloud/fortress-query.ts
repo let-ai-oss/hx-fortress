@@ -14,15 +14,16 @@
 // is true in all three cases (timeout, transport gone, old hub), and downstream
 // it renders as NOT CHECKED rather than as a clean verdict.
 //
-// The envelope types are declared here rather than imported: the protocol package
-// places the three fortressQuery frames on the hub→fortress union, while the
-// asking side is the daemon. The discriminators and the payload types below are
-// the package's, so the bytes on the wire are the ones it names.
+// The envelopes are the protocol package's, narrowed here rather than restated.
+// A local re-declaration typechecks against itself, so it would keep compiling
+// after the package moved a frame to the other direction — which is exactly the
+// bug a shared wire contract exists to make impossible. Asking the union for its
+// answer frames means a direction flip fails this build.
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
+import type { FortressQueryResultPayload, HubToFortressFrame } from "../protocol";
 
 /** How long one question may stay outstanding. Well inside any caller's own
  *  budget: an unanswered query must degrade to "unavailable" while the caller is
@@ -33,25 +34,13 @@ export const FORTRESS_QUERY_TIMEOUT_MS = 10_000;
  *  this bounds everything else, so a stuck hub cannot accumulate promises. */
 export const MAX_IN_FLIGHT_QUERIES = 8;
 
-export interface FortressQueryFrame {
-  t: "fortressQuery";
-  id: string;
-  query: FortressQueryPayload;
-}
-
-export interface FortressQueryResultFrame {
-  t: "fortressQueryResult";
-  id: string;
-  result: FortressQueryResultPayload;
-}
-
-export interface FortressQueryErrorFrame {
-  t: "fortressQueryError";
-  id: string;
-  error: string;
-}
-
-export type FortressQueryAnswerFrame = FortressQueryResultFrame | FortressQueryErrorFrame;
+/** The two frames a hub answers a question with, taken from the union that
+ *  declares them. Move them off hub→fortress and this resolves to `never`, which
+ *  is what makes every send and every settle below stop compiling. */
+export type FortressQueryAnswerFrame = Extract<
+  HubToFortressFrame,
+  { t: "fortressQueryResult" | "fortressQueryError" }
+>;
 
 export function isFortressQueryAnswer(frame: { t: string }): frame is FortressQueryAnswerFrame {
   return frame.t === "fortressQueryResult" || frame.t === "fortressQueryError";
@@ -148,8 +137,10 @@ export class FortressQueryRegistry {
 
 export interface RoutingPostureSnapshot {
   fetchedAt: string;
-  /** Present when the hub answered. */
-  data?: FortressQueryResultPayload["routingPosture"];
+  /** Present when the hub answered. Narrowed out of the answer union: the
+   *  payload travels with the `kind` it answers, so there is no posture field to
+   *  reach for on an answer to a different question. */
+  data?: Extract<FortressQueryResultPayload, { kind: "routingPosture" }>["routingPosture"];
   /** Present when it did not, with the reason. */
   unavailable?: string;
 }

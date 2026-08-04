@@ -14,7 +14,6 @@ import type {
   FortressToHubFrame,
   HubToFortressFrame,
 } from "../src/protocol";
-import type { FortressQueryFrame } from "../src/cloud/fortress-query";
 import { SUPPORTED_PROTOCOL_VERSION } from "../src/cloud/connection";
 
 /** What a hub does with a bounded question. Returning `null` is the OLD-HUB
@@ -47,7 +46,7 @@ export class FakeHub {
   readonly url: string;
   private readonly server: Bun.Server<undefined>;
   private socket: ServerWebSocket<undefined> | null = null;
-  private _received: Array<FortressToHubFrame | FortressQueryFrame> = [];
+  private _received: Array<FortressToHubFrame> = [];
   private readonly opts: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery">> &
     Pick<FakeHubOptions, "rejectWith" | "answerQuery">;
 
@@ -75,9 +74,9 @@ export class FakeHub {
           },
           message: (ws, data) => {
             const raw = typeof data === "string" ? data : data.toString();
-            let frame: FortressToHubFrame | FortressQueryFrame;
+            let frame: FortressToHubFrame;
             try {
-              frame = decodeFrame<FortressToHubFrame | FortressQueryFrame>(raw);
+              frame = decodeFrame<FortressToHubFrame>(raw);
             } catch {
               return;
             }
@@ -105,7 +104,7 @@ export class FakeHub {
   }
 
   /** All frames received from the Fortress client, in arrival order. */
-  received(): ReadonlyArray<FortressToHubFrame | FortressQueryFrame> {
+  received(): ReadonlyArray<FortressToHubFrame> {
     return [...this._received];
   }
 
@@ -131,7 +130,7 @@ export class FakeHub {
 
   private autoRespond(
     ws: ServerWebSocket<undefined>,
-    frame: FortressToHubFrame | FortressQueryFrame,
+    frame: FortressToHubFrame,
   ): void {
     const { orgId, fortressId, credential, protocolVersion, rejectWith } = this.opts;
 

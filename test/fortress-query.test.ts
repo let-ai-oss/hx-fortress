@@ -8,12 +8,14 @@ import {
   FORTRESS_QUERY_TIMEOUT_MS,
   FortressQueryRegistry,
   FortressQueryUnavailable,
+  isFortressQueryAnswer,
   MAX_IN_FLIGHT_QUERIES,
   POSTURE_STALE_AFTER_MS,
   postureFreshness,
   postureQualification,
   RoutingPostureCache,
 } from "../src/cloud/fortress-query";
+import type { FortressToHubFrame, HubToFortressFrame } from "../src/protocol";
 import type { CloudCredential } from "../src/cloud/credentials";
 import type { FortressConfig, HostLogger, MessageDispatcher } from "../src/host/types";
 import { FakeHub } from "./fake-hub";
@@ -52,6 +54,37 @@ function deps(overrides: Partial<ConstructorParameters<typeof WsCloudConnection>
     ...overrides,
   };
 }
+
+describe("who sends which frame", () => {
+  test("the direction comes from the protocol package, not from this repo", () => {
+    // These four lines are the pin. They are assignments to the PACKAGE's unions,
+    // so they only compile while `fortressQuery` travels fortress→hub and the two
+    // answers travel hub→fortress. This file used to re-declare the three
+    // envelopes locally, which typechecks against itself forever: the local copy
+    // agreed with a comment claiming the opposite direction, and nothing could
+    // have caught the day the package moved one.
+    const asked: FortressToHubFrame = {
+      t: "fortressQuery",
+      id: "fq-1",
+      query: { kind: "routingPosture" },
+    };
+    const answered: HubToFortressFrame = {
+      t: "fortressQueryResult",
+      id: "fq-1",
+      result: { kind: "routingPosture", routingPosture: POSTURE },
+    };
+    const refused: HubToFortressFrame = { t: "fortressQueryError", id: "fq-1", error: "nope" };
+    expect([asked.t, answered.t, refused.t]).toEqual([
+      "fortressQuery",
+      "fortressQueryResult",
+      "fortressQueryError",
+    ]);
+    // And the narrowing the registry settles on is those two answers, no wider.
+    expect(isFortressQueryAnswer(answered)).toBe(true);
+    expect(isFortressQueryAnswer(refused)).toBe(true);
+    expect(isFortressQueryAnswer(asked)).toBe(false);
+  });
+});
 
 describe("the query registry", () => {
   test("correlates each answer to its own caller", async () => {

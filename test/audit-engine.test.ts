@@ -13,7 +13,8 @@ import {
   runResidencyAudit,
   type AuditSessionRow,
 } from "../src/console/audit-engine";
-import { createWitnessClient, WITNESS_BATCH_SIZE } from "../src/console/audit-witness";
+import { createWitnessClient } from "../src/console/audit-witness";
+import { WITNESS_MAX_IDS, type FortressQueryPayload } from "../src/protocol";
 import { FortressQueryUnavailable } from "../src/cloud/fortress-query";
 import {
   acknowledgeable,
@@ -225,11 +226,19 @@ describe("one audit run", () => {
 });
 
 describe("the witness client", () => {
+  // The ids a question carries, taken through its discriminator: an answer to
+  // `routingPosture` has none, and reading the field off the union unnarrowed is
+  // how a mock ends up answering a question that was never asked.
+  const asked = (query: FortressQueryPayload): readonly string[] =>
+    query.kind === "residencyWitness" ? query.sessionIds : [];
   const answer = (ids: readonly string[]) => ({
     kind: "residencyWitness" as const,
     residencyWitness: ids.map((sessionId) => ({
       sessionId,
-      fortressPresent: true,
+      // The hub's DELIVERY RECORD. Named apart from the fortress's own canonical
+      // HEAD (VerdictInput.fortressPresent) because they are different facts,
+      // and the audit exists to catch the case where they disagree.
+      hubRoutedHere: true,
       letaiCopy: sessionId === "copied",
       anyDestinationRecord: true,
     })),
@@ -242,16 +251,16 @@ describe("the witness client", () => {
       request: async (query) => {
         inFlight += 1;
         expect(inFlight).toBe(1);
-        const ids = query.sessionIds ?? [];
+        const ids = asked(query);
         batches.push(ids.length);
         await new Promise((r) => setTimeout(r, 0));
         inFlight -= 1;
         return answer(ids);
       },
     });
-    const ids = Array.from({ length: WITNESS_BATCH_SIZE + 3 }, (_, i) => `s${i}`);
+    const ids = Array.from({ length: WITNESS_MAX_IDS + 3 }, (_, i) => `s${i}`);
     const result = await ask(ids);
-    expect(batches).toEqual([WITNESS_BATCH_SIZE, 3]);
+    expect(batches).toEqual([WITNESS_MAX_IDS, 3]);
     expect(result?.known.size).toBe(ids.length);
   });
 
@@ -275,8 +284,14 @@ describe("the witness client", () => {
     });
     expect(await Promise.race([silent(["s1"]), Promise.resolve("pending")])).toBe("pending");
 
+    // A well-formed answer to a DIFFERENT question. It is not a malformed frame
+    // — it is a hub answering something nobody asked, and reading its absent
+    // witness array as "no copies" is the failure this guards.
     const wrongShape = createWitnessClient({
-      request: async () => ({ kind: "routingPosture" as const }),
+      request: async () => ({
+        kind: "routingPosture" as const,
+        routingPosture: { cloudOnlySessions: 0, routedHere: 3, computedAt: "2026-08-01T00:00:00.000Z" },
+      }),
     });
     expect(await wrongShape(["s1"])).toBeNull();
   });
@@ -288,7 +303,7 @@ describe("the witness client", () => {
       request: async (query) => {
         calls += 1;
         if (calls === 2) throw new FortressQueryUnavailable("offline");
-        return answer(query.sessionIds ?? []);
+        return answer(asked(query));
       },
     });
     // The first batch DID come back — returning it would report the second
@@ -307,7 +322,7 @@ describe("the witness client", () => {
   });
 
   test("maps the two booleans the engine reads", async () => {
-    const ask = createWitnessClient({ request: async (q) => answer(q.sessionIds ?? []) });
+    const ask = createWitnessClient({ request: async (q) => answer(asked(q)) });
     const result = await ask(["copied", "plain"]);
     expect([...(result?.copies ?? [])]).toEqual(["copied"]);
     expect(result?.known.size).toBe(2);
@@ -352,9 +367,9 @@ describe("an unasked witness is named", () => {
       askWitness: createWitnessClient({
         request: async (q) => ({
           kind: "residencyWitness" as const,
-          residencyWitness: (q.sessionIds ?? []).map((sessionId) => ({
+          residencyWitness: (q.kind === "residencyWitness" ? q.sessionIds : []).map((sessionId) => ({
             sessionId,
-            fortressPresent: true,
+            hubRoutedHere: true,
             letaiCopy: false,
             anyDestinationRecord: true,
           })),

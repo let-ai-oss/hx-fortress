@@ -32,7 +32,6 @@ import {
   FortressQueryUnavailable,
   isFortressQueryAnswer,
   type FortressQueryAnswerFrame,
-  type FortressQueryFrame,
 } from "./fortress-query";
 import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
 
@@ -239,7 +238,10 @@ export class WsCloudConnection implements CloudConnection {
     }
     const opened = this.queries.open(timeoutMs);
     if (!opened.id) return opened.answer;
-    const frame: FortressQueryFrame = { t: "fortressQuery", id: opened.id, query };
+    // Typed as the union the daemon SENDS on: the question travels
+    // fortress→hub, and letting the package say so is what keeps this file from
+    // agreeing with itself about a direction it does not own.
+    const frame: FortressToHubFrame = { t: "fortressQuery", id: opened.id, query };
     try {
       ws.send(encodeFrame(frame));
     } catch (err) {
