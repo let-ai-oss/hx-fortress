@@ -26,7 +26,7 @@ import {
 } from "../components";
 import { COMMAND_SURFACE_NOTE, OPS_SESSION_LINE, opsLede } from "../copy";
 import * as fmt from "../format";
-import { useResource } from "../hooks";
+import { useResource, type Resource } from "../hooks";
 import { useApp } from "../state";
 
 const CORROBORATION_PILL: Record<string, { label: string; tone: string }> = {
@@ -576,7 +576,7 @@ const MIGRATION_STATUS_COPY: Record<string, string> = {
  */
 function MigrationPanel(props: {
   daemon: string | null;
-  runs: { data: { migrations: MigrationRunView[] } | null; error: string | null; reload: () => void };
+  runs: Resource<{ migrations: MigrationRunView[] }>;
   onSubmitted: () => void;
 }): React.ReactElement {
   const [dialog, ask] = useConfirm();
@@ -624,7 +624,6 @@ function MigrationPanel(props: {
     }
   };
 
-  const runs = props.runs.data?.migrations ?? [];
   return (
     <Panel
       title="Storage migration"
@@ -682,15 +681,25 @@ function MigrationPanel(props: {
         />
       </div>
       <ResultLine state={result} />
-      {runs.length === 0 ? (
-        <Empty>This fortress has not been moved between buckets.</Empty>
-      ) : (
-        <div className="rowlist ops">
-          {runs.map((run) => (
-            <MigrationLine key={run.id} run={run} />
-          ))}
-        </div>
-      )}
+      {/* Through <Loaded>, like every other panel on this page. Read as
+          `data?.migrations ?? []`, a failed fetch and a fortress that has never
+          moved are the same empty array — so a stopped Postgres or a 500 made a
+          COMPLIANCE surface assert that this fortress has never been moved
+          between buckets, which is the exact claim an auditor came here to
+          check. An unanswered question renders as the failure and a retry. */}
+      <Loaded
+        resource={props.runs}
+        emptyWhen={(data) => data.migrations.length === 0}
+        empty={<Empty>This fortress has not been moved between buckets.</Empty>}
+      >
+        {(data) => (
+          <div className="rowlist ops">
+            {data.migrations.map((run) => (
+              <MigrationLine key={run.id} run={run} />
+            ))}
+          </div>
+        )}
+      </Loaded>
     </Panel>
   );
 }
