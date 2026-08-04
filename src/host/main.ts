@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { access, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -641,32 +642,35 @@ export async function runFortressHost(
   // and the refusal that makes this recoverable never fired.
   let replayInFlight: Promise<void> | null = null;
   const replayParked = (): Promise<void> => {
-    replayInFlight ??= replayParkedOnce()
-      .then(() => {
-        replayFailure = null;
-      })
-      .catch((err: unknown) => {
-        replayFailure = err;
-        throw err;
-      })
-      .finally(() => {
-        replayInFlight = null;
-      });
+    replayInFlight ??= replayParkedOnce().finally(() => {
+      replayInFlight = null;
+    });
     return replayInFlight;
   };
   // A replay that threw AFTER rewriting sidecars is the case the preamble's
   // refusal exists for: the pending append is what would have told the run to
   // re-carry them, and if that is what failed the file says nothing. Swallowing
   // it lets the run start and cut over stale sidecars.
-  let replayFailure: unknown = null;
+  //
+  // State-derived, not a memory flag. A flag is cleared by any later replay that
+  // merely RETURNS — including the two early returns and a no-op drain of an
+  // empty park — which is precisely what happens after the failure: the entries
+  // were already unlinked, so the next drain finds nothing, succeeds, and
+  // withdraws the refusal. It also does not survive the restart that an ENOSPC
+  // or EIO makes likely. So the marker is a file, written before the sidecars
+  // are rewritten and removed only once the pending set is on disk.
+  const replayMarkerPath = path.join(paths.runtimeRoot, "replay-incomplete");
   const awaitReplay = async (): Promise<void> => {
     await replayInFlight?.catch(() => {});
-    if (replayFailure !== null) {
-      const err = replayFailure;
+    const marked = await access(replayMarkerPath).then(
+      () => true,
+      () => false,
+    );
+    if (marked) {
       throw new Error(
-        `the last parked-artifact replay did not finish, so pending copy records cannot be trusted: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        "a parked-artifact replay rewrote sidecars but did not record which sessions, so a resumed " +
+          `migration could cut over stale ones. Re-run \`hx-fortress ui\` replay (or restart the daemon) ` +
+          `to finish it; the marker is ${replayMarkerPath}`,
       );
     }
   };
@@ -687,10 +691,17 @@ export async function runFortressHost(
     // store is whichever bucket is now live, so the replay lands in the right
     // one either way: the target after a cut, the source after an abort.
     if (migrationIsRunning()) return;
+    // Raised before the first sidecar is rewritten, cleared only once the pending
+    // set is durable. Between those two points a crash leaves the marker, and a
+    // migration refuses rather than cutting over sidecars nothing recorded.
+    await writeFile(replayMarkerPath, "", { mode: 0o600 }).catch(() => {});
     const result = await drainParkedArtifacts(parkedArtifactsPath, (entry) =>
       store.writeArtifact(entry.key, entry.name, entry.text),
     );
-    parkLatch.settle(result.failed);
+    // The pending append FIRST, and the latch settled only after it. The append
+    // is what tells a resumed run to re-carry these sessions; settling first
+    // meant a throw here left `owed` already false, so nothing retried and the
+    // record of what was rewritten existed nowhere.
     // A run that is RESUMED under the same id re-copies from its own record
     // (`copyMissing(plan)`), so for that one path the record has to go — a
     // sidecar replayed after the abort would otherwise be skipped on resume.
@@ -700,6 +711,8 @@ export async function runFortressHost(
     // Pending keys are written before the attempt and cleared only on success,
     // so a failure is retried on the next replay rather than lost.
     const pending = await addForgetPending(forgetPendingPath, result.rewrote);
+    await unlink(replayMarkerPath).catch(() => {});
+    parkLatch.settle(result.failed);
     if (pending.length > 0) {
       const replayDb = postgres.isReady() ? resolveHxDb() : null;
       if (replayDb) {

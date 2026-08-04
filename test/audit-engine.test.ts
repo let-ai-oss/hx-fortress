@@ -120,6 +120,7 @@ describe("the fleet roll-up", () => {
     alsoAtLetaiAcknowledged: 0,
     notDeliveredHere: 0,
     noRecord: 0,
+    missingHere: 0,
     residencyUnchecked: 0,
     unknownProvenance: 0,
     notApplicable: 0,
@@ -229,6 +230,28 @@ describe("one audit run", () => {
     expect(result.counts.sessionsChecked).toBe(many.length);
     // Reported on all 50, so all 50 had to be asked about.
     expect(asked.length).toBe(many.length);
+  });
+
+  test("a gateway session whose transcript is GONE is a finding, not 'nothing to do'", async () => {
+    // The engine pays a HEAD to establish presence for every row. The eligibility
+    // gate used to return before reading it, so a vanished transcript on the
+    // common channels (gateway, reconciled, NULL) reported `not_applicable` —
+    // "this fortress is the only place these bytes were ever sent" — and
+    // `recordFindings` drops that verdict, so the loss left no row at all.
+    for (const channel of ["gateway", "reconciled", null]) {
+      const gone = [row({ sessionId: "g1", ingestChannel: channel })];
+      const result = await runResidencyAudit(
+        deps({
+          sessions: async () => gone,
+          listCanonical: async () => new Set<string>(),
+          headCanonical: async () => false,
+        }),
+      );
+      expect([channel, result.counts.missingHere]).toEqual([channel, 1]);
+      expect([channel, result.counts.notApplicable]).toEqual([channel, 0]);
+      expect([channel, failingFindings(result.findings).length]).toEqual([channel, 1]);
+      expect([channel, result.verdict]).toEqual([channel, "failed"]);
+    }
   });
 
   test("a witness that could not answer does not make a missing transcript benign", async () => {
@@ -660,6 +683,11 @@ describe("what the runner is allowed to sweep", () => {
     expect(rec.statements[i]).toContain("JOIN hx.users u ON u.id = s.user_id");
     expect(rec.statements[i]).not.toContain('s.id AS "sessionId"');
     expect(rec.statements[i]).not.toContain('s.user_id AS "userId"');
+    // Unattributed sessions are in scope, exactly as the console universe has
+    // them. An inner join on orgs made R8/R9's incident unraisable for every
+    // tunnel session with no attribution.
+    expect(rec.statements[i]).toContain("s.org_id IS NULL");
+    expect(rec.statements[i]).not.toContain("JOIN hx.orgs o ON o.id = s.org_id\n");
   });
 
   test("an unenrolled fortress sweeps nothing rather than everything", async () => {

@@ -72,15 +72,32 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
         // builds a key that can never match anything `listCanonical` returns,
         // and every session reads as absent from its own bucket. The reconciler
         // has always joined it this way (ingest/reconciler.ts).
+        // LEFT join on orgs, and an unattributed session counts as ours.
+        //
+        // `s.org_id` is nullable by design — a session with no org is a local
+        // session — and the console's own universe says so in one place
+        // (`query/console/universe.ts`): `(s.org_id IS NULL OR s.org_id = ...)`.
+        // An inner join dropped every one of them, so a tunnel-relayed session
+        // with no attribution that let.ai recorded a delivery for and that never
+        // arrived — R8/R9's incident — could not be raised at all, while the
+        // console's own session list went on showing it.
+        //
+        // No disclosure risk: only `tunnel` ids ever leave this box
+        // (`witnessEligible`), and a NULL-org row is by definition not another
+        // organization's.
+        //
+        // No `u.deleted_at` term: nothing in this repo ever sets it, and the day
+        // something does, a departed member's live sessions with transcripts
+        // still in the bucket would silently leave the denominator while the
+        // console kept counting them. The session's own `deleted_at` is the
+        // residency-relevant one.
         sql`SELECT s.session_id AS "sessionId", s.family AS "family", u.external_id AS "userId",
-                   s.ingest_channel AS "ingestChannel", o.external_id AS "org"
+                   s.ingest_channel AS "ingestChannel", coalesce(o.external_id, ${ownOrg}) AS "org"
               FROM hx.sessions s
-              JOIN hx.orgs o ON o.id = s.org_id
+              LEFT JOIN hx.orgs o ON o.id = s.org_id AND o.deleted_at IS NULL
               JOIN hx.users u ON u.id = s.user_id
              WHERE s.deleted_at IS NULL
-               AND o.deleted_at IS NULL
-               AND u.deleted_at IS NULL
-               AND o.external_id = ${ownOrg}
+               AND (s.org_id IS NULL OR o.external_id = ${ownOrg})
              ORDER BY s.created_at ASC`,
       );
       return rows<Record<string, unknown>>(result).map(

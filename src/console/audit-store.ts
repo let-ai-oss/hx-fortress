@@ -50,6 +50,7 @@ export async function finishAuditRun(
                not_delivered_here = ${args.counts.notDeliveredHere},
                no_record = ${args.counts.noRecord},
                residency_unchecked = ${args.counts.residencyUnchecked},
+               missing_here = ${args.counts.missingHere},
                unknown_provenance = ${args.counts.unknownProvenance},
                not_applicable = ${args.counts.notApplicable},
                qualification = ${args.qualification},

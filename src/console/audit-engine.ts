@@ -158,6 +158,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
     alsoAtLetaiAcknowledged: 0,
     notDeliveredHere: 0,
     noRecord: 0,
+    missingHere: 0,
     residencyUnchecked: 0,
     unknownProvenance: 0,
     notApplicable: 0,
@@ -212,6 +213,12 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   // posture cannot be fresh however recent the cache is.
   const fresh = witness !== null && (await deps.postureFresh());
   const summary = rollUp(counts, { fresh, witness: witnessState });
+  // A run that stopped at its budget must not persist a sentence that reads as
+  // though it covered the fortress. The qualification is stored as rendered
+  // precisely so a later read cannot re-derive a cleaner one than the run earned.
+  if (truncated) {
+    summary.qualification = `${summary.qualification} — stopped at this run's budget after ${counts.sessionsChecked} session(s); the rest were not checked`;
+  }
   return {
     counts,
     findings,
@@ -241,6 +248,9 @@ function countVerdict(counts: RollUpCounts, verdict: ResidencyVerdict, acknowled
     case "not_delivered_here":
       counts.notDeliveredHere += 1;
       return;
+    case "missing_here":
+      counts.missingHere += 1;
+      break;
     case "residency_unchecked":
       counts.residencyUnchecked += 1;
       break;

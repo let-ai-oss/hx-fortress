@@ -18,6 +18,7 @@ export type ResidencyVerdict =
   | "also_at_letai"
   | "not_delivered_here"
   | "no_record"
+  | "missing_here"
   | "residency_unchecked"
   | "unknown_provenance"
   | "not_applicable";
@@ -49,9 +50,21 @@ export function witnessEligible(ingestChannel: string | null): boolean {
 
 export function verdictFor(input: VerdictInput): ResidencyVerdict {
   if (!witnessEligible(input.ingestChannel)) {
-    // A session uploaded straight to this fortress was never named to let.ai, so
-    // there is nothing to ask about — and one whose channel is unknown must not
-    // be assumed to be either.
+    // Presence FIRST, inside this arm. Whether the object is still in the bucket
+    // is a local fact that needs no witness, and the engine has already paid a
+    // HEAD to establish it — but this gate used to return before reading it, so
+    // for every gateway, reconciled and NULL-channel session a vanished
+    // transcript read as "nothing to do, this fortress is the only place these
+    // bytes were ever sent", and `recordFindings` drops `not_applicable`, so the
+    // loss left no row anywhere.
+    //
+    // Only in this arm: for a witness-eligible session an absent object already
+    // has verdicts that say MORE than "missing" — not_delivered_here when let.ai
+    // recorded a delivery here, residency_unchecked when nobody answered — and
+    // testing presence ahead of the gate would make both unreachable.
+    if (!input.fortressPresent) return "missing_here";
+    // Present, and never named to let.ai, so there is nothing to ask about — and
+    // one whose channel is unknown must not be assumed to be either.
     return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";
   }
   if (input.fortressPresent) return input.letaiCopy ? "also_at_letai" : "confirmed";
@@ -68,6 +81,9 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
  *  also_at_letai fails it; an acknowledged one does not. */
 export function sessionCheckPasses(verdict: ResidencyVerdict, acknowledged: boolean): boolean {
   if (verdict === "not_delivered_here") return false;
+  // The object this fortress claims to hold is not in its bucket. Local, certain,
+  // and independent of anything let.ai says.
+  if (verdict === "missing_here") return false;
   // Fails, because the object really is missing from this fortress. What is
   // unknown is only WHY, and an unknown is not a pass on a compliance surface.
   if (verdict === "residency_unchecked") return false;
@@ -87,6 +103,7 @@ export const VERDICT_HEADLINE: Record<ResidencyVerdict, string> = {
   also_at_letai: "held here, and a historical let.ai copy exists",
   not_delivered_here: "should be on this fortress, and is not",
   no_record: "no destination record at let.ai — predates per-destination tracking",
+  missing_here: "this fortress claims this session, and its transcript is not in the bucket",
   residency_unchecked: "missing from this fortress, and the witness did not answer",
   unknown_provenance: "upload channel unknown — not verified with let.ai",
   not_applicable: "not checked with let.ai — uploaded directly; id never sent",
@@ -99,6 +116,7 @@ export const VERDICT_CAUSE: Record<ResidencyVerdict, string> = {
   also_at_letai: "bytes at let.ai predate this fortress, or the session is also attributed to a let.ai-hosted org",
   not_delivered_here: "let.ai recorded this fortress as a destination and the object never arrived",
   no_record: "this session was uploaded before let.ai recorded per-destination delivery",
+  missing_here: "the session row is live here and no canonical object exists under its prefix",
   residency_unchecked:
     "the object is not in this organization's bucket, and no answer came back about whether let.ai ever routed it here",
   unknown_provenance:
@@ -113,6 +131,8 @@ export const VERDICT_REMEDIATION: Record<ResidencyVerdict, string> = {
   not_delivered_here:
     "re-upload the session from the client that holds it, or ask let.ai to re-deliver it; this one is not acknowledgeable",
   no_record: "nothing to do — it is benign legacy, and it qualifies the verdict rather than failing it",
+  missing_here:
+    "the transcript is gone from this fortress's own bucket; restore it from a client that still holds the session, or from a bucket version if object versioning is on",
   residency_unchecked:
     "the object is missing from this fortress and the cloud witness did not answer, so it cannot be told apart from benign legacy; re-run the audit once let.ai is reachable, or with the cloud witness on",
   unknown_provenance:
@@ -136,6 +156,7 @@ export interface RollUpCounts {
   alsoAtLetaiAcknowledged: number;
   notDeliveredHere: number;
   noRecord: number;
+  missingHere: number;
   residencyUnchecked: number;
   unknownProvenance: number;
   notApplicable: number;
@@ -177,6 +198,15 @@ export function rollUp(
   // make it behave exactly like the `no_record` it replaced, which is the
   // downgrade 0020 exists to undo: the object really is absent from this
   // fortress, and the unknown is only whether let.ai ever routed it here.
+  // Ahead of the witness cases: an object missing from this fortress's own bucket
+  // is certain, where an unanswered witness is only unknown.
+  if (counts.missingHere > 0) {
+    const n = counts.missingHere;
+    return {
+      verdict: "failed",
+      qualification: `${n} session${n === 1 ? "" : "s"} this fortress claims ${n === 1 ? "is" : "are"} not in its bucket`,
+    };
+  }
   if (counts.residencyUnchecked > 0) {
     const n = counts.residencyUnchecked;
     // Which silence it was, in the same sentence. This branch returns before the
