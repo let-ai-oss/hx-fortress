@@ -1,3 +1,4 @@
+import { isSessionArtifactName, sessionArtifactNames } from "../src/modules/session-vault/store/keys";
 // Moving a fortress's objects to another bucket: what the engine does, in what
 // order, and what it refuses to do.
 //
@@ -1230,5 +1231,48 @@ describe("replaying a permanent delete onto the target", () => {
     await runStorageMigration(h.deps);
 
     expect(target.deletes).toContain(sessionRef(laneOnly));
+  });
+});
+
+describe("which names count as a session's sidecars", () => {
+  test("admits the fixed set AND the workflow pattern, and nothing else", () => {
+    // The migration's enumeration rests on this predicate: a name it rejects is
+    // an object the copy never carries and verification never misses. The suite
+    // drove MemoryStore.listSessionArtifacts, which returns every key under the
+    // prefix with no filtering, so it passed identically if the real filter
+    // dropped a class.
+    for (const name of ["session.json", "tasks.json", "plan.json", "workflow-abc123.json"]) {
+      expect([name, isSessionArtifactName(name)]).toEqual([name, true]);
+    }
+    for (const name of [
+      "log.jsonl", // the canonical, not a sidecar
+      ".staging/chunk-1.json",
+      "workflow-.json", // too short for the runId charset
+      "workflow-abc/def.json", // a separator has no business in a segment
+      "../escape.json",
+      "session.json.bak",
+      "",
+    ]) {
+      expect([name, isSessionArtifactName(name)]).toEqual([name, false]);
+    }
+  });
+
+  test("keeps only the sidecars from a realistic bucket listing", () => {
+    // With the trailing slash, exactly as both stores build it.
+    const prefix = "u1/claude/s1/";
+    const listing = [
+      `${prefix}log.jsonl`,
+      `${prefix}session.json`,
+      `${prefix}tasks.json`,
+      `${prefix}workflow-run-9.json`,
+      `${prefix}.staging/chunk-1.json`,
+      "u1/claude/s1:a:agent-1/log.jsonl",
+      "u1/claude/other/session.json",
+    ];
+    expect(sessionArtifactNames(listing, prefix).sort()).toEqual([
+      "session.json",
+      "tasks.json",
+      "workflow-run-9.json",
+    ]);
   });
 });

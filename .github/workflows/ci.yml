@@ -51,11 +51,13 @@ jobs:
       - name: Test
         run: bun test
 
-  # The store backends are the code most likely to be wrong in a way a mock
-  # cannot see — signed URLs, compose, versioned deletes and listing are provider
-  # behaviour, not ours. This job proves the PINNED emulator images still start
-  # and answer; without it the rig rots silently, because every emulator-backed
-  # suite is skip-with-reason and a skip is not a failure.
+  # What this job ACTUALLY proves: that the pinned emulator images still start
+  # and answer, and that the rig's own bring-up and tear-down work against them.
+  # It does NOT exercise the store backends — nothing here constructs an S3Store
+  # or a GcsStore, so signed URLs, compose, versioned deletes and listing are not
+  # covered by it. That coverage is still owed; claiming it here while the suite
+  # never touches an emulator-backed store is worse than the gap, because it
+  # reads as a green check over provider behaviour nobody tested.
   storage-emulators:
     name: Storage emulators (MinIO + fake-gcs)
     runs-on: ubuntu-latest

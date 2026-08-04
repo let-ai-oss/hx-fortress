@@ -136,7 +136,8 @@ export function externalContainmentBanner(): string[] {
       "not have produced.",
     "And the command plane is not installed at all: the five routines it drives are created only on the " +
       "embedded Postgres, so start, stop, update, rotate and migrate are terminal-only here. Everything " +
-      "this console READS works; a command submitted from it would sit unclaimed until its deadline.",
+      "this console READS works. A command submitted from it is never claimed and never expires either — " +
+      "nothing polls it, so it does not even reach its deadline.",
     "To restore both, run the daemon under a role that does not own the tables, and give the console " +
       "its own limited-role DSN with `hx-fortress ui config set databaseUrl --stdin`.",
   ];

@@ -173,6 +173,26 @@ export async function ensureUiUnit(
       return { kind: "present" };
     }
     if (!mayInstall) return { kind: "deferred" };
+    // The SAME refusal `installUiService` makes, because this installs the same
+    // unit. Skipping it here meant `FORTRESS_ROOT=/custom hx-fortress start`
+    // wrote a daemon unit with no Environment= alongside a console unit pinned
+    // to /custom — two processes reading different databases and different
+    // account stores, which is the divergence this file's header says is
+    // asserted.
+    const daemon = deriveDaemonRoot({
+      ...(deps.platform ? { platform: deps.platform } : {}),
+      ...(deps.home ? { home: deps.home } : {}),
+      unitEnvironment:
+        deps.daemonUnitEnvironment !== undefined
+          ? deps.daemonUnitEnvironment
+          : readDaemonUnitEnvironment({
+              ...(deps.platform ? { platform: deps.platform } : {}),
+              ...(deps.home ? { home: deps.home } : {}),
+            }),
+    });
+    if (daemon.root !== paths.root) {
+      return { kind: "failed", reason: rootDivergenceRefusal(paths.root, daemon) };
+    }
     await service.install({
       executablePath: deps.executablePath ?? process.execPath,
       serviceLogPath: paths.serviceLog,

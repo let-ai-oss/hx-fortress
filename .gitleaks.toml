@@ -28,7 +28,7 @@ description = "credentialRef fixtures — 32-hex indirection ids, which are not 
 # INDIRECTION, and exists precisely so the secret it points at never travels on
 # the command. A conforming fixture therefore has to look like a key to the
 # generic detector, and cannot be softened without destroying what the test
-# proves. These two files carry those fixtures; every other file, including
+# proves. The files below carry those fixtures; every other file, including
 # every other test, stays fully scanned.
 paths = [
   '''test/console-commands\.test\.ts''',

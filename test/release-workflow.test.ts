@@ -66,6 +66,17 @@ describe("release workflow", () => {
   test("signs artifacts and attests build provenance (supply-chain)", () => {
     // Ed25519 detached signatures over the binaries + pgvector tarball…
     expect(workflow).toContain("scripts/sign-artifact.ts");
+    // WHAT is signed, and WHEN. The signature sidecar the updater fetches is
+    // `<name>.sig` for the UNCOMPRESSED artifact, so signing after the gzip — a
+    // natural "sign what you upload" edit — publishes `<name>.gz.sig`. Every
+    // fortress then 404s on the path it asks for, and because enforcement is off
+    // by default the missing-signature branch warns and installs anyway: an
+    // authenticity gate disabled fleet-wide with this suite green.
+    const signAt = workflow.indexOf("scripts/sign-artifact.ts");
+    const gzipAt = workflow.indexOf("gzip -9 -f");
+    expect(gzipAt).toBeGreaterThan(-1);
+    expect(signAt).toBeLessThan(gzipAt);
+    expect(workflow).toMatch(/sign-artifact\.ts[^\n]*"\$out_path"/);
     expect(workflow).toContain("FORTRESS_SIGNING_KEY");
     // …plus GitHub build-provenance attestation…
     expect(workflow).toContain("attest-build-provenance");
