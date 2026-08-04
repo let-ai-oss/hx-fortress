@@ -429,7 +429,7 @@ describe("the credential a rotation carries", () => {
     const port = createConsoleWritePort({
       service: null,
       serviceLogPath: path.join(root, "service.log"),
-      executablePath: "/bin/hx-fortress",
+
       db: () => db,
       heartbeatAt: async () => new Date().toISOString(),
       offered: OFFERED_COMMAND_KINDS,

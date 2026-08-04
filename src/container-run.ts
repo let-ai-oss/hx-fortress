@@ -266,5 +266,9 @@ export async function runContainerCommand(
     ...(deps.fortressRoot ? { fortressRoot: deps.fortressRoot } : {}),
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
     ...(deps.stopSignal ? { stopSignal: deps.stopSignal } : {}),
+    // Forwarded, not dropped: a caller that passes a clock or an identity proof
+    // and silently gets the real ones is a test that proves nothing.
+    ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.prove ? { prove: deps.prove } : {}),
   });
 }

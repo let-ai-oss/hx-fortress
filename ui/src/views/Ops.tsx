@@ -113,11 +113,7 @@ export default function Ops(): React.ReactElement {
         }}
       />
 
-      <CheckupPanel
-        container={container}
-        daemon={status.data?.daemon ?? null}
-        onSubmitted={() => commands.reload()}
-      />
+      <CheckupPanel daemon={status.data?.daemon ?? null} onSubmitted={() => commands.reload()} />
 
       <RotationPanel daemon={status.data?.daemon ?? null} onSubmitted={() => commands.reload()} />
 
@@ -455,7 +451,6 @@ function UpdateRow(props: {
 /** The composite health probe. Six checks, run where the handles are, reported
  *  with the evidence each one saw. */
 function CheckupPanel(props: {
-  container: boolean;
   daemon: string | null;
   onSubmitted: () => void;
 }): React.ReactElement {

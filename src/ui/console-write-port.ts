@@ -22,7 +22,6 @@ export interface ConsoleWritePortOptions {
    *  lifecycle instead. */
   service: ServiceManager | null;
   serviceLogPath: string;
-  executablePath: string;
   db: () => HxDb | null;
   /** The heartbeat the poller check reads. */
   heartbeatAt: () => Promise<string | null>;

@@ -315,7 +315,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // rather than calling a manager that would answer for the wrong lifecycle.
     service: options.serviceManager === "container" ? null : service,
     serviceLogPath: paths.serviceLog,
-    executablePath: process.execPath,
+
     db: () => {
       void refresh();
       return handle?.db ?? null;
