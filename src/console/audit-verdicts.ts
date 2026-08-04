@@ -179,9 +179,16 @@ export function rollUp(
   // fortress, and the unknown is only whether let.ai ever routed it here.
   if (counts.residencyUnchecked > 0) {
     const n = counts.residencyUnchecked;
+    // Which silence it was, in the same sentence. This branch returns before the
+    // notes block, and it fires ONLY when the witness did not answer — so the
+    // note that distinguishes "switched off" from "unreachable" would otherwise
+    // be unreachable in exactly the case it was written for, and the run history
+    // could never say which one it had been.
+    const witness = context.witness ?? "unavailable";
+    const silence = witness === "attested" ? "the witness answered" : WITNESS_UNCHECKED_NOTE[witness];
     return {
       verdict: "failed",
-      qualification: `${n} session${n === 1 ? "" : "s"} missing here that the witness could not account for — re-run once let.ai is reachable, or with the cloud witness on`,
+      qualification: `${n} session${n === 1 ? "" : "s"} missing here that the witness could not account for — ${silence}`,
     };
   }
   const outstanding = counts.alsoAtLetai - counts.alsoAtLetaiAcknowledged;

@@ -648,6 +648,18 @@ describe("what the runner is allowed to sweep", () => {
     // are not this run's to name, or to report verdicts about.
     expect(rec.statements[i]).toContain("o.external_id =");
     expect(rec.values[i]).toContain(ORG);
+
+    // The NATURAL ids, not the row UUIDs. A bucket key is
+    // `${externalUserId}/${family}/${sessionId}`, so selecting `s.id` or
+    // `s.user_id` builds a comparison key that matches nothing the store
+    // returns — every session then reads as absent from its own bucket, and the
+    // residency audit verifies nothing while reporting confidently. That is
+    // what this sweep shipped with, and the SQL text is the only place it shows.
+    expect(rec.statements[i]).toContain('s.session_id AS "sessionId"');
+    expect(rec.statements[i]).toContain('u.external_id AS "userId"');
+    expect(rec.statements[i]).toContain("JOIN hx.users u ON u.id = s.user_id");
+    expect(rec.statements[i]).not.toContain('s.id AS "sessionId"');
+    expect(rec.statements[i]).not.toContain('s.user_id AS "userId"');
   });
 
   test("an unenrolled fortress sweeps nothing rather than everything", async () => {

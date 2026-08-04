@@ -107,7 +107,10 @@ export interface AuditRunResult {
   truncated: boolean;
 }
 
-/** The canonical object key for a session, as the store lays it out. */
+/** A comparison key for one session — NOT the store's object name (whose tail is
+ *  `log.jsonl`). Both sides of the presence check go through this function, so
+ *  the tail only has to be consistent; what must be right is the ids, which are
+ *  the EXTERNAL user id and the NATURAL session id, never the row UUIDs. */
 export function canonicalKeyOf(row: AuditSessionRow): string {
   return [row.userId, row.family, row.sessionId, "canonical.ndjson"].join("/");
 }

@@ -66,12 +66,20 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
       // session of its own, so there is nothing here to audit.
       if (!ownOrg) return [];
       const result = await db.execute(
-        sql`SELECT s.id AS "sessionId", s.family AS "family", s.user_id AS "userId",
+        // The NATURAL ids, not the row UUIDs. A bucket key is
+        // `${externalUserId}/${family}/${sessionId}` (store/keys.ts), so
+        // selecting `s.id` and `s.user_id` — the UUID PK and the users FK —
+        // builds a key that can never match anything `listCanonical` returns,
+        // and every session reads as absent from its own bucket. The reconciler
+        // has always joined it this way (ingest/reconciler.ts).
+        sql`SELECT s.session_id AS "sessionId", s.family AS "family", u.external_id AS "userId",
                    s.ingest_channel AS "ingestChannel", o.external_id AS "org"
               FROM hx.sessions s
               JOIN hx.orgs o ON o.id = s.org_id
+              JOIN hx.users u ON u.id = s.user_id
              WHERE s.deleted_at IS NULL
                AND o.deleted_at IS NULL
+               AND u.deleted_at IS NULL
                AND o.external_id = ${ownOrg}
              ORDER BY s.created_at ASC`,
       );

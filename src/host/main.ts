@@ -641,13 +641,34 @@ export async function runFortressHost(
   // and the refusal that makes this recoverable never fired.
   let replayInFlight: Promise<void> | null = null;
   const replayParked = (): Promise<void> => {
-    replayInFlight ??= replayParkedOnce().finally(() => {
-      replayInFlight = null;
-    });
+    replayInFlight ??= replayParkedOnce()
+      .then(() => {
+        replayFailure = null;
+      })
+      .catch((err: unknown) => {
+        replayFailure = err;
+        throw err;
+      })
+      .finally(() => {
+        replayInFlight = null;
+      });
     return replayInFlight;
   };
+  // A replay that threw AFTER rewriting sidecars is the case the preamble's
+  // refusal exists for: the pending append is what would have told the run to
+  // re-carry them, and if that is what failed the file says nothing. Swallowing
+  // it lets the run start and cut over stale sidecars.
+  let replayFailure: unknown = null;
   const awaitReplay = async (): Promise<void> => {
     await replayInFlight?.catch(() => {});
+    if (replayFailure !== null) {
+      const err = replayFailure;
+      throw new Error(
+        `the last parked-artifact replay did not finish, so pending copy records cannot be trusted: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   };
   const replayParkedOnce = async (): Promise<void> => {
     const store = vaultModule.getStore();

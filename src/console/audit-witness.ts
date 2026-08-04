@@ -31,6 +31,7 @@
 //   and the operator reads a rate limit as a broken hub.
 
 import type { WitnessAnswer } from "./audit-engine";
+import { FORTRESS_QUERY_TIMEOUT_MS } from "../cloud/fortress-query";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 import { WITNESS_MAX_IDS, type FortressQueryPayload, type FortressQueryResultPayload } from "../protocol";
@@ -140,9 +141,15 @@ export function createWitnessClient(
           return null;
         }
         try {
-          // The request carries the remaining budget, so one slow answer cannot
-          // overshoot it either.
-          result = await ask({ kind: "residencyWitness", sessionIds: [...batch] }, remaining);
+          // The remaining budget, but never MORE than the transport's own
+          // ceiling. Passing the whole run budget as one question's timeout
+          // would let a silent hub hold a single request for minutes — and the
+          // extra wait buys nothing, because a timeout carries no retryAfterMs
+          // and the run collapses the moment it returns.
+          result = await ask(
+            { kind: "residencyWitness", sessionIds: [...batch] },
+            Math.min(remaining, FORTRESS_QUERY_TIMEOUT_MS),
+          );
         } catch (err) {
           // Only a refusal that names its wait is worth sitting out, and only
           // while the RUN still has budget. Everything else — a timeout, a
