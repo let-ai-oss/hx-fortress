@@ -41,7 +41,7 @@ is no way to land them quietly first: pushing them **is** the release.
 | --- | --- |
 | The fortress re-pin is pushed before the protocol PR merges | The pin names a commit on a branch that is about to be squashed away. It resolves today and stops resolving the moment the branch is deleted, so the build is not reproducible and a later `bun install --frozen-lockfile` fails. |
 | The two consumers are re-pinned in separate rounds | The hub and the fortress serialize different shapes for the same message. The failure surfaces as a field that silently reads `undefined`, not as a build error. |
-| The fortress is published before the hub deploys | Every fortress that self-updates starts asking a hub that does not understand the question. Residency runs come back qualified with a witness that was never reachable, and the console hand-off lands on a hub route that does not exist. |
+| The fortress is published before the hub deploys | Every fortress that self-updates starts asking a hub that does not understand the question. **Silent chunk loss**, not just qualified verdicts. A new fortress answers every store RPC with `vault_offline:ingest_paused:<ISO>` during a storage migration, and the deployed hub parks only purge jobs of kind `fortress`: a chunk forward is logged at warn and DROPPED after the route has already returned `ok: true`, so the client advances its cursor and never resends; a mirror forward is a bare `catch { return false }`; and `letai`/`resweep` purge jobs dead-letter. The console hand-off also lands on a hub route that does not exist. |
 | The immutable release is dispatched on a **branch** instead of the tag | `workflow_dispatch` runs the workflow file *at the dispatched ref*, and builds it there. The release is cut from whatever the branch points at now, which is not the commit the build tag records. |
 | The version bump is pushed twice for one version | The rolling step force-moves `builds/hx-fortress-<version>` on every push. A build tag verified before a second push no longer names the commit that was verified. |
 
@@ -123,8 +123,19 @@ on `hx.ingest_control`, and delete-then-reinsert mints a fresh pause anchor —
 which is exactly the unbounded pause the clamp exists to bound.
 
 A command row planted in that window is rejected by the boot fence of the binary
-that comes back — it is never executed. The rows written in the window are still
-there.
+that comes back — it is never executed *by the upgraded binary*. What the fence
+cannot undo is the downgraded one: it has no fence and its own poll loop, so a
+row planted while it is running is claimed and executed there and then, as the
+daemon, with whatever the executor for that kind does. Treat the window as one in
+which the command plane is open, not merely one in which its records are
+untrustworthy. The rows written in the window are still there.
+
+Roster retention is the other thing a downgrade quietly changes. The older
+binary's `writeConfig` has no `preserve` argument and its boot rewrites the file,
+so the `roster` block is dropped and retention reverts to the 90-day default —
+and that default is a real `DELETE FROM hx.roster`, not a display setting. Re-set
+it before the downgraded binary has been up for longer than the shortest
+retention you had configured.
 
 After re-upgrading, reconcile the acknowledgements:
 
