@@ -2,7 +2,7 @@
 // respawns anything, and what it is allowed to signal.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -485,13 +485,23 @@ describe("FORTRESS_UI_BOOTSTRAP_USER", () => {
       request: { login: "ops", requestedAt: new Date().toISOString() },
       users,
       base: "http://127.0.0.1:8788",
+      linkFile: path.join(root, "ui", "bootstrap-setup-link.txt"),
     });
     expect(applied.created).toBe(true);
     const file = await users.load();
     expect(file.users[0]).toMatchObject({ login: "ops", role: "operator" });
     const token = file.users[0]?.setupTokens[0];
     expect(token).toBeDefined();
-    expect(applied.lines.some((l) => l.includes("/setup#t="))).toBe(true);
+    // The link is a live 24-hour operator credential and this console's stdout
+    // is pid 1's stdout — the container log aggregator, where a secret is
+    // retained, indexed and searchable. It goes to a 0600 file; the log names
+    // the path.
+    const linkFile = path.join(root, "ui", "bootstrap-setup-link.txt");
+    expect(applied.lines.some((l) => l.includes("/setup#t="))).toBe(false);
+    expect(applied.lines.some((l) => l.includes(linkFile))).toBe(true);
+    const written = await readFile(linkFile, "utf8");
+    expect(written).toContain("/setup#t=");
+    expect((await stat(linkFile)).mode & 0o777).toBe(0o600);
     expect(applied.lines.join("\n")).toContain("hx-fortress ui user reset ops");
   });
 
@@ -502,6 +512,7 @@ describe("FORTRESS_UI_BOOTSTRAP_USER", () => {
       request: { login: "ops", requestedAt: new Date().toISOString() },
       users,
       base: "http://127.0.0.1:8788",
+      linkFile: path.join(root, "ui", "bootstrap-setup-link.txt"),
     });
     // `ui user create` fails on an existing login, and resetting one on every
     // redeploy would make a container restart an account takeover.
@@ -519,6 +530,7 @@ describe("FORTRESS_UI_BOOTSTRAP_USER", () => {
       request: { login: "not a login!", requestedAt: "" },
       users,
       base: "http://127.0.0.1:8788",
+      linkFile: path.join(root, "ui", "bootstrap-setup-link.txt"),
     });
     expect(applied.created).toBe(false);
     expect(applied.lines[0]).toContain("not a usable login");

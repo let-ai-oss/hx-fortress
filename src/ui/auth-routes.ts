@@ -19,6 +19,7 @@ import {
   SIGN_IN_RECOVERY_COPY,
 } from "./copy";
 import { UiRuntime } from "./runtime";
+import { redactValue } from "./redact";
 import { SESSION_HEADER, sessionCopy } from "./sessions";
 import { checkLogin, checkPasswordPolicy, liveSetupToken } from "./users";
 
@@ -32,7 +33,10 @@ export const SETUP_STATUS_PATH = "/ui/api/setup/status";
 export const SETUP_COMPLETE_PATH = "/ui/api/setup/complete";
 
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
-  return new Response(`${JSON.stringify(body)}\n`, {
+  // Redacted on the way out, unconditionally — the same belt the read and mutate
+  // builders wear. It matters MORE here: every route in this file answers a
+  // caller who has not signed in yet.
+  return new Response(`${JSON.stringify(redactValue(body))}\n`, {
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store", ...headers },
   });
@@ -242,7 +246,12 @@ export async function handleAuthRoute(
       return json({ completed: true, login: user.login, role: user.role });
     } catch (err) {
       ctx.audit?.noteFailure(AUDIT_ACTIONS.setupFailed, { remoteKey: ctx.remoteKey });
-      return json({ error: err instanceof Error ? err.message : "this setup link is no longer valid" }, 400);
+      // ONE sentence, never the exception's. The caller holds a setup token that
+      // did not work and nothing else, and every reason this throws — unknown,
+      // expired, already used, account disabled — is the same answer to them;
+      // saying which would enumerate. The thrown message is worse than useless
+      // here: a corrupt store names its own path on disk.
+      return json({ error: "this setup link is no longer valid" }, 400);
     }
   }
 

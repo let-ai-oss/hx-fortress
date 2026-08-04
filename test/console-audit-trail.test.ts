@@ -303,6 +303,35 @@ describe("the drain", () => {
   });
 });
 
+describe("what the pre-login door says back", () => {
+  test("a failed setup completion says one sentence, never the exception's", async () => {
+    const { audit } = consoleAudit();
+    const runtime = {
+      readConfig: async () => ({ marker: null, sessionTtlHours: 12, sessionIdleMinutes: 60 }),
+      completeSetup: async () => {
+        // What a corrupt store throws: its own path on disk, to a caller
+        // holding nothing but a setup token that did not work.
+        throw new Error("users.json is corrupt at /srv/fortress/ui/users.json");
+      },
+      entries: new EntryContexts(),
+    };
+    const res = await handleAuthRoute(
+      new Request("http://console.local/ui/api/setup/complete", {
+        method: "POST",
+        headers: { "x-setup-token": "nope" },
+        body: JSON.stringify({ password: "a-long-enough-password" }),
+      }),
+      { runtime: runtime as never, remoteKey: "10.0.0.1", remoteAddr: "10.0.0.1", audit },
+    );
+    expect(res?.status).toBe(400);
+    const body = (await res?.json()) as { error: string };
+    expect(body.error).toBe("this setup link is no longer valid");
+    // Every reason this throws is the same answer to this caller; saying which
+    // would enumerate, and the path is not theirs to learn.
+    expect(JSON.stringify(body)).not.toContain("/srv/fortress");
+  });
+});
+
 describe("what a record may name as its actor", () => {
   test("an actor beyond the bound is clamped where it is written", async () => {
     const spool = new AuditSpool({ dir, writer: "ui" });

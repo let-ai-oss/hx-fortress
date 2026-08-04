@@ -41,6 +41,7 @@ import { FileSigningKeyStore } from "./gateway/signing-key-store";
 import { writeClockSkew } from "./ui/clock-skew";
 import {
   applyBootstrapUser,
+  bootstrapLinkPath,
   bootstrapRequestPath,
   consumeBootstrapRequest,
 } from "./ui/bootstrap-user";
@@ -414,6 +415,7 @@ export async function runUiCommand(
       request: staged,
       users: runtime.users,
       base: url.base,
+      linkFile: bootstrapLinkPath(paths.uiRoot),
     }).catch((error: unknown) => ({
       created: false,
       lines: [`could not apply FORTRESS_UI_BOOTSTRAP_USER: ${error instanceof Error ? error.message : String(error)}`],

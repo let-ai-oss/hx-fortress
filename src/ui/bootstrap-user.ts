@@ -31,6 +31,12 @@ export function bootstrapRequestPath(uiRoot: string): string {
   return path.join(uiRoot, "bootstrap-user.json");
 }
 
+/** Where the first account's setup link is left, 0600, for somebody with access
+ *  to the box to read. */
+export function bootstrapLinkPath(uiRoot: string): string {
+  return path.join(uiRoot, "bootstrap-setup-link.txt");
+}
+
 /** Write the request. 0600 under the console's own directory: it names an
  *  account, and an account name is not something the rest of the box needs. */
 export async function writeBootstrapRequest(
@@ -73,16 +79,20 @@ export interface BootstrapUserResult {
 /**
  * Apply one request against the user store.
  *
- * The setup link is printed to the container log ON CREATION ONLY, and it is the
- * one place a link is ever printed by anything other than an operator's own
- * terminal — a fresh container has no other channel to hand out the first
- * account.
+ * THE LINK IS NOT PRINTED. It is a live 24-hour credential for an operator
+ * account, and this console's stdout is pid 1's stdout in a container — which is
+ * the log aggregator, where a secret is retained, indexed and searchable by
+ * everyone who can read logs. It goes to a 0600 file under the console's own
+ * directory instead, and what is printed is the path: reading it needs access to
+ * the box, which is the same bar the terminal path already sets.
  */
 export async function applyBootstrapUser(args: {
   request: BootstrapUserRequest;
   users: UsersStore;
   /** The base the setup link is built on — the console's own printed URL. */
   base: string;
+  /** Where to leave the link, 0600. */
+  linkFile: string;
   now?: () => Date;
 }): Promise<BootstrapUserResult> {
   const { login } = args.request;
@@ -105,11 +115,13 @@ export async function applyBootstrapUser(args: {
     };
   }
   const created = await args.users.create(login, "operator", now);
+  await mkdir(path.dirname(args.linkFile), { recursive: true, mode: 0o700 });
+  await writeFile(args.linkFile, `${setupUrl(args.base, created.token)}\n`, { mode: 0o600 });
   return {
     created: true,
     lines: [
       `created console account ${login} (operator)`,
-      `finish setup: ${setupUrl(args.base, created.token)}`,
+      `finish setup: the link is in ${args.linkFile} (0600) — it is a live credential and is deliberately not printed here`,
       "the link expires in 24 hours; after that, hx-fortress ui user reset " + login,
     ],
   };
