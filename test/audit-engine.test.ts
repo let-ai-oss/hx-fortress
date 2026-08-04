@@ -34,9 +34,15 @@ import {
   readWitnessIntent,
   WITNESS_SIGNAL,
 } from "../src/console/witness-signal";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+
+import { runAuditForFortress } from "../src/console/audit-runner";
 import { verifySessionResidency } from "../src/ui/residency-verify";
 import { CONSOLE_TABLES, UI_TABLE_GRANTS } from "../src/host/postgres/console-plane";
 import { migrations } from "../src/host/postgres/migrations/manifest";
+import type { HxDb } from "../src/host/postgres/db";
+import type { SessionStore } from "../src/modules/session-vault/store/types";
 
 const ORG = "org-1";
 
@@ -550,5 +556,58 @@ describe("the terminal verbs", () => {
         { org: ORG, sessionId: "unexplained", reason: "re-confirmed from the terminal" },
       ]);
     });
+  });
+});
+
+describe("what the runner is allowed to sweep", () => {
+  const dialect = new PgDialect();
+  const emptyStore = {
+    listAllCanonicalKeys: async () => [],
+    statCanonical: async () => null,
+  } as unknown as SessionStore;
+
+  function recorder(): { db: () => HxDb; statements: string[]; values: unknown[][] } {
+    const statements: string[] = [];
+    const values: unknown[][] = [];
+    const db = {
+      execute: async (statement: SQL) => {
+        const query = dialect.sqlToQuery(statement);
+        statements.push(query.sql);
+        values.push(query.params);
+        return [];
+      },
+    } as unknown as HxDb;
+    return { db: () => db, statements, values };
+  }
+
+  test("the session sweep names the enrolled org, and nothing else", async () => {
+    const rec = recorder();
+    await runAuditForFortress({
+      db: rec.db,
+      store: () => emptyStore,
+      ownOrgId: async () => ORG,
+      askWitness: null,
+      postureFresh: async () => true,
+    });
+    const i = rec.statements.findIndex((s) => s.includes("FROM hx.sessions"));
+    expect(i).toBeGreaterThanOrEqual(0);
+    // The ids this returns are the ids an eligible session sends to let.ai over
+    // THIS fortress's credential. A second organization's rows on the same host
+    // are not this run's to name, or to report verdicts about.
+    expect(rec.statements[i]).toContain("o.external_id =");
+    expect(rec.values[i]).toContain(ORG);
+  });
+
+  test("an unenrolled fortress sweeps nothing rather than everything", async () => {
+    const rec = recorder();
+    const run = await runAuditForFortress({
+      db: rec.db,
+      store: () => emptyStore,
+      ownOrgId: async () => null,
+      askWitness: null,
+      postureFresh: async () => true,
+    });
+    expect(rec.statements.some((s) => s.includes("FROM hx.sessions"))).toBe(false);
+    expect(run.counts.sessionsChecked).toBe(0);
   });
 });

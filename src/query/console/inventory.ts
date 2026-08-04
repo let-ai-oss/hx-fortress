@@ -58,8 +58,15 @@ export interface ConsoleDeviceRow {
 /** Devices as the fortress observed them. Nulls stay null: a machine that has
  *  never reported is a different fact from one that reported zero, and rendering
  *  both as 0 would put an install that is silently broken next to one that is
- *  merely idle. */
-export function consoleDevicesQuery(): SQL {
+ *  merely idle.
+ *
+ *  hx.devices and hx.users carry no org_id, so residency has to be reached
+ *  THROUGH the sessions: a person is in this console's universe when they have a
+ *  session in it, which is the same rule the people panel applies by joining.
+ *  Without the term, a host that ever served a second organization hands every
+ *  signed-in local user — readonly included — that organization's external ids,
+ *  machine names, operating systems and upload times. */
+export function consoleDevicesQuery(universe: ConsoleUniverse): SQL {
   return sql`SELECT
       u.external_id AS "userExternalId",
       d.device_id AS "deviceId",
@@ -74,6 +81,7 @@ export function consoleDevicesQuery(): SQL {
     FROM hx.devices d
     JOIN hx.users u ON u.id = d.user_id
     WHERE d.deleted_at IS NULL AND u.deleted_at IS NULL
+      AND EXISTS (SELECT 1 FROM hx.sessions s WHERE s.user_id = u.id AND ${consoleUniversePredicate(universe)})
     ORDER BY u.external_id ASC, d.device_id ASC`;
 }
 
@@ -128,6 +136,8 @@ export function consolePostgresFactsQuery(universe: ConsoleUniverse): SQL {
   return sql`SELECT
       pg_catalog.pg_database_size(pg_catalog.current_database())::bigint AS "databaseBytes",
       (SELECT count(*)::int FROM hx.sessions s WHERE ${consoleUniversePredicate(universe)}) AS "sessions",
-      (SELECT count(*)::int FROM hx.users WHERE deleted_at IS NULL) AS "people",
+      (SELECT count(*)::int FROM hx.users u WHERE u.deleted_at IS NULL
+         AND EXISTS (SELECT 1 FROM hx.sessions s WHERE s.user_id = u.id AND ${consoleUniversePredicate(universe)}))
+        AS "people",
       (SELECT count(*)::int FROM hx.deleted_sessions) AS "tombstones"`;
 }

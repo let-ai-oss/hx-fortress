@@ -29,6 +29,10 @@ function rows<T>(result: unknown): T[] {
 export interface AuditRunnerDeps {
   db: () => HxDb | null;
   store: () => SessionStore | null;
+  /** The organization this fortress is enrolled to, from its cloud credential.
+   *  Null before enrollment — and then there is nothing to audit, because every
+   *  attributed row on the host belongs to somebody else. */
+  ownOrgId: () => Promise<string | null>;
   /** Ask let.ai about a batch of ids. Null when there is no tunnel. */
   askWitness: ((ids: readonly string[]) => Promise<WitnessAnswer | null>) | null;
   postureFresh: () => Promise<boolean>;
@@ -48,14 +52,27 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
   await deps.publish?.(acks);
   const acknowledged = new Set(acks.map((a) => ackKey(a.org, a.sessionId)));
 
+  // The audit is about THIS organization's residency, and its ids leave the box:
+  // an eligible session is named to let.ai over this fortress's own credential.
+  // A host that ever served a second organization — two enrollments, a bucket
+  // reconciled after a re-enrollment — would otherwise hand that organization's
+  // session ids to a hub acting for this one, and report verdicts about rows
+  // whose metadata is not this organization's to read.
+  const ownOrg = await deps.ownOrgId();
+
   const runDeps: AuditRunDeps = {
     sessions: async () => {
+      // Fail closed rather than wide: an unenrolled fortress holds no attributed
+      // session of its own, so there is nothing here to audit.
+      if (!ownOrg) return [];
       const result = await db.execute(
         sql`SELECT s.id AS "sessionId", s.family AS "family", s.user_id AS "userId",
                    s.ingest_channel AS "ingestChannel", o.external_id AS "org"
               FROM hx.sessions s
               JOIN hx.orgs o ON o.id = s.org_id
              WHERE s.deleted_at IS NULL
+               AND o.deleted_at IS NULL
+               AND o.external_id = ${ownOrg}
              ORDER BY s.created_at ASC`,
       );
       return rows<Record<string, unknown>>(result).map(

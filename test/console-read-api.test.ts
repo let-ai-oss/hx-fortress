@@ -34,7 +34,17 @@ import {
   consolePeopleQuery,
   consolePostgresFactsQuery,
 } from "../src/query/console/inventory";
-import { consoleSessionTotalsQuery, consoleSessionsQuery } from "../src/query/console/sessions";
+import {
+  consoleSessionByKeyQuery,
+  consoleSessionTotalsQuery,
+  consoleSessionsQuery,
+} from "../src/query/console/sessions";
+import {
+  consoleAdoptionCountsQuery,
+  consoleRosterQuery,
+  consoleUnrosteredQuery,
+} from "../src/query/console/roster";
+import { migrationRunsQuery } from "../src/query/console/migrations";
 import {
   consoleUniversePredicate,
   foreignOrgCountQuery,
@@ -77,11 +87,16 @@ function everyConsoleStatement(): Array<{ name: string; sql: string }> {
     { name: "sessions:cursor", sql: render(consoleSessionsQuery({ universe: UNIVERSE, cursor: "MjAyNi0wNy0wMXwx" })) },
     { name: "totals", sql: render(consoleSessionTotalsQuery(UNIVERSE)) },
     { name: "foreign", sql: render(foreignOrgCountQuery(UNIVERSE)) },
+    { name: "byKey", sql: render(consoleSessionByKeyQuery(UNIVERSE, { family: "claude", sessionId: "s1" })) },
     { name: "people", sql: render(consolePeopleQuery(UNIVERSE)) },
-    { name: "devices", sql: render(consoleDevicesQuery()) },
+    { name: "devices", sql: render(consoleDevicesQuery(UNIVERSE)) },
     { name: "growth", sql: render(consoleGrowthQuery(UNIVERSE, 30)) },
     { name: "embeddings", sql: render(consoleEmbeddingFactsQuery()) },
     { name: "postgres", sql: render(consolePostgresFactsQuery(UNIVERSE)) },
+    { name: "roster", sql: render(consoleRosterQuery(UNIVERSE)) },
+    { name: "unrostered", sql: render(consoleUnrosteredQuery(UNIVERSE)) },
+    { name: "adoption", sql: render(consoleAdoptionCountsQuery(UNIVERSE, 30)) },
+    { name: "migrations", sql: render(migrationRunsQuery()) },
     { name: "audit", sql: render(auditPageQuery({ from: "2026-07-01T00:00:00Z" })) },
     { name: "auditExport", sql: render(auditExportQuery({ action: "console.rotate" })) },
     { name: "commands", sql: render(commandsQuery()) },
@@ -177,10 +192,34 @@ describe("the universe predicate", () => {
     expect(label).toContain("another organization");
   });
 
-  test("every statement that reads sessions carries the universe", () => {
-    for (const name of ["sessions", "totals", "growth", "people", "postgres"]) {
-      const found = everyConsoleStatement().find((s) => s.name === name);
-      expect([name, universeConstrains(found?.sql ?? "").org]).toEqual([name, true]);
+  test("every statement naming hx.sessions or hx.users constrains org_id", () => {
+    // Derived from the SQL, not from a list somebody maintains. The device
+    // inventory was absent from the list it used to check, and shipped joining
+    // hx.devices to hx.users with nothing but a soft-delete filter — every
+    // signed-in local user could read another organization's external ids,
+    // machine names and upload times. A rule that reads the statement cannot be
+    // passed by forgetting to add one.
+    const reads = everyConsoleStatement().filter(({ sql }) =>
+      /hx\.(sessions|users)\b/i.test(sql),
+    );
+    // Guards the guard: a projection change that stopped naming either table by
+    // hand would empty this set and the assertion below would pass vacuously.
+    expect(reads.map((r) => r.name).sort()).toEqual([
+      "adoption",
+      "byKey",
+      "devices",
+      "foreign",
+      "growth",
+      "people",
+      "postgres",
+      "roster",
+      "sessions",
+      "sessions:cursor",
+      "totals",
+      "unrostered",
+    ]);
+    for (const { name, sql } of reads) {
+      expect([name, universeConstrains(sql).org]).toEqual([name, true]);
     }
   });
 });

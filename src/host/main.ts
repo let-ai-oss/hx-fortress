@@ -738,6 +738,10 @@ export async function runFortressHost(
       runAuditForFortress({
         db: () => (postgres.isReady() ? resolveHxDb() : null),
         store: () => vaultModule.getStore(),
+        // The same enrolled org the gateway checks a capability token's `aud`
+        // against — the run's universe, and the bound on which ids may be named
+        // to let.ai.
+        ownOrgId: () => credentialStore.load().then((c) => c?.orgId ?? null).catch(() => null),
         // The fortress asks and the hub answers. A timeout, a dead socket or a
         // hub too old to know the frame all come back as no answer at all, which
         // the run reports as an unasked witness by name.

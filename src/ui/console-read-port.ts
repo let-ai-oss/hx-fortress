@@ -332,7 +332,7 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         attention: attentionRows(roster, now().getTime()),
       };
     },
-    devices: () => query<ConsoleDeviceRow>(() => consoleDevicesQuery()),
+    devices: () => query<ConsoleDeviceRow>(() => consoleDevicesQuery(deps.universe)),
     growth: (days) => query<ConsoleGrowthRow>(() => consoleGrowthQuery(deps.universe, days)),
 
     async facts(): Promise<ConsoleFactsView> {
