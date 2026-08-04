@@ -50,13 +50,29 @@ export async function readLastLinesOfFile(filePath: string, n: number): Promise<
     const { size } = await handle.stat();
     let position = size;
     let carry = "";
+    // BYTES, not text. Each chunk was decoded on its own, so a multi-byte
+    // character straddling a 64 KiB boundary was split across two `toString`
+    // calls and both halves decoded to replacement characters — mojibake in
+    // `hx-fortress logs` and in the console's backfill. Carrying the undecoded
+    // head bytes and prepending them to the next chunk decodes the character
+    // once, whole.
+    let carryBytes = Buffer.alloc(0);
     const lines: string[] = [];
     while (position > 0 && lines.length <= n) {
       const length = Math.min(CHUNK_BYTES, position);
       position -= length;
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, position);
-      const text = buffer.toString("utf8") + carry;
+      const raw = Buffer.concat([buffer, carryBytes]);
+      // Reading BACKWARDS, so a character split by this boundary has its
+      // continuation bytes at the START of this chunk and its lead byte at the
+      // END of the next one we read. Strip them and carry them forward.
+      let lead = 0;
+      if (position > 0) {
+        while (lead < raw.length && (raw[lead]! & 0xc0) === 0x80) lead += 1;
+      }
+      carryBytes = position > 0 ? raw.subarray(0, lead) : Buffer.alloc(0);
+      const text = raw.subarray(lead).toString("utf8") + carry;
       const parts = text.split("\n");
       // The first part may be the tail of a line whose head is in the next
       // chunk back; carry it rather than emitting a truncated record.

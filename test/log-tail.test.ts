@@ -221,3 +221,24 @@ describe("following across a rotation", () => {
     expect(followed.some((l) => l.includes("line 999"))).toBe(true);
   }, 20_000);
 });
+
+describe("a character split by a chunk boundary", () => {
+  test("decodes whole, rather than as two replacement characters", async () => {
+    // The reader walks BACKWARDS in 64 KiB chunks and used to decode each one on
+    // its own, so a multi-byte character straddling a boundary was split across
+    // two `toString` calls and both halves became U+FFFD — mojibake in
+    // `hx-fortress logs` and in the console's backfill. Existing coverage used
+    // ASCII only, which cannot straddle.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hx-straddle-"));
+    try {
+      const file = path.join(dir, "fortress.jsonl");
+      // Sized so the multi-byte line lands across the 64 KiB read boundary.
+      await writeFile(file, `${"a".repeat(65_530)}\n日本語のログ行です\n`, "utf8");
+      const lines = await readLastLines(file, 2, 3);
+      expect(lines[lines.length - 1]).toBe("日本語のログ行です");
+      expect(lines.join("")).not.toContain("\uFFFD");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
