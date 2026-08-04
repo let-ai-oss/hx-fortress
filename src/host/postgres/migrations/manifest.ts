@@ -38,6 +38,7 @@ import sql0021MissingHere from "./0021_missing_here.sql" with { type: "text" };
 import sql0022CloudWitnessDefault from "./0022_cloud_witness_default.sql" with { type: "text" };
 import sql0023LanesHoldIt from "./0023_lanes_hold_it.sql" with { type: "text" };
 import sql0024ResidencyUnwitnessable from "./0024_residency_unwitnessable.sql" with { type: "text" };
+import sql0025WitnessChangeStamp from "./0025_witness_change_stamp.sql" with { type: "text" };
 import sql0016AuditRefFile from "./0016_audit_ref_file.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
@@ -103,4 +104,5 @@ export const migrations: Migration[] = [
   { name: "0022_cloud_witness_default", sql: sql0022CloudWitnessDefault },
   { name: "0023_lanes_hold_it", sql: sql0023LanesHoldIt },
   { name: "0024_residency_unwitnessable", sql: sql0024ResidencyUnwitnessable },
+  { name: "0025_witness_change_stamp", sql: sql0025WitnessChangeStamp },
 ];

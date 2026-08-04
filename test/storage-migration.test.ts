@@ -170,10 +170,22 @@ class MemoryStore implements SessionStore {
     this.selfTests += 1;
     return Promise.resolve();
   }
-  deleteSession(k: SessionKey): Promise<DeleteSessionResult> {
-    this.deletes.push(this.ref(k));
-    this.canonical.delete(this.ref(k));
-    return Promise.resolve({ complete: true, deleted: 1 });
+  /** Objects still to remove per session, so a delete takes more than one call.
+   *  The real stores stop at a batch limit and the caller re-invokes until
+   *  `complete`; a mock that always answers `complete: true` cannot tell whether
+   *  the caller does that, which is how an unlooped delete shipped. */
+  readonly pendingDeletes = new Map<string, number>();
+
+  deleteSession(k: SessionKey, options?: { batchLimit?: number }): Promise<DeleteSessionResult> {
+    const ref = this.ref(k);
+    this.deletes.push(ref);
+    const limit = options?.batchLimit ?? 800;
+    const left = this.pendingDeletes.get(ref) ?? 1;
+    const deleted = Math.min(left, limit);
+    const remaining = left - deleted;
+    this.pendingDeletes.set(ref, remaining);
+    if (remaining === 0) this.canonical.delete(ref);
+    return Promise.resolve({ complete: remaining === 0, deleted });
   }
 }
 
@@ -1176,5 +1188,47 @@ describe("the run record", () => {
       expect(matrix[`t:hx_readonly:${table}:SELECT`]).toBe(false);
       expect(matrix[`t:hx_app_ro:${table}:SELECT`]).toBe(false);
     }
+  });
+});
+
+
+describe("replaying a permanent delete onto the target", () => {
+  test("re-invokes until the store says complete — one call leaves the rest behind", async () => {
+    // Both backends stop at a batch limit so a call fits the tunnel RPC window.
+    // Calling once removed the first batch of a permanently-deleted session and
+    // moved on; everything past it had already been copied into the new bucket
+    // and stayed there, invisible to verification (which walks the SOURCE).
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const gone = key(0);
+    // Three batches' worth at the engine's own limit.
+    target.pendingDeletes.set(sessionRef(gone), 1_700);
+    target.canonical.set(sessionRef(gone), "x");
+
+    const h = harness({ source, target });
+    h.deps.tombstones = async () => [gone];
+    const result = await runStorageMigration(h.deps);
+
+    expect(result.switched).toBe(true);
+    const calls = target.deletes.filter((d) => d === sessionRef(gone)).length;
+    expect(calls).toBeGreaterThan(1);
+    expect(target.pendingDeletes.get(sessionRef(gone))).toBe(0);
+  });
+
+  test("a session with no canonical is still deleted — its bytes may be under its lanes", async () => {
+    // The old gate was `statCanonical`, which resolves only the parent prefix, so
+    // a turn-less parent whose objects live entirely under `:a:<agentId>` looked
+    // absent and was skipped — its lanes copied to the target and never removed.
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const laneOnly = key(0);
+    target.pendingDeletes.set(sessionRef(laneOnly), 1);
+    // Deliberately NO canonical for it in the target.
+
+    const h = harness({ source, target });
+    h.deps.tombstones = async () => [laneOnly];
+    await runStorageMigration(h.deps);
+
+    expect(target.deletes).toContain(sessionRef(laneOnly));
   });
 });

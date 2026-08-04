@@ -85,6 +85,17 @@ export const FENCE_MARGIN_MS = 30_000;
  *  close the remaining gap. */
 export const MAX_DELTA_PASSES = 8;
 
+/** Objects/versions removed per `deleteSession` call. Both stores cap at 800 so
+ *  a call fits the tunnel RPC window; naming it here keeps the loop's bound and
+ *  the store's default from drifting apart in silence. */
+const DELETE_BATCH_LIMIT = 800;
+
+/** A tombstone replay that has not converged after this many passes is either
+ *  640,000 objects deep or something is re-creating them. Either way the cut
+ *  stops: leaving content a customer permanently deleted in their new bucket is
+ *  the one outcome this appliance cannot ship. */
+const MAX_DELETE_PASSES = 800;
+
 export interface MigrationEvent {
   phase: MigrationPhase;
   message: string;
@@ -475,7 +486,24 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
       result.phase = "switching";
       emit({ phase: "switching", message: "pointing this fortress at the target bucket" });
       result.version = await deps.swapCredentials();
-      await deps.rebindStore();
+      try {
+        await deps.rebindStore();
+      } catch (err) {
+        // `rebindStore` throws on any self-test failure, and it throws AFTER the
+        // credentials file already names the target. That leaves the worst of
+        // the three states: the file says target, the running process still
+        // serves the source, the operator is told the swap failed, and the next
+        // restart silently serves the target — with nothing written in between
+        // recorded anywhere. So say the true thing rather than the tidy one.
+        result.phase = "aborted";
+        result.switched = true;
+        result.aborted =
+          `the credentials now name the target but this daemon could not bind to it (${
+            err instanceof Error ? err.message : String(err)
+          }). Nothing is lost — the source still holds everything — but this process is still writing to the ` +
+          "source, and a restart will switch it. Fix the target's access, then restart the daemon.";
+        return result;
+      }
       result.switched = true;
 
       result.phase = "verifying";
@@ -533,9 +561,32 @@ async function replayTombstones(
   const tombstones = await deps.tombstones();
   let removed = 0;
   for (const key of tombstones) {
-    if ((await deps.target.statCanonical(key)) === null) continue;
-    // Against the TARGET only. The source keeps whatever it keeps.
-    await deps.target.deleteSession(key);
+    // NO `statCanonical` gate. It resolves only `${prefix}/log.jsonl`, so a
+    // session whose objects live entirely under its `:a:<agentId>` lanes — the
+    // turn-less parent stub this codebase names in 0023 — looked absent and was
+    // skipped, leaving its lane objects copied into the target and never
+    // deleted. `deleteSession` is already an idempotent no-op on a session that
+    // is not there, so the gate bought nothing and cost that class.
+    //
+    // And it LOOPS. The contract is explicit — "the caller re-invokes until
+    // `complete`" — because both backends stop at a batch limit (800) so a call
+    // always fits the tunnel RPC window. Calling once removed the first 800
+    // objects of a permanently-deleted session and moved on; the rest were
+    // copied into the new bucket and stayed there. `verifyTarget` cannot see it,
+    // because it walks the SOURCE listing. On a versioned bucket 800 is not a
+    // large session: it covers the canonical, every staging chunk, every lane
+    // and every noncurrent version.
+    let complete = false;
+    for (let pass = 0; !complete; pass += 1) {
+      if (pass >= MAX_DELETE_PASSES) {
+        throw new Error(
+          `replaying the permanent delete of ${sessionRef(key)} onto the target did not converge after ` +
+            `${MAX_DELETE_PASSES} passes; the cut is refused rather than leaving deleted content in the new bucket`,
+        );
+      }
+      const result = await deps.target.deleteSession(key, { batchLimit: DELETE_BATCH_LIMIT });
+      complete = result.complete;
+    }
     removed += 1;
     emit({ phase: "quiescing", message: `replayed a permanent delete onto the target: ${sessionRef(key)}` });
   }

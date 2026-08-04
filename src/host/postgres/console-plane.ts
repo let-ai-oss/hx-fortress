@@ -291,6 +291,29 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $acknowledge_finding$
 BEGIN
+  -- FENCED on a real finding. Without this the routine is a bulk-acknowledge
+  -- primitive for anyone holding the hx_app_rw DSN: one
+  -- SELECT hx.acknowledge_finding(...) FROM hx.sessions clears every present
+  -- and future also_at_letai in the organization, with no hx.admin_audit row,
+  -- because the trail is written by the daemon's own spool and not by this
+  -- function. That is the outcome the console's own comment says is prevented.
+  --
+  -- Only also_at_letai is acknowledgeable — the TypeScript already says so, in
+  -- acknowledgeable() — and this is that rule where the privilege boundary
+  -- can enforce it: a session with no such finding cannot be acknowledged at
+  -- all, so the blast radius is what an audit actually found rather than the
+  -- whole session table.
+  IF NOT EXISTS (
+    SELECT 1
+      FROM hx.audit_findings f
+     WHERE f.org = p_org
+       AND f.session_id = p_session_id
+       AND f.verdict = 'also_at_letai'
+  ) THEN
+    RAISE EXCEPTION 'no acknowledgeable finding for % / %', p_org, p_session_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+
   INSERT INTO hx.audit_acks (org, session_id, acknowledged_at, acknowledged_by, reason)
   VALUES (p_org, p_session_id, pg_catalog.now(), p_by, p_reason)
   ON CONFLICT (org, session_id) DO UPDATE
@@ -313,10 +336,19 @@ DECLARE
 BEGIN
   -- hx.audit_settings is a keyless singleton, so an unqualified UPDATE is the
   -- whole table; a zero-row result means the singleton has not been seeded yet.
-  UPDATE hx.audit_settings SET cloud_witness = p_enabled;
+  -- Stamped, so a flip is visible. This routine cannot tell the daemon from
+  -- anything else holding the same DSN — both are hx_app_rw — so prevention is
+  -- not available here; what is available is that turning outbound disclosure
+  -- back on for an operator who switched it off can no longer happen without a
+  -- trace the console reads.
+  UPDATE hx.audit_settings
+     SET cloud_witness = p_enabled,
+         changed_at = pg_catalog.now(),
+         changed_by = pg_catalog.session_user;
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   IF v_rows = 0 THEN
-    INSERT INTO hx.audit_settings (cloud_witness) VALUES (p_enabled);
+    INSERT INTO hx.audit_settings (cloud_witness, changed_at, changed_by)
+    VALUES (p_enabled, pg_catalog.now(), pg_catalog.session_user);
   END IF;
   RETURN p_enabled;
 END;
