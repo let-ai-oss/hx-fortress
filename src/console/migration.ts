@@ -262,16 +262,37 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
 
   const done = new Set(await (deps.alreadyCopied?.() ?? Promise.resolve(new Set<string>())));
 
+  /**
+   * Whether the target holds this session's canonical as the source has it NOW.
+   *
+   * CONTENT, not existence — which is the whole reason the delta passes exist. A
+   * session appended to after its bulk copy is PRESENT in the target and short,
+   * so an existence test narrows it out of every pass and the run finishes over
+   * a truncated object while calling the source the way back. Byte length is
+   * what both stores already answer with, and an append cannot leave it equal.
+   *
+   * `null` is compared explicitly rather than for truthiness: a zero-byte
+   * canonical is an object that EXISTS, and a falsy test would re-copy it on
+   * every pass until the passes ran out.
+   */
+  const targetIsCurrent = async (key: SessionKey): Promise<boolean> => {
+    const wanted = await deps.source.statCanonical(key);
+    // Gone from the source under the run — a delete that landed mid-copy. There
+    // is nothing left to carry, and the tombstone replay is what agrees with the
+    // target about it.
+    if (wanted === null) return true;
+    return (await deps.target.statCanonical(key)) === wanted;
+  };
+
   const copyMissing = async (keys: readonly SessionKey[], phase: MigrationPhase): Promise<number> => {
     let copied = 0;
     for (const key of keys) {
       const ref = sessionRef(key);
-      if (done.has(ref)) {
-        // Proven by a previous run — but only if the target still agrees. A
-        // record without an object is a record about a bucket somebody emptied.
-        const bytes = await deps.target.statCanonical(key);
-        if (bytes !== null) continue;
-      }
+      // Proven by a previous run — but only while the target still agrees. A
+      // record without an object is a record about a bucket somebody emptied,
+      // and a record over a SHORTER object is one about a session that has been
+      // appended to since.
+      if (done.has(ref) && (await targetIsCurrent(key))) continue;
       const object = await copySession(deps.source, deps.target, key);
       done.add(ref);
       copied += 1;
@@ -292,23 +313,24 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
   result.phase = "copying";
   await copyMissing(plan, "copying");
 
-  /** One narrowing pass: whatever the source has that the target does not. */
+  /** One narrowing pass: whatever the target does not hold as the source holds
+   *  it NOW — the objects that are absent, and the ones that have moved on. */
   const deltaPass = async (phase: MigrationPhase): Promise<number> => {
     result.deltaPasses += 1;
     const keys = await deps.source.listAllCanonicalKeys();
     result.sessionsTotal = Math.max(result.sessionsTotal, keys.length);
-    const missing: SessionKey[] = [];
+    const behind: SessionKey[] = [];
     for (const key of keys) {
-      if (await deps.target.statCanonical(key)) continue;
-      missing.push(key);
+      if (await targetIsCurrent(key)) continue;
+      behind.push(key);
     }
-    if (missing.length > 0) {
-      // Re-copied because the target lacks them, whatever a previous run
-      // recorded.
-      for (const key of missing) done.delete(sessionRef(key));
-      await copyMissing(missing, phase);
+    if (behind.length > 0) {
+      // Re-copied because the target does not hold what the source does,
+      // whatever a previous run recorded.
+      for (const key of behind) done.delete(sessionRef(key));
+      await copyMissing(behind, phase);
     }
-    return missing.length;
+    return behind.length;
   };
 
   result.phase = "delta";
@@ -465,7 +487,7 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
         // going back a credentials change rather than a recovery. The event says
         // so too — a "done" that read like a clean cut is how a partial move
         // reaches an operator as a success.
-        result.aborted = `${missing.length} object(s) are not readable in the new bucket: ${missing
+        result.aborted = `${missing.length} object(s) did not arrive whole in the new bucket: ${missing
           .slice(0, 5)
           .join(", ")}`;
         emit({
@@ -521,28 +543,54 @@ async function replayTombstones(
 }
 
 /**
- * Every OBJECT the source holds that the new binding cannot read.
+ * Every OBJECT the source holds that the new bucket does not hold whole.
  *
  * Re-listed rather than taken from the run's own counters: the question is what
  * the fortress can serve now, and only the bucket can answer it. Object SETS
  * rather than canonicals — a verification that compared one object per session
  * would report a clean switch over a target missing every sidecar, which is the
  * shape the loss took when the copy walked three fixed names.
+ *
+ * SIZES, not names. A name-set comparison passes over an object that arrived and
+ * was then left behind by the source: the canonical of a session appended to
+ * mid-run, or a `session.json` the ingest path rewrites on every commit. It is
+ * SHORTER-than rather than differs-from because the target is the live bucket
+ * from the cut onward — an object that has grown since is a new write landing
+ * where it should, and only a short one is the partial copy this pass exists to
+ * name.
  */
 async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
   const keys = await deps.source.listAllCanonicalKeys();
   const missing: string[] = [];
   for (const key of keys) {
     const ref = sessionRef(key);
-    if ((await deps.target.statCanonical(key)) === null) {
+    const wanted = await deps.source.statCanonical(key);
+    const landedBytes = await deps.target.statCanonical(key);
+    if (landedBytes === null) {
       // The session itself is gone; naming each of its sidecars as well would
       // say the same thing several times.
       missing.push(ref);
       continue;
     }
+    if (wanted !== null && landedBytes < wanted) {
+      missing.push(`${ref} (${landedBytes} of ${wanted} bytes)`);
+    }
     const landed = new Set(await deps.target.listSessionArtifacts(key));
     for (const name of await deps.source.listSessionArtifacts(key)) {
-      if (!landed.has(name)) missing.push(`${ref}/${name}`);
+      if (!landed.has(name)) {
+        missing.push(`${ref}/${name}`);
+        continue;
+      }
+      // Sidecars are small whole-file objects and the interface offers no stat
+      // for them, so the size comes from the read. A source artifact that
+      // vanished between the listing and the read is a delete landing under the
+      // run, and the tombstone replay is what agrees with the target about it.
+      const held = await deps.source.readArtifactText(key, name);
+      if (held === null) continue;
+      const arrived = await deps.target.readArtifactText(key, name);
+      if (arrived === null || Buffer.byteLength(arrived) < Buffer.byteLength(held)) {
+        missing.push(`${ref}/${name}`);
+      }
     }
   }
   return missing;

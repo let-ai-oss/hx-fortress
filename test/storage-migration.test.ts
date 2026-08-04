@@ -457,6 +457,66 @@ describe("proving the copy landed", () => {
     expect(target.canonical.size).toBe(4);
   });
 
+  test("a session appended to after its copy is carried by the delta, not narrowed out of it", async () => {
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const ref = sessionRef(key(0));
+    // The bulk copy already happened; the session grew afterwards. The target
+    // holds a SHORT canonical and the record says the session is done — which is
+    // the state an existence check calls finished and truncates for good.
+    target.canonical.set(ref, source.canonical.get(ref) ?? "");
+    target.artifacts.set(`${ref}/session.json`, source.artifacts.get(`${ref}/session.json`) ?? "");
+    source.canonical.set(ref, `${source.canonical.get(ref) ?? ""}{"type":"user","text":"and then"}\n`);
+    const h = harness({ mode: "copy", source, target, alreadyCopied: async () => new Set([ref]) });
+    const result = await runStorageMigration(h.deps);
+    expect(result.sessionsCopied).toBe(1);
+    expect(target.canonical.get(ref)).toBe(source.canonical.get(ref));
+  });
+
+  test("a zero-byte canonical is an object, so the delta converges instead of burning every pass", async () => {
+    const source = new MemoryStore("source");
+    // Written and never appended to: it exists, and it is empty. Read for
+    // truthiness it is indistinguishable from absent, and the delta re-copies it
+    // until it runs out of passes — inside the pause, on a fortress with any
+    // number of them.
+    source.canonical.set(sessionRef(key(0)), "");
+    const h = harness({ mode: "copy", source, target: new MemoryStore("target") });
+    const result = await runStorageMigration(h.deps);
+    expect(result.sessionsCopied).toBe(1);
+    expect(result.deltaPasses).toBe(1);
+  });
+
+  test("a canonical that arrived short fails verification instead of reading as a clean cut", async () => {
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const h = harness({ source, target });
+    // Present, readable, and not the object the source holds — the shape a
+    // name-set or existence comparison reports as a clean move.
+    h.deps.rebindStore = async (): Promise<void> => {
+      target.canonical.set(sessionRef(key(0)), "");
+      h.trace.push("rebind");
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.switched).toBe(true);
+    expect(result.aborted).toContain("did not arrive whole");
+    expect(result.aborted).toContain("0 of");
+  });
+
+  test("a sidecar the target holds a shorter copy of fails verification too", async () => {
+    const source = seeded(1);
+    const target = new MemoryStore("target");
+    const h = harness({ source, target });
+    // session.json is rewritten on every commit, so "the name is there" says
+    // nothing about whether the bytes came with it.
+    h.deps.rebindStore = async (): Promise<void> => {
+      target.artifacts.set(`${sessionRef(key(0))}/session.json`, "{}");
+      h.trace.push("rebind");
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.switched).toBe(true);
+    expect(result.aborted).toContain("session.json");
+  });
+
   test("a record whose object is gone is re-copied anyway", async () => {
     const source = seeded(2);
     const target = new MemoryStore("target");
@@ -485,7 +545,7 @@ describe("proving the copy landed", () => {
     // Switched — and honest about what did not come with it. The source still
     // holds everything, which is what makes going back a credentials change.
     expect(result.switched).toBe(true);
-    expect(result.aborted).toContain("not readable in the new bucket");
+    expect(result.aborted).toContain("did not arrive whole in the new bucket");
   });
 });
 
