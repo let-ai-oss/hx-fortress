@@ -69,8 +69,13 @@ const MAX_WAIT_MS = 5_000;
 const WAIT_MS_PER_BATCH = 2_000;
 /** The absolute ceiling, whatever the sweep. The whole console mutation plane
  *  runs behind this call — one poll pass at a time, executors serial — so an
- *  audit that parks parks everything, and it has to come back. */
-const MAX_TOTAL_WAIT_MS = 120_000;
+ *  audit that parks parks everything, and it has to come back.
+ *
+ *  Chosen against the sweep it has to afford, not picked round: one honest wait
+ *  per batch costs ~1s, so this covers roughly 240 batches — 120,000 ids at the
+ *  protocol's cap. A fortress past that reports the witness as unavailable and
+ *  names why, rather than quietly answering about a subset. */
+const MAX_TOTAL_WAIT_MS = 240_000;
 
 /**
  * Ask let.ai about a batch of eligible session ids.
@@ -118,7 +123,16 @@ export function createWitnessClient(
           const retryAfterMs = (err as { retryAfterMs?: unknown })?.retryAfterMs;
           const wait = typeof retryAfterMs === "number" && retryAfterMs > 0 ? Math.min(retryAfterMs, MAX_WAIT_MS) : 0;
           if (wait === 0 || waitsLeft <= 0 || waitedMs + wait > totalWaitCap) {
-            deps.onUnavailable?.(err instanceof Error ? err.message : String(err));
+            // Name the budget when it is the budget. "unavailable" alone reads
+            // as a broken hub, and an operator would go looking for one.
+            const spent = waitsLeft <= 0 || waitedMs + wait > totalWaitCap;
+            deps.onUnavailable?.(
+              spent
+                ? `the hub's rate limit did not allow a full sweep of ${batches} batches within ${Math.round(totalWaitCap / 1000)}s`
+                : err instanceof Error
+                  ? err.message
+                  : String(err),
+            );
             return null;
           }
           waitsLeft -= 1;

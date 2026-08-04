@@ -56,9 +56,9 @@ import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
 import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
-import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
+import { awaitParkDrain, drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
 import { forgetCopiedSessions } from "../console/migration-store";
-import { readForgetPending, writeForgetPending } from "../console/runtime-files";
+import { addForgetPending, readForgetPending, writeForgetPending } from "../console/runtime-files";
 import { migrationIsRunning } from "../console/migration-runner";
 import { createCommandGateway } from "../console/command-gateway";
 import { pollCommands, runBootFence } from "../console/commands";
@@ -663,9 +663,8 @@ export async function runFortressHost(
     // resumed run would cut over stale sidecars with only a log line to say so.
     // Pending keys are written before the attempt and cleared only on success,
     // so a failure is retried on the next replay rather than lost.
-    const pending = [...(await readForgetPending(forgetPendingPath)), ...result.rewrote];
+    const pending = await addForgetPending(forgetPendingPath, result.rewrote);
     if (pending.length > 0) {
-      await writeForgetPending(forgetPendingPath, pending);
       const replayDb = postgres.isReady() ? resolveHxDb() : null;
       if (replayDb) {
         const cleared = await forgetCopiedSessions(replayDb, pending)
@@ -832,8 +831,26 @@ export async function runFortressHost(
             })),
           ),
       }),
-    runMigration: ({ command, target, credentialRef }) =>
-      runMigrationCommand(
+    runMigration: async ({ command, target, credentialRef }) => {
+      // Settle both hazards before the run reads its copy records.
+      //
+      // A drain already under way writes sidecars into the store this run is
+      // about to walk, and the `migrationIsRunning()` guard on the replay is a
+      // check rather than a lock — it cannot stop one that started first. So
+      // wait for it. Then apply any pending record-clearing, because the run
+      // loads `alreadyCopied()` ONCE at its start: a delete that lands after
+      // that reaches nothing. If it cannot be applied the run does not start —
+      // cutting over an unknown set of stale sidecars is the failure this whole
+      // mechanism exists to prevent, and a refusal is recoverable.
+      await awaitParkDrain(parkedArtifactsPath);
+      const stale = await readForgetPending(forgetPendingPath);
+      if (stale.length > 0) {
+        const db = postgres.isReady() ? resolveHxDb() : null;
+        if (!db) throw new Error("sidecar copy records are pending a clear and the database is not reachable");
+        await forgetCopiedSessions(db, stale);
+        await writeForgetPending(forgetPendingPath, []);
+      }
+      return await runMigrationCommand(
         {
           db: () => (postgres.isReady() ? resolveHxDb() : null),
           store: () => vaultModule.getStore(),
@@ -862,7 +879,8 @@ export async function runFortressHost(
           logger: consoleLog,
         },
         { command, target },
-      ),
+      );
+    },
     setCloudWitness: (enabled) => applyCloudWitness(enabled),
     acknowledgeFinding: async ({ org, sessionId, reason }) => {
       const db = postgres.isReady() ? resolveHxDb() : null;

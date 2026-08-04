@@ -208,6 +208,33 @@ describe("one audit run", () => {
     expect(result.counts.sessionsChecked).toBeLessThan(many.length);
   });
 
+  test("every row the run reports on was asked about — the ask is never a subset", async () => {
+    // The defect this guards: bounding the ask to `perRunBudget` while the loop
+    // still walks every row. The loop only spends a pace unit inside the
+    // `!fortressPresent` branch, so on a healthy fortress nothing is spent and
+    // NOTHING is skipped — every unasked row would then be verdicted with
+    // `letaiCopy: false`, turning `not_delivered_here` into `no_record`: the one
+    // verdict that fails a roll-up, silently downgraded.
+    const many = Array.from({ length: 50 }, (_, i) => row({ sessionId: `s${i}` }));
+    let asked: readonly string[] = [];
+    const result = await runResidencyAudit(
+      deps({
+        sessions: async () => many,
+        // Healthy: every canonical is in the listing, so the loop spends nothing.
+        listCanonical: async () => new Set(many.map((r) => canonicalKeyOf(r))),
+        limits: { ...DEFAULT_AUDIT_LIMITS, perRunBudget: 5 },
+        askWitness: async (ids: readonly string[]) => {
+          asked = ids;
+          return { copies: new Set<string>(), known: new Set<string>() };
+        },
+      }),
+    );
+    expect(result.truncated).toBe(false);
+    expect(result.counts.sessionsChecked).toBe(many.length);
+    // Reported on all 50, so all 50 had to be asked about.
+    expect(asked.length).toBe(many.length);
+  });
+
   test("a switched-off witness is never read as 'no copies'", async () => {
     const result = await runResidencyAudit(deps({ askWitness: null }));
     // Nothing was asked, so the run cannot be clean however healthy it looks.
@@ -697,8 +724,8 @@ describe("a budget refusal is a wait, not a failure", () => {
     };
 
     // 50x the batches must not buy anything close to 50x the stall.
-    expect(await waitedFor(20)).toBeLessThanOrEqual(120_000);
-    expect(await waitedFor(1_000)).toBeLessThanOrEqual(120_000);
+    expect(await waitedFor(20)).toBeLessThanOrEqual(240_000);
+    expect(await waitedFor(1_000)).toBeLessThanOrEqual(240_000);
   });
 
   test("a sweep an honest hub paces still completes — the budget must not be the binding limit", async () => {
@@ -746,6 +773,6 @@ describe("a budget refusal is a wait, not a failure", () => {
       },
     });
     expect(await ask(["a"])).toBeNull();
-    expect(waited).toBeLessThanOrEqual(120_000);
+    expect(waited).toBeLessThanOrEqual(240_000);
   });
 });

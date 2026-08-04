@@ -138,7 +138,7 @@ export interface AttentionRow {
 }
 
 export const ATTENTION_COPY: Record<AttentionKind, string> = {
-  "nothing-here-yet": "on the roster, with no machine of theirs having produced a session here",
+  "nothing-here-yet": "on the roster, with no machine of theirs having produced a session for this organization",
   "never-uploaded": "has a machine that worked here, with no upload recorded",
   quiet: `has a machine that worked here, with nothing uploaded for over ${QUIET_AFTER_DAYS} days`,
   "backfill-outstanding": "is still backfilling — earlier sessions are on their way",

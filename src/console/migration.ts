@@ -566,11 +566,12 @@ async function replayTombstones(
  *   the one surface an auditor reads; no measurement fixes that, because the
  *   comparison itself is unsound across a live cut.
  *
- * Sidecar STALENESS is caught before the cut instead, by the delta pass — which
- * is why a parked-artifact replay clears the copy record for the sessions it
- * rewrites. That replay is the one writer that changes a sidecar without
- * appending a canonical, so it is the one case the delta pass cannot see by
- * measuring canonical length.
+ * Sidecar STALENESS is kept out before the cut, and NOT by the delta pass — that
+ * pass decides from canonical length alone (`targetIsCurrent`), which a sidecar
+ * rewrite does not change. The parked-artifact replay is the one writer that
+ * rewrites a sidecar without appending a canonical, so the daemon simply does
+ * not replay while a run is between its copy and its cut. Clearing a copy record
+ * matters only to a run RESUMED under the same id, where `copyMissing` reads it.
  */
 async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
   const keys = await deps.source.listAllCanonicalKeys();

@@ -150,10 +150,37 @@ export async function readForgetPending(filePath: string): Promise<SessionKey[]>
   return Array.isArray(parsed) ? parsed : [];
 }
 
+/**
+ * Add these to the pending set and return the whole of it, as one serialized
+ * read-modify-write.
+ *
+ * Two callers reach here at once by construction — a slow drain and the 5s pause
+ * refresh that starts the next one — and the park holds one entry per COMMIT, so
+ * the same session arrives many times over. Unserialized this both loses entries
+ * (the loss this file exists to prevent) and grows without bound. Deduped by
+ * session key, because the set is what has to be forgotten, not how often.
+ */
+export async function addForgetPending(
+  filePath: string,
+  keys: readonly SessionKey[],
+): Promise<SessionKey[]> {
+  return await serialized(filePath, async () => {
+    const merged = new Map<string, SessionKey>();
+    for (const key of [...(await readForgetPending(filePath)), ...keys]) {
+      merged.set(`${key.userId}/${key.family}/${key.sessionId}`, key);
+    }
+    const all = [...merged.values()];
+    if (all.length > 0) await writePrivateJson(filePath, all);
+    return all;
+  });
+}
+
 export async function writeForgetPending(filePath: string, keys: readonly SessionKey[]): Promise<void> {
-  if (keys.length === 0) {
-    await unlink(filePath).catch(() => {});
-    return;
-  }
-  await writePrivateJson(filePath, keys);
+  await serialized(filePath, async () => {
+    if (keys.length === 0) {
+      await unlink(filePath).catch(() => {});
+      return;
+    }
+    await writePrivateJson(filePath, keys);
+  });
 }

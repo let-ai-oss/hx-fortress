@@ -124,16 +124,23 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   const present = await deps.listCanonical();
   await pace.spend();
 
+  // EVERY eligible id, because the loop below reports a verdict for every row.
+  //
+  // A previous attempt sliced this to `perRunBudget` on the premise that the
+  // loop "spends at least one unit per row" and so could not reach further. It
+  // does not: the only `pace.spend()` in the loop is inside the `!fortressPresent`
+  // branch, so on a healthy fortress nothing is spent, no row is skipped and
+  // `truncated` stays false. The rows past the slice were then given
+  // `letaiCopy: false` and `anyDestinationRecord: false` — hard negatives from a
+  // question nobody asked — which turns `also_at_letai` into `confirmed` and,
+  // worse, `not_delivered_here` into `no_record`: the one verdict that fails a
+  // roll-up, silently downgraded to a benign one.
+  //
+  // So the ask covers what the run reports on. If it cannot be completed the
+  // adapter returns null and the whole witness reads `unavailable`, which is the
+  // honest outcome and the one this engine is built to render.
   const eligible = rows.filter((r) => witnessEligible(r.ingestChannel));
-  // Ask only about what this run can actually reach. The loop below stops at
-  // `perRunBudget` and spends at least one unit per row, so nothing past that
-  // many rows is ever checked — and the hub bounds how fast it will answer, so a
-  // sweep of every id on a large fortress is not merely wasted work: it is
-  // enough questions to exhaust the budget and come back with NOTHING, turning
-  // a partial witness into no witness at all. That regression has now been
-  // introduced twice by sizing the retry allowance instead of the ask.
-  const askable = eligible.slice(0, limits.perRunBudget);
-  const witness = deps.askWitness ? await deps.askWitness(askable.map((r) => r.sessionId)) : null;
+  const witness = deps.askWitness ? await deps.askWitness(eligible.map((r) => r.sessionId)) : null;
   // Off (nobody asked) and unavailable (asked, unanswered) are different facts
   // about this organization, and the run reports which one it was.
   const witnessState: WitnessState = witness ? "attested" : deps.askWitness ? "unavailable" : "off";
