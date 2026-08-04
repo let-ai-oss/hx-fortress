@@ -611,3 +611,66 @@ describe("what the runner is allowed to sweep", () => {
     expect(run.counts.sessionsChecked).toBe(0);
   });
 });
+
+describe("a budget refusal is a wait, not a failure", () => {
+  test("a rate-limited batch is retried and the sweep completes", async () => {
+    const waits: number[] = [];
+    let refusals = 2;
+    const asked: string[] = [];
+    const ask = createWitnessClient({
+      batchSize: 2,
+      wait: async (ms) => {
+        waits.push(ms);
+      },
+      request: async (query) => {
+        if (refusals > 0) {
+          refusals -= 1;
+          throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 3_000);
+        }
+        const ids = query.kind === "residencyWitness" ? query.sessionIds : [];
+        asked.push(...ids);
+        return {
+          kind: "residencyWitness",
+          residencyWitness: ids.map((sessionId) => ({ sessionId, letaiCopy: true, hubRoutedHere: true })),
+        };
+      },
+    });
+
+    const answer = await ask(["a", "b", "c"]);
+
+    // The run completes rather than collapsing, every id is asked exactly once,
+    // and the wait honoured is the one the hub named.
+    expect(answer).not.toBeNull();
+    expect(asked.sort()).toEqual(["a", "b", "c"]);
+    expect(waits).toEqual([3_000, 3_000]);
+    expect([...answer!.copies].sort()).toEqual(["a", "b", "c"]);
+  });
+
+  test("a refusal that names no wait still collapses the run", async () => {
+    const reasons: string[] = [];
+    const ask = createWitnessClient({
+      onUnavailable: (reason) => reasons.push(reason),
+      request: async () => {
+        throw new FortressQueryUnavailable("error", "something else");
+      },
+    });
+
+    expect(await ask(["a"])).toBeNull();
+    expect(reasons).toHaveLength(1);
+  });
+
+  test("a hub that refuses forever gives up instead of looping", async () => {
+    let attempts = 0;
+    const ask = createWitnessClient({
+      wait: async () => {},
+      request: async () => {
+        attempts += 1;
+        throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 1_000);
+      },
+    });
+
+    expect(await ask(["a"])).toBeNull();
+    // Bounded: the first try plus MAX_BUDGET_WAITS retries, and no more.
+    expect(attempts).toBe(7);
+  });
+});

@@ -54,6 +54,9 @@ export class FortressQueryUnavailable extends Error {
   constructor(
     readonly cause_: "timeout" | "offline" | "closed" | "saturated" | "error",
     detail?: string,
+    /** Set only when the hub refused on budget and named a wait. Everything else
+     *  here is a failure to surface, not a delay to sit out. */
+    readonly retryAfterMs?: number,
   ) {
     super(detail ? `fortress query unavailable (${cause_}): ${detail}` : `fortress query unavailable (${cause_})`);
     this.name = "FortressQueryUnavailable";
@@ -115,7 +118,7 @@ export class FortressQueryRegistry {
     this.pending.delete(frame.id);
     clearTimeout(pending.timer);
     if (frame.t === "fortressQueryError") {
-      pending.reject(new FortressQueryUnavailable("error", frame.error));
+      pending.reject(new FortressQueryUnavailable("error", frame.error, frame.retryAfterMs));
     } else {
       pending.resolve(frame.result);
     }

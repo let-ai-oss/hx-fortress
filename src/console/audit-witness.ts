@@ -22,8 +22,17 @@
 // Batches are serial, one in flight, because the ids are this organization's
 // data and the budget that bounds an audit of a large fortress is the same
 // budget that keeps it from becoming an outage of it.
+//
+//   A BUDGET REFUSAL IS A WAIT, NOT A FAILURE. That same budget makes a sweep of
+//   a large fortress arrive as more questions than any burst holds, so the hub
+//   answers `retryAfterMs` and this waits it out rather than collapsing the run.
+//   Without it the two properties above turn into a third, unintended one: above
+//   roughly a burst's worth of batches the witness is never obtainable at all,
+//   and the operator reads a rate limit as a broken hub.
 
 import type { WitnessAnswer } from "./audit-engine";
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 import { WITNESS_MAX_IDS, type FortressQueryPayload, type FortressQueryResultPayload } from "../protocol";
 
 export interface WitnessClientDeps {
@@ -34,7 +43,19 @@ export interface WitnessClientDeps {
    *  transport named it. */
   onUnavailable?: (reason: string) => void;
   batchSize?: number;
+  /** Test seam. Real runs wait on a timer; a test hands back a resolved promise
+   *  so it can prove the retry happens without spending the wait. */
+  wait?: (ms: number) => Promise<void>;
 }
+
+/** How many budget refusals one batch may sit out before the run gives up. A
+ *  sweep pays at most one wait per batch once the burst is spent, so a handful
+ *  of retries per batch is generous; an unbounded loop would turn a hub that is
+ *  refusing for some other reason into an audit that never returns. */
+const MAX_BUDGET_WAITS = 6;
+/** No single wait longer than this, whatever the hub asks for — a bad or hostile
+ *  number must not park the audit for an hour. */
+const MAX_WAIT_MS = 60_000;
 
 /**
  * Ask let.ai about a batch of eligible session ids.
@@ -65,12 +86,23 @@ export function createWitnessClient(
     const known = new Set<string>();
     for (let from = 0; from < ids.length; from += batchSize) {
       const batch = ids.slice(from, from + batchSize);
-      let result: FortressQueryResultPayload;
-      try {
-        result = await ask({ kind: "residencyWitness", sessionIds: [...batch] });
-      } catch (err) {
-        deps.onUnavailable?.(err instanceof Error ? err.message : String(err));
-        return null;
+      let result: FortressQueryResultPayload | null = null;
+      for (let attempt = 0; result === null; attempt += 1) {
+        try {
+          result = await ask({ kind: "residencyWitness", sessionIds: [...batch] });
+        } catch (err) {
+          // Only a refusal that names its wait is worth sitting out, and only
+          // while the run still has waits left. Everything else — a timeout, a
+          // closed socket, an old hub — is the unanswered question this adapter
+          // reports as such.
+          const retryAfterMs = (err as { retryAfterMs?: unknown })?.retryAfterMs;
+          const waitable = typeof retryAfterMs === "number" && retryAfterMs > 0 && attempt < MAX_BUDGET_WAITS;
+          if (!waitable) {
+            deps.onUnavailable?.(err instanceof Error ? err.message : String(err));
+            return null;
+          }
+          await (deps.wait ?? sleep)(Math.min(retryAfterMs, MAX_WAIT_MS));
+        }
       }
       // A hub that answered a DIFFERENT question has not answered this one. The
       // shape is checked rather than trusted because the alternative is reading
