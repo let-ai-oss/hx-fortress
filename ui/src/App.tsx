@@ -7,7 +7,7 @@ import {
 } from "./disclosure";
 import { useResource } from "./hooks";
 import { closeAllMenus } from "./lib/util";
-import { NAV_VIEWS, type ViewName } from "./router";
+import { NAV_VIEWS, type NavView, type ViewName } from "./router";
 import { AppProvider, useApp } from "./state";
 import Bootstrap from "./views/Bootstrap";
 import Compliance from "./views/Compliance";
@@ -21,14 +21,16 @@ import { SessionDetail, Sessions } from "./views/Sessions";
 import Setup from "./views/Setup";
 import SignIn from "./views/SignIn";
 
-const NAV_GROUPS: readonly { label: string; views: readonly ViewName[] }[] = [
+const NAV_GROUPS: readonly { label: string; views: readonly NavView[] }[] = [
   { label: "Operate", views: ["overview", "sessions", "people"] },
   { label: "Compliance", views: ["residency", "compliance"] },
   { label: "Setup & health", views: ["postgres", "storage", "embeddings"] },
   { label: "System", views: ["ops", "logs"] },
 ];
 
-const NAV_LABEL: Record<string, string> = {
+/** Keyed by NavView, not by string: a view listed in a group with no label here
+ *  used to render the word `undefined` into the sidebar. */
+const NAV_LABEL: Record<NavView, string> = {
   overview: "Overview",
   sessions: "Sessions",
   people: "Adoption",
@@ -346,7 +348,7 @@ function databaseLine(state: { kind: string; mode?: string }): string {
   return state.kind.split("-").join(" ");
 }
 
-function NavButton({ view }: { view: ViewName }): React.ReactElement {
+function NavButton({ view }: { view: NavView }): React.ReactElement {
   const app = useApp();
   const index = NAV_VIEWS.indexOf(view);
   const active =

@@ -67,7 +67,7 @@ export const DEFAULT_ROUTE: Route = {
 /** The views a signed-in console navigates between, in nav order. Setup and the
  *  bootstrap hand-off are deliberately absent: they are arrival screens, not
  *  places, and neither has a nav entry or a shortcut. */
-export const NAV_VIEWS: readonly ViewName[] = [
+export const NAV_VIEWS = [
   "overview",
   "sessions",
   "people",
@@ -78,32 +78,35 @@ export const NAV_VIEWS: readonly ViewName[] = [
   "embeddings",
   "ops",
   "logs",
-];
+] as const satisfies readonly ViewName[];
 
-const VIEW_SEGMENT: Partial<Record<ViewName, string>> = {
-  sessions: "sessions",
-  people: "people",
-  residency: "residency",
-  compliance: "compliance",
-  postgres: "postgres",
-  storage: "storage",
-  embeddings: "embeddings",
-  ops: "ops",
-  logs: "logs",
-  setup: "setup",
-};
-const SEGMENT_VIEW: Record<string, ViewName> = {
-  sessions: "sessions",
-  people: "people",
-  residency: "residency",
-  compliance: "compliance",
-  postgres: "postgres",
-  storage: "storage",
-  embeddings: "embeddings",
-  ops: "ops",
-  logs: "logs",
-  setup: "setup",
-};
+/** A view that appears in the sidebar, narrowed from the list above so anything
+ *  keyed by nav order cannot drift out of it. */
+export type NavView = (typeof NAV_VIEWS)[number];
+
+/** Views with a URL segment of their own. The segment IS the view's name in
+ *  every case, so the two directions are DERIVED rather than written twice:
+ *  as two hand-maintained objects they were identity inverses of each other,
+ *  and a rename in one of them is a path that routes to nothing. */
+const ROUTED_VIEWS = [
+  "sessions",
+  "people",
+  "residency",
+  "compliance",
+  "postgres",
+  "storage",
+  "embeddings",
+  "ops",
+  "logs",
+  "setup",
+] as const satisfies readonly ViewName[];
+
+const VIEW_SEGMENT: Partial<Record<ViewName, string>> = Object.fromEntries(
+  ROUTED_VIEWS.map((view) => [view, view]),
+);
+const SEGMENT_VIEW: Record<string, ViewName> = Object.fromEntries(
+  ROUTED_VIEWS.map((view) => [view, view]),
+);
 
 /** The pinned path of the workbench hand-off. Served by the index handler like
  *  every other view, so it costs no server route. */
