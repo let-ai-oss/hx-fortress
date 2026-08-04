@@ -133,13 +133,18 @@ describe("the D16 apparatus", () => {
       // With search_path pinned to pg_catalog only, an unqualified hx table
       // would not resolve at all.
       expect(routine.createSql).not.toMatch(/(FROM|INTO|UPDATE)\s+(?!hx\.)[a-z_]*console_commands/);
-      expect(routine.createSql).toMatch(/hx\.(console_commands|audit_acks|audit_settings)/);
+      expect(routine.createSql).toMatch(/hx\.(console_commands|audit_acks|audit_settings|audit_findings)/);
     }
   });
 
   test("the routine owner holds exactly its pinned grant set", () => {
     expect(CMD_OWNER_TABLE_GRANTS.map((g) => g.table).sort()).toEqual([
       "audit_acks",
+      // READ-ONLY, and only because the acknowledge fence reads it: an
+      // acknowledgement is refused unless a matching also_at_letai finding
+      // exists. Without the grant every acknowledgement raised 42501, because
+      // this owner is NOLOGIN with no memberships and inherits nothing.
+      "audit_findings",
       "audit_settings",
       "console_commands",
     ]);

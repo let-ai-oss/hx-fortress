@@ -1072,7 +1072,15 @@ export async function runFortressHost(
     // AFTER the outcome record reached disk. The console unit goes first
     // because the daemon's own restart ends this process.
     try {
-      if (await getUiServiceControl().installed()) restartUiUnitDetached({});
+      // Installed AND still enabled. `installed()` reports the unit FILE, and
+      // `ui disable` stops the unit without removing it — so restarting on
+      // `installed()` alone brought a console the operator had deliberately
+      // switched off back onto the network, from an update they may have
+      // triggered from that very console.
+      if (await getUiServiceControl().installed()) {
+        const cfg = await uiConfigReader.read().catch(() => null);
+        if (cfg && effectiveUiEnabled(cfg, process.env)) restartUiUnitDetached({});
+      }
       await getServiceManager().restart();
     } catch (err) {
       consoleLog.error("the fortress could not restart onto the new binary", {

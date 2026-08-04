@@ -3,7 +3,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -133,6 +133,18 @@ describe("hx-fortress update", () => {
       // Read SYNCHRONOUSLY at the moment of the restart: the ordering is the
       // property, and a restart can kill the process that owes the record.
       const seen: Array<string | null> = [];
+      // The console must be ENABLED for the restart to fire: `installed()`
+      // reports the unit file, and `ui disable` stops the unit without removing
+      // it, so restarting on that alone put a console the operator had switched
+      // off back on the network. The ordering property this test is named for is
+      // unchanged; it just needs a console the daemon is allowed to restart.
+      // Enabled on disk, because the restart is now gated on it: `installed()`
+      // reports the unit FILE, and `ui disable` stops the unit without removing
+      // it, so restarting on that alone put a console the operator had switched
+      // off back on the network. The ordering property this test is named for is
+      // unchanged; it just needs a console the CLI is allowed to restart.
+      await mkdir(path.join(root, "ui"), { recursive: true });
+      await writeFile(path.join(root, "ui", "ui.json"), JSON.stringify({ enabled: true }), "utf8");
       const code = await runCli(["update"], {
         fortressRoot: root,
         runUpdate: async () => INSTALLED,

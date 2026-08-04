@@ -344,11 +344,11 @@ BEGIN
   UPDATE hx.audit_settings
      SET cloud_witness = p_enabled,
          changed_at = pg_catalog.now(),
-         changed_by = pg_catalog.session_user;
+         changed_by = session_user;
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   IF v_rows = 0 THEN
     INSERT INTO hx.audit_settings (cloud_witness, changed_at, changed_by)
-    VALUES (p_enabled, pg_catalog.now(), pg_catalog.session_user);
+    VALUES (p_enabled, pg_catalog.now(), session_user);
   END IF;
   RETURN p_enabled;
 END;
@@ -442,8 +442,15 @@ END $$`,
     `GRANT SELECT, UPDATE ON ${PG_SCHEMA}.console_commands TO ${PG_CMD_OWNER_ROLE}`,
     // SELECT is not optional on either fenced table: both routines are
     // read-modify-write, and Postgres requires SELECT for a nontrivial UPDATE.
+    // audit_findings below is a third table, read by the acknowledge fence.
     `GRANT SELECT, INSERT, UPDATE ON ${PG_SCHEMA}.audit_acks TO ${PG_CMD_OWNER_ROLE}`,
     `GRANT SELECT, INSERT, UPDATE ON ${PG_SCHEMA}.audit_settings TO ${PG_CMD_OWNER_ROLE}`,
+    // And SELECT on audit_findings, because the acknowledge fence READS it: an
+    // acknowledgement is refused unless a matching also_at_letai finding exists,
+    // which is what stops the routine being a bulk-acknowledge primitive. The
+    // owner is NOLOGIN with no memberships, so nothing supplies this implicitly
+    // and every acknowledgement raised 42501 without it.
+    `GRANT SELECT ON ${PG_SCHEMA}.audit_findings TO ${PG_CMD_OWNER_ROLE}`,
   );
   return out;
 }
@@ -453,6 +460,7 @@ export const CMD_OWNER_TABLE_GRANTS: ReadonlyArray<{ table: string; privileges: 
   { table: "console_commands", privileges: ["SELECT", "UPDATE"] },
   { table: "audit_acks", privileges: ["SELECT", "INSERT", "UPDATE"] },
   { table: "audit_settings", privileges: ["SELECT", "INSERT", "UPDATE"] },
+  { table: "audit_findings", privileges: ["SELECT"] },
 ];
 
 /** hx_ui provisioning: LOGIN, no memberships, no default privileges, and only

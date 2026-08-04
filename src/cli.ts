@@ -16,6 +16,7 @@ import {
   restartUiUnitDetached,
   type UiServiceControl,
 } from "./ui/service-control";
+import { LiveUiConfig, effectiveUiEnabled } from "./ui/config";
 import { setFortressCredential } from "./cli-credentials";
 import { runDevCommand, type DevCommandDeps } from "./cli-dev";
 import { runUiCommand, type UiCommandDeps } from "./cli-ui";
@@ -300,7 +301,12 @@ export async function runCli(
         // and a swap with no record of its result is the one state nobody can
         // reconstruct.
         const uiService = (dependencies.getUiServiceControl ?? getUiServiceControl)();
-        if (await uiService.installed()) {
+        // Installed AND still enabled. `installed()` reports the unit FILE, and
+        // `ui disable` stops the unit without removing it, so restarting on
+        // `installed()` alone put a console the operator had switched off back
+        // on the network — from an update they may have run in that console.
+        const uiCfg = await new LiveUiConfig(paths.uiConfig).read().catch(() => null);
+        if ((await uiService.installed()) && uiCfg && effectiveUiEnabled(uiCfg, process.env)) {
           (dependencies.restartUiUnit ?? restartUiUnitDetached)({});
           writeLine("Console service restarting onto the new binary.");
         }

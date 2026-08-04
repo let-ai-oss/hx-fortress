@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 
 import { rotateKeepFromEnv, rotateSizeFromEnv, segmentPath } from "../log-tail";
@@ -32,11 +32,32 @@ export class FileLogSink implements LogSink {
       // explicit about its mode; this one took the umask default, so the daemon
       // log — which quotes raw driver and SDK errors — and each rotated segment
       // were world-readable on a multi-user host.
-      mkdirSync(dirname(this.logPath), { recursive: true, mode: 0o700 });
+      const dir = dirname(this.logPath);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      // CHMOD, not just mode-on-create. `mkdirSync`'s mode applies only to a
+      // directory it creates and `appendFileSync`'s only to a file that does not
+      // exist, so on every upgraded install both were no-ops: logs/ stayed 0755
+      // and fortress.jsonl 0644 forever, holding unredacted driver errors — DSN
+      // passwords, key pairs, service-account keys. Fresh installs were correct,
+      // which is exactly why it read as fixed.
+      chmodSync(dir, 0o700);
+      for (const p of [this.logPath, ...this.rotatedSegments()]) {
+        try {
+          chmodSync(p, 0o600);
+        } catch {
+          // Absent yet, or not ours. The mode on create covers the first, and
+          // the second is not this process's to correct.
+        }
+      }
       this.dirReady = true;
     }
     this.rotateIfNeeded();
     appendFileSync(this.logPath, JSON.stringify(record) + "\n", { mode: 0o600 });
+  }
+
+  /** Every rotated segment this sink can own, whether or not it exists yet. */
+  private rotatedSegments(): string[] {
+    return Array.from({ length: this.keep }, (_, i) => segmentPath(this.logPath, i + 1));
   }
 
   private rotateIfNeeded(): void {

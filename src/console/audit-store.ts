@@ -101,9 +101,27 @@ export async function readAcknowledgements(
 }
 
 export async function readCloudWitness(db: HxDb): Promise<boolean> {
-  const result = await db.execute(sql`SELECT cloud_witness FROM hx.audit_settings LIMIT 1`);
-  const row = rows<{ cloud_witness: unknown }>(result)[0];
-  return row?.cloud_witness === true;
+  return (await readWitnessSetting(db)).enabled;
+}
+
+/** The witness setting AND who last changed it.
+ *
+ *  `hx.set_cloud_witness` cannot be fenced — the daemon and a leaked roles.json
+ *  are the same Postgres role, so the routine cannot tell them apart — and the
+ *  stamp is the whole of the compensating control. A stamp nothing reads is not
+ *  a control, so this is what the console renders beside the toggle. */
+export async function readWitnessSetting(
+  db: HxDb,
+): Promise<{ enabled: boolean; changedAt: string | null; changedBy: string | null }> {
+  const result = await db.execute(
+    sql`SELECT cloud_witness, changed_at, changed_by FROM hx.audit_settings LIMIT 1`,
+  );
+  const row = rows<{ cloud_witness: unknown; changed_at: unknown; changed_by: unknown }>(result)[0];
+  return {
+    enabled: row?.cloud_witness === true,
+    changedAt: typeof row?.changed_at === "string" ? row.changed_at : (row?.changed_at as Date | undefined)?.toISOString() ?? null,
+    changedBy: typeof row?.changed_by === "string" ? row.changed_by : null,
+  };
 }
 
 /** Runs age out; the acknowledgements they reference do not. The cascade takes

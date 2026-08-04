@@ -298,13 +298,39 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
    * canonical is an object that EXISTS, and a falsy test would re-copy it on
    * every pass until the passes ran out.
    */
-  const targetIsCurrent = async (key: SessionKey): Promise<boolean> => {
+  const targetIsCurrent = async (key: SessionKey, alsoSidecars = false): Promise<boolean> => {
     const wanted = await deps.source.statCanonical(key);
     // Gone from the source under the run — a delete that landed mid-copy. There
     // is nothing left to carry, and the tombstone replay is what agrees with the
     // target about it.
     if (wanted === null) return true;
-    return (await deps.target.statCanonical(key)) === wanted;
+    if ((await deps.target.statCanonical(key)) !== wanted) return false;
+    if (!alsoSidecars) return true;
+    // SIDECARS TOO, in the final pass only.
+    //
+    // Canonical length cannot express a sidecar rewrite, and more than one
+    // writer produces one without appending a canonical — the parked-artifact
+    // replay is merely the one this engine can suppress. The `writeArtifact`
+    // tunnel RPC is caller-driven and ungated during the copy phase, and the
+    // gateway defers its own post-commit sidecar write. Any of them lands on the
+    // source after that session was copied, and nothing later notices: the delta
+    // measures the canonical and verification checks presence.
+    //
+    // Sound HERE and nowhere later, which is why it is not the general rule:
+    // this pass runs inside the pause and before the cut, so the source is
+    // frozen and the target is not yet live. After the cut the target IS live
+    // and a sidecar is rewritten whole on every commit, so the same comparison
+    // reports an intact session as a partial loss.
+    const held = new Map<string, number>();
+    for (const name of await deps.source.listSessionArtifacts(key)) {
+      const text = await deps.source.readArtifactText(key, name);
+      if (text !== null) held.set(name, Buffer.byteLength(text));
+    }
+    for (const [name, bytes] of held) {
+      const arrived = await deps.target.readArtifactText(key, name);
+      if (arrived === null || Buffer.byteLength(arrived) !== bytes) return false;
+    }
+    return true;
   };
 
   const copyMissing = async (keys: readonly SessionKey[], phase: MigrationPhase): Promise<number> => {
@@ -338,13 +364,13 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
 
   /** One narrowing pass: whatever the target does not hold as the source holds
    *  it NOW — the objects that are absent, and the ones that have moved on. */
-  const deltaPass = async (phase: MigrationPhase): Promise<number> => {
+  const deltaPass = async (phase: MigrationPhase, alsoSidecars = false): Promise<number> => {
     result.deltaPasses += 1;
     const keys = await deps.source.listAllCanonicalKeys();
     result.sessionsTotal = Math.max(result.sessionsTotal, keys.length);
     const behind: SessionKey[] = [];
     for (const key of keys) {
-      if (await targetIsCurrent(key)) continue;
+      if (await targetIsCurrent(key, alsoSidecars)) continue;
       behind.push(key);
     }
     if (behind.length > 0) {
@@ -476,7 +502,9 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
 
       // The final delta and the tombstone replay run INSIDE the pause, where the
       // source cannot change under them.
-      await deltaPass("quiescing");
+      // The final pass compares sidecars as well — see targetIsCurrent for why
+      // this is the one pass where that comparison is sound.
+      await deltaPass("quiescing", true);
       await replayTombstones(deps, emit);
 
       // The fence. Between the barrier and here, time passed — so the window is

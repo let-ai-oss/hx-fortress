@@ -144,6 +144,11 @@ export interface ConsoleReadPortDeps {
    *  statement about where the data lives. */
   bucket: () => Promise<{ provider: string; name: string; region: string | null } | null>;
   streams: EventStreamRegistry;
+  /** Whether this login may still hold an open stream. The registry has always
+   *  taken a `stillValid` belt and nothing ever passed one, so a revoked or
+   *  disabled operator kept receiving the live daemon log — which quotes driver
+   *  and SDK errors — until the idle sweep fired, up to an hour later. */
+  sessionStillValid?: (login: string) => boolean | Promise<boolean>;
   /** What an opened stream carries. */
   producer: EventProducer;
   downloadBase: () => string | null;
@@ -529,6 +534,9 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         userLogin: args.userLogin,
         lastEventId: args.lastEventId,
         producer: deps.producer,
+        ...(deps.sessionStillValid
+          ? { stillValid: (): boolean | Promise<boolean> => deps.sessionStillValid!(args.userLogin) }
+          : {}),
       });
     },
   };
