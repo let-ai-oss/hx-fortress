@@ -4,8 +4,22 @@
 // that runs one request against a local SessionStore. The reverse tunnel (P4)
 // carries these messages; nothing here knows about sockets.
 
-import type { HxDb } from "../../../host/postgres/db.js";
-import { baseSessionId, markSessionDeleted, purgeSessionPg } from "../../../ingest/delete.js";
+import { createPurgeDb, type HxDb } from "../../../host/postgres/db.js";
+import {
+  dbSqlState,
+  isKillClassDbError,
+  isStatementTimeoutDbError,
+  retryOnceOnTransientDbError,
+  SessionLockTimeoutError,
+} from "../../../host/postgres/pg-errors.js";
+import { sanitizeDbError } from "../../../host/postgres/sanitize.js";
+import { withDeadline } from "../../../host/with-deadline.js";
+import {
+  baseSessionId,
+  markSessionDeleted,
+  purgeSessionPg,
+  type PgPurgeResult,
+} from "../../../ingest/delete.js";
 import { signalReconcile } from "../../../ingest/reconcile-signal.js";
 import {
   ingestAgentCommit,
@@ -179,10 +193,12 @@ function objectUserId(req: VaultRpcRequest): string | null {
  * (or `userId === authz.sub` for the list reads). A mismatch fails closed with
  * `principal_object_mismatch`. `selfTest` carries no object and is never gated.
  *
- * `db` is the RW (DML) handle used by the ingest write branches; `dbRead` is the
- * SELECT-only RO handle for the `listSessions` metadata read (least-privilege).
- * `dbRead` falls back to `db` when omitted, so callers with a single handle (tests,
- * external Postgres) keep their exact prior behavior.
+ * `db` RESOLVES the RW (DML) handle per call — a resolver, not a handle, so the
+ * transient-class retries land on a post-rotation pool after guarded-db swaps
+ * the generation mid-RPC. `dbRead` resolves the SELECT-only RO handle for the
+ * `listSessions` metadata read (least-privilege), falling back to `db` when
+ * omitted. `purgeDsn` resolves the RW DSN for deleteSession's dedicated purge
+ * client (null/omitted ⇒ shared handle for tests / typed park when wired).
  */
 /** Minimal logger seam for the durability-first ingest branch, which acks the
  *  RPC even when indexing can't run (canonical already persisted) — the failure
@@ -191,14 +207,57 @@ export interface VaultRpcLogger {
   warn(message: string, meta?: Record<string, unknown>): void;
 }
 
+/** PG-phase deadline (ms), under the cloud tunnel's 30 s RPC abandon: a wedged
+ *  pool must yield a TYPED error the cloud can log and classify instead of a
+ *  silent hang the tunnel gives up on. Read per call (not at module init) so
+ *  the hidden override works for tests/emergencies regardless of import order. */
+function pgRpcDeadlineMs(): number {
+  const n = Number(process.env.FORTRESS_DB_RPC_DEADLINE_MS ?? "");
+  return Number.isFinite(n) && n > 0 ? n : 25_000;
+}
+
+/** Race ONLY the PG phase of a vault RPC. NEVER cancels: a late transaction is
+ *  exactly-once safe (in-txn dedupe key + per-session advisory lock), so the
+ *  loser detaches with a LOG-then-swallow observer — a 57014 kill behind a
+ *  lost race must stay observable, and Bun exits the process on an unhandled
+ *  rejection. The race wraps the RETRY wrapper, not each attempt. */
+async function racePgPhase<T>(
+  run: () => Promise<T>,
+  tag: string,
+  logger?: VaultRpcLogger,
+): Promise<T> {
+  const phase = run();
+  try {
+    return await withDeadline(phase, pgRpcDeadlineMs(), tag);
+  } catch (err) {
+    if (err instanceof Error && err.message === tag) {
+      phase.then(
+        () => logger?.warn("vault RPC pg phase settled after deadline", { tag }),
+        (late: unknown) =>
+          logger?.warn("vault RPC pg phase failed after deadline", {
+            tag,
+            error: sanitizeDbError(late),
+            // The SQLSTATE separately: a bare PostgresError's message doesn't
+            // carry it, and "57014 killed a statement behind a lost race" is
+            // exactly the giant-statement residual worth grepping for.
+            sqlState: dbSqlState(late),
+          }),
+      );
+    }
+    throw err;
+  }
+}
+
 export async function handleVaultRpc(
   store: SessionStore,
   req: VaultRpcRequest,
-  db: HxDb | null = null,
+  db: (() => HxDb | null) | null = null,
   authz?: VaultAuthz,
-  dbRead: HxDb | null = null,
+  dbRead: (() => HxDb | null) | null = null,
   logger?: VaultRpcLogger,
+  purgeDsn: (() => string | null) | null = null,
 ): Promise<VaultRpcResult> {
+  const resolveDb = db ?? ((): HxDb | null => null);
   if (authz && req.method !== "selfTest") {
     const owner = objectUserId(req);
     if (owner !== null && owner !== authz.sub) {
@@ -271,12 +330,20 @@ export async function handleVaultRpc(
     case "listSessions": {
       // Least-privilege: the "my sessions" metadata read is SELECT-only, so it
       // runs on the RO handle (falling back to the RW handle when a single handle
-      // was passed — external Postgres / tests).
-      const readDb = dbRead ?? db;
+      // was passed — external Postgres / tests). Resolved ONCE per RPC.
+      const readDb = (dbRead ?? resolveDb)();
       if (!readDb) throw new Error("postgres_not_ready");
+      // The typed tag deliberately does NOT match the cloud's old-binary
+      // fallback regex (/unknown_vault_method|listSessions/, camelCase) — it
+      // must PROPAGATE so the org shows offline, never a silently title-
+      // stripped blob-fallback list (the MC-2606 symptom).
       return {
         method: req.method,
-        value: await listSessionsForUser(readDb, { userId: req.userId, limit: req.limit }),
+        value: await racePgPhase(
+          () => listSessionsForUser(readDb, { userId: req.userId, limit: req.limit }),
+          "db_unavailable:list_sessions",
+          logger,
+        ),
       };
     }
     case "ingestCommit": {
@@ -288,7 +355,7 @@ export async function handleVaultRpc(
       // was about to vouch for.
       if (req.writeCanonical) {
         await store.writeCanonicalText(req.key, req.chunkText);
-        if (!db) {
+        if (!resolveDb()) {
           // Canonical persisted; the index can't be written right now. Mirror
           // producers re-send the whole transcript (replace) on their next
           // update, which rebuilds the index — ack rather than fail, but make
@@ -301,23 +368,37 @@ export async function handleVaultRpc(
           return { method: req.method, value: { ok: true } };
         }
         try {
-          await ingestCommit(db, {
-            key: req.key,
-            chunkId: req.chunkId,
-            replace: req.replace === true,
-            chunkText: req.chunkText,
-            totalBytes: req.totalBytes,
-            componentCount: req.componentCount,
-            meta: req.meta,
-            attribution: req.attribution,
-          });
+          // Race ONLY the PG phase (the canonical write above stays outside —
+          // ack = "durably persisted" must stay truthful); one transient-class
+          // retry runs INSIDE the race, re-resolving so it lands on a
+          // post-rotation pool. A retry-time null resolver falls into the catch
+          // — the ack+signalReconcile contract holds on every failure path.
+          await racePgPhase(
+            () =>
+              retryOnceOnTransientDbError(() => {
+                const h = resolveDb();
+                if (!h) throw new Error("db_unavailable:ingest_commit");
+                return ingestCommit(h, {
+                  key: req.key,
+                  chunkId: req.chunkId,
+                  replace: req.replace === true,
+                  chunkText: req.chunkText,
+                  totalBytes: req.totalBytes,
+                  componentCount: req.componentCount,
+                  meta: req.meta,
+                  attribution: req.attribution,
+                });
+              }),
+            "db_unavailable:ingest_commit",
+            logger,
+          );
         } catch (err) {
           // Same self-healing property as above: the transcript is safe, the
           // next whole-transcript send re-indexes. Log so a persistent index
           // failure (a real schema/data bug, not a transient) is visible.
           logger?.warn("ingestCommit indexing failed after canonical persisted", {
             sessionId: req.key.sessionId,
-            error: err instanceof Error ? err.message : String(err),
+            error: sanitizeDbError(err),
           });
           // Row-less canonical: nudge the guarantor to re-index it soon.
           signalReconcile();
@@ -325,50 +406,114 @@ export async function handleVaultRpc(
         return { method: req.method, value: { ok: true } };
       }
       // Chunked producers: the composed canonical already lives in the store;
-      // indexing failures must surface so the (idempotent, dedupe-keyed)
-      // forward retries.
-      if (!db) throw new Error("postgres_not_ready");
-      await ingestCommit(db, {
-        key: req.key,
-        chunkId: req.chunkId,
-        replace: req.replace === true,
-        chunkText: req.chunkText,
-        totalBytes: req.totalBytes,
-        componentCount: req.componentCount,
-        meta: req.meta,
-        attribution: req.attribution,
-      });
+      // indexing failures must surface TYPED so the (idempotent, dedupe-keyed)
+      // forward can retry — a silent hang is what the cloud abandons at 30 s.
+      if (!resolveDb()) throw new Error("postgres_not_ready");
+      await racePgPhase(
+        () =>
+          retryOnceOnTransientDbError(() => {
+            const h = resolveDb();
+            if (!h) throw new Error("db_unavailable:ingest_commit");
+            return ingestCommit(h, {
+              key: req.key,
+              chunkId: req.chunkId,
+              replace: req.replace === true,
+              chunkText: req.chunkText,
+              totalBytes: req.totalBytes,
+              componentCount: req.componentCount,
+              meta: req.meta,
+              attribution: req.attribution,
+            });
+          }),
+        "db_unavailable:ingest_commit",
+        logger,
+      );
       return { method: req.method, value: { ok: true } };
     }
     case "ingestAgentCommit": {
-      if (!db) throw new Error("postgres_not_ready");
-      await ingestAgentCommit(db, {
-        key: req.key,
-        agentId: req.agentId,
-        chunkId: req.chunkId,
-        replace: req.replace === true,
-        chunkText: req.chunkText,
-        totalBytes: req.totalBytes,
-        componentCount: req.componentCount,
-        meta: req.meta,
-        attribution: req.attribution,
-      });
+      if (!resolveDb()) throw new Error("postgres_not_ready");
+      await racePgPhase(
+        () =>
+          retryOnceOnTransientDbError(() => {
+            const h = resolveDb();
+            if (!h) throw new Error("db_unavailable:agent_commit");
+            return ingestAgentCommit(h, {
+              key: req.key,
+              agentId: req.agentId,
+              chunkId: req.chunkId,
+              replace: req.replace === true,
+              chunkText: req.chunkText,
+              totalBytes: req.totalBytes,
+              componentCount: req.componentCount,
+              meta: req.meta,
+              attribution: req.attribution,
+            });
+          }),
+        "db_unavailable:agent_commit",
+        logger,
+      );
       return { method: req.method, value: { ok: true } };
     }
     case "deleteSession": {
       // Tombstone + purge both need Postgres; without it the guard could not
       // hold, so fail typed (the cloud parks the job, no attempt burned).
-      if (!db) throw new Error("postgres_not_ready");
+      const first = resolveDb();
+      if (!first) throw new Error("postgres_not_ready");
       const key = { ...req.key, sessionId: baseSessionId(req.key.sessionId) };
-      // Tombstone FIRST — re-ingest is blocked even if the purge below is
-      // interrupted; every subsequent call is a converging retry.
-      await markSessionDeleted(db, key);
-      const pg = await purgeSessionPg(db, key, Date.now() + 10_000);
-      const bucket = await store.deleteSession(key, { batchLimit: req.batchLimit ?? 500 });
-      return {
-        method: req.method,
-        value: { complete: pg.complete && bucket.complete, deleted: bucket.deleted },
-      };
+      try {
+        // Tombstone FIRST — re-ingest is blocked even if the purge below is
+        // interrupted; every subsequent call is a converging retry. Shared-pool
+        // phase: one transient-class retry, re-resolving post-rotation.
+        await retryOnceOnTransientDbError(() => {
+          const h = resolveDb();
+          if (!h) throw new Error("postgres_not_ready");
+          return markSessionDeleted(h, key);
+        });
+        // Purge on a DEDICATED short-lived param-free client (no
+        // statement_timeout, no maxLifetime): an oversized purge statement must
+        // finish server-side even after the cloud abandons the RPC — the next
+        // parked retry finds complete:true (zombie-convergence). The shared
+        // pools' bounds would turn that into a never-converging park loop.
+        // Residuals (accepted): the purge occupies one server slot until it
+        // finishes (same as today), and against a black-holed server a hung
+        // invocation is only reclaimed by OS socket reap (~15-30 min) — with
+        // the cloud's ~2 min park self-retry that is ~8-15 concurrently hung
+        // invocations per pending delete job, strictly better than the
+        // pre-0.17 forever-hang.
+        let pg: PgPurgeResult;
+        const dedicatedDsn = purgeDsn ? purgeDsn() : null;
+        if (purgeDsn && !dedicatedDsn) throw new Error("postgres_not_ready");
+        if (dedicatedDsn) {
+          const purge = createPurgeDb(dedicatedDsn);
+          try {
+            pg = await purgeSessionPg(purge.db, key, Date.now() + 10_000);
+          } finally {
+            purge.close();
+          }
+        } else {
+          // No purgeDsn seam wired (tests / legacy embedding) — shared handle,
+          // exact prior behavior.
+          pg = await purgeSessionPg(first, key, Date.now() + 10_000);
+        }
+        const bucket = await store.deleteSession(key, { batchLimit: req.batchLimit ?? 500 });
+        return {
+          method: req.method,
+          value: { complete: pg.complete && bucket.complete, deleted: bucket.deleted },
+        };
+      } catch (err) {
+        // Park mapping: transient DB failures must PARK the cloud's purge job
+        // (the park refunds the attempt and self-retries ~2 min later) — the
+        // raw driver text matches neither cloud regex and would burn the job
+        // to dead_letter, which needs manual revival. Genuine SQL/schema
+        // failures still propagate raw → dead_letter — those need operator
+        // eyes. The :statement_timeout suffix substring-parks the same regex
+        // while keeping the fortress-side label truthful.
+        if (err instanceof SessionLockTimeoutError || isStatementTimeoutDbError(err)) {
+          throw new Error("postgres_not_ready:statement_timeout", { cause: err });
+        }
+        if (isKillClassDbError(err)) throw new Error("postgres_not_ready", { cause: err });
+        throw err;
+      }
     }
     case "selfTest":
       await store.selfTest();

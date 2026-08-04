@@ -15,6 +15,7 @@
 // Intended trigger: fold into G's boot-drain (auto each deploy, self-limiting) —
 // a Railway fortress has no one-off command surface. Safe to re-run.
 
+import { sanitizeDbError } from "../host/postgres/sanitize";
 import { and, asc, eq, gt, isNull, or } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
@@ -124,7 +125,7 @@ export async function correctTitles(
         // the pass — this session keeps its current title and is retried next run.
         res.errors += 1;
         opts.logger?.warn?.("correct-titles: skipped one session", {
-          err: String(err),
+          err: sanitizeDbError(err),
           sessionId: row.sessionId,
           family: row.family,
         });

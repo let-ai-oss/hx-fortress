@@ -1,8 +1,12 @@
-/** Minimal SQL surface the migrator needs against the hx-db connection. `query`
- *  takes optional bound `params` ($1, $2, …) for defense-in-depth; `exec` runs a
- *  (possibly multi-statement) simple-query batch as one implicit transaction. */
+/** Minimal SQL surface the migrator needs against the hx-db connection. Both
+ *  run (possibly multi-statement) simple-query batches — one implicit
+ *  transaction each, with the bounding prefix (SET LOCAL timeouts + the
+ *  migration advisory lock) prepended by the implementation. `query` returns
+ *  the LAST statement's rows (the prefix statements come first). No bound
+ *  params: the extended protocol can't share a simple-query batch, so every
+ *  interpolated value is validated (integers) or allowlisted (identifiers). */
 export interface MigrationExec {
-  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]>;
+  query<T = Record<string, unknown>>(sql: string): Promise<T[]>;
   exec(sql: string): Promise<void>;
 }
 
@@ -15,12 +19,19 @@ export interface Migration {
   requires?: "vector";
 }
 
+/** The only extensions a migration may gate on. The probe interpolates the
+ *  name into a simple-query batch (so it shares the bounding prefix — the old
+ *  extended-protocol bound-param probe was the one unbounded statement left in
+ *  the migration path), which is safe ONLY because the name comes from this
+ *  static allowlist, never from data. */
+const EXTENSION_ALLOWLIST: ReadonlySet<string> = new Set(["vector"]);
+
 async function extensionAvailable(db: MigrationExec, ext: string): Promise<boolean> {
-  // Bound param (defense-in-depth) — `ext` is a validated union today, but the
-  // standalone SELECT parameterizes cleanly.
+  if (!EXTENSION_ALLOWLIST.has(ext)) {
+    throw new Error(`extension gate not allowlisted: ${ext}`);
+  }
   const rows = await db.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = $1`,
-    [ext],
+    `SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = '${ext}'`,
   );
   return (rows[0]?.n ?? 0) > 0;
 }

@@ -14,6 +14,7 @@
 // gateway), so the scheduler is safe to construct before Postgres/the vault are
 // ready; a tick that finds either not-ready simply reschedules soon.
 
+import { sanitizeDbError } from "../host/postgres/sanitize";
 import { parseBooleanEnv } from "../env";
 import type { HxDb } from "../host/postgres/db";
 import type { SessionStore } from "../modules/session-vault/store/types";
@@ -51,14 +52,36 @@ export interface GuarantorConfig {
 export interface Guarantor {
   start(): void;
   stop(): Promise<void>;
-  /** Nudge a pass soon after a known ingest-mirror failure (debounced). */
+  /** Nudge a pass soon after a known ingest-mirror failure. ORDINARY variant:
+   *  remote-influenceable (cloud RPCs can drive signalReconcile), so it is
+   *  governed by max(debounce, cooldown-remaining) — a sustained failure
+   *  stream can never drive back-to-back full bucket scans. Never dropped:
+   *  a cooldown arrival is DEFERRED past the cooldown, not lost. */
   signal(): void;
+  /** URGENT variant — fed ONLY by guarded-db's first probe success after a
+   *  pool rebuild (internal, never remote): the orphan backlog that outage
+   *  just created should heal in ~debounce, not at the next hourly sweep.
+   *  Idle ⇒ schedule(debounce) IGNORING the cooldown; in-flight ⇒ latch (the
+   *  pass's finally schedules debounce instead of the hourly interval). */
+  signalUrgent(): void;
   /** Run one pass synchronously (tests / manual trigger); null if not ready. */
   runOnce(): Promise<ReconcileResult | null>;
 }
 
 const DEFAULT_BOOT_DELAY_MS = 30_000;
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
+
+/** Sweep interval override (ms): set-but-empty OR 0 ⇒ the default — the env is
+ *  a tuning knob, never a disable switch (FORTRESS_GUARANTOR_DISABLED exists
+ *  for that). */
+export function guarantorIntervalMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.FORTRESS_GUARANTOR_INTERVAL_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_INTERVAL_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_INTERVAL_MS;
+}
 const DEFAULT_NOT_READY_RETRY_MS = 15_000;
 const DEFAULT_SIGNAL_DEBOUNCE_MS = 30_000;
 const DEFAULT_SIGNAL_COOLDOWN_MS = 5 * 60 * 1000;
@@ -70,18 +93,23 @@ export function guarantorEnabled(env: Record<string, string | undefined> = proce
 
 export function createGuarantor(cfg: GuarantorConfig): Guarantor {
   const bootDelay = cfg.bootDelayMs ?? DEFAULT_BOOT_DELAY_MS;
-  const interval = cfg.intervalMs ?? DEFAULT_INTERVAL_MS;
+  const interval = cfg.intervalMs ?? guarantorIntervalMs();
   const notReadyRetry = cfg.notReadyRetryMs ?? DEFAULT_NOT_READY_RETRY_MS;
   const signalDebounce = cfg.signalDebounceMs ?? DEFAULT_SIGNAL_DEBOUNCE_MS;
   const signalCooldown = cfg.signalCooldownMs ?? DEFAULT_SIGNAL_COOLDOWN_MS;
   const correctTitles = cfg.correctExistingTitles ?? false;
 
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let timerDueAt = Infinity;
   let stopped = false;
   let inFlight: Promise<void> | null = null;
   // Set when a failure signal has already armed a soon pass — so a burst of
   // signals collapses to one pass instead of continually resetting the timer.
   let signalPending = false;
+  // Urgent latch: a guarded-db recovery signal that arrived while a pass was
+  // in flight — consumed by that pass's finally (debounce instead of interval)
+  // and cleared when the next pass starts.
+  let urgentLatch = false;
   // When the last pass completed, so a signal cooldown can bound full-bucket
   // scans under a sustained failure stream (0 = no pass has finished yet).
   let lastPassEndAt = 0;
@@ -89,15 +117,26 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
   // ingest time), so run it on the boot-drain pass only — not every hourly sweep.
   let firstPass = true;
 
+  // Min-wins arming: never replace an armed SOONER pass with a later one (the
+  // old unconditional clearTimeout let an hourly reschedule silently push out
+  // an already-armed urgent debounce).
   const schedule = (ms: number): void => {
     if (stopped) return;
+    const dueAt = Date.now() + ms;
+    if (timer && timerDueAt <= dueAt) return;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => void tick(), ms);
+    timerDueAt = dueAt;
+    timer = setTimeout(() => {
+      timer = null;
+      timerDueAt = Infinity;
+      void tick();
+    }, ms);
   };
 
   async function tick(): Promise<void> {
     if (stopped || inFlight) return;
     signalPending = false; // this pass consumes any armed signal.
+    urgentLatch = false; // …and any armed urgent one.
     const db = cfg.db();
     const store = cfg.store();
     if (!db || !store) {
@@ -117,7 +156,7 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
       } catch (err) {
         // reconcileOrphans is non-throwing per session; this catches only a
         // whole-pass failure (e.g. the store enumeration threw). Retry next tick.
-        cfg.logger?.warn?.("guarantor: reconcile pass failed", { err: String(err) });
+        cfg.logger?.warn?.("guarantor: reconcile pass failed", { err: sanitizeDbError(err) });
       }
     })();
     try {
@@ -125,7 +164,10 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
     } finally {
       inFlight = null;
       lastPassEndAt = Date.now();
-      schedule(interval);
+      // An urgent signal that arrived mid-pass pulls the next pass to the
+      // debounce window (the outage's backlog is already known); otherwise
+      // the ordinary sweep cadence resumes.
+      schedule(urgentLatch ? signalDebounce : interval);
     }
   }
 
@@ -135,14 +177,26 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
       schedule(bootDelay);
     },
     signal() {
-      // Pull the next pass in to the debounce window. Ignore while a pass is
-      // in flight (it'll observe the new orphan) or one is already armed (no
-      // reset-storm under a burst of failures).
+      // Pull the next pass in. Ignore while a pass is in flight (it'll observe
+      // the new orphan) or one is already armed (no reset-storm under a burst
+      // of failures). A cooldown arrival is DEFERRED past the cooldown rather
+      // than dropped — max(debounce, cooldown-remaining) governs all ordinary
+      // consumption, so a signal is never lost while full-bucket scans stay
+      // bounded under a sustained failure stream.
       if (stopped || inFlight || signalPending) return;
-      // Cooldown: under a sustained failure stream, don't let every debounce
-      // fire a fresh whole-bucket scan — the hourly sweep still bounds latency.
-      if (lastPassEndAt > 0 && Date.now() - lastPassEndAt < signalCooldown) return;
+      const cooldownRemaining =
+        lastPassEndAt > 0 ? Math.max(0, signalCooldown - (Date.now() - lastPassEndAt)) : 0;
       signalPending = true;
+      schedule(Math.max(signalDebounce, cooldownRemaining));
+    },
+    signalUrgent() {
+      // Internal-only (guarded-db recovery): the cooldown exists to bound
+      // REMOTE-drivable scan pressure, so a local recovery signal ignores it.
+      if (stopped) return;
+      if (inFlight) {
+        urgentLatch = true;
+        return;
+      }
       schedule(signalDebounce);
     },
     async stop() {
@@ -151,6 +205,7 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
         clearTimeout(timer);
         timer = null;
       }
+      timerDueAt = Infinity;
       // Let an in-flight pass finish rather than tearing the DB handle out from
       // under a live ingest transaction.
       if (inFlight) await inFlight.catch(() => {});

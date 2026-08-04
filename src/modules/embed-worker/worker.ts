@@ -36,6 +36,8 @@
 // stranding everything past the first batch.
 
 import { sanitizeDbError } from "../../host/postgres/sanitize";
+import { isKillClassDbError } from "../../host/postgres/pg-errors";
+import { hxPoolOptions } from "../../host/postgres/db";
 import { scrubSecrets } from "./scrub";
 import { EmbedAccountError, type Embedder } from "./openai";
 
@@ -311,6 +313,10 @@ export interface EmbedWorkerOptions {
   /** Poll interval while the DSN is not yet resolvable at boot. */
   dsnRetryMs?: number;
   dsnRetryLimit?: number;
+  /** Cadence after the boot burst: the worker NEVER goes dormant (an external
+   *  provider can take hours to reach ready; the old 60×5 s burst then gave up
+   *  forever, stranding the boot drain until unrelated traffic signalled). */
+  dormantRetryMs?: number;
   /** Consecutive per-turn embed failures before the turn is dead-lettered
    *  (excluded from future claims for this process lifetime). */
   deadLetterThreshold?: number;
@@ -324,6 +330,11 @@ export interface EmbedWorker {
   start(): void;
   /** Best-effort nudge that new indexable turns may have landed (debounced). */
   signal(): void;
+  /** Drop the worker's pool handle WITHOUT closing it (an in-flight pass keeps
+   *  its local ref; the old pool drains via idleTimeout/maxLifetime). The next
+   *  pass rebuilds from the live DSN — guarded-db calls this on every rebuild
+   *  so the worker never keeps writing into a poisoned pool. */
+  resetDb(): void;
   /** Run exactly one pass now (boot drain / tests). Resolves to its counters. */
   runOnce(): Promise<EmbedPassResult>;
   /** Stop the scheduler, await any in-flight pass, and close the DB handle. */
@@ -335,6 +346,7 @@ const DEFAULT_DEBOUNCE_MS = 5_000;
 const DEFAULT_MAX_WAIT_MS = 30 * 60_000;
 const DEFAULT_DSN_RETRY_MS = 5_000;
 const DEFAULT_DSN_RETRY_LIMIT = 60;
+const DEFAULT_DORMANT_RETRY_MS = 60_000;
 const DEFAULT_DEAD_LETTER_THRESHOLD = 5;
 
 export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
@@ -344,6 +356,7 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
   const maxWaitMs = options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS;
   const dsnRetryMs = options.dsnRetryMs ?? DEFAULT_DSN_RETRY_MS;
   const dsnRetryLimit = options.dsnRetryLimit ?? DEFAULT_DSN_RETRY_LIMIT;
+  const dormantRetryMs = options.dormantRetryMs ?? DEFAULT_DORMANT_RETRY_MS;
   const effectiveMaxPerPass = options.maxPerPass ?? DEFAULT_MAX_PER_PASS;
   const deadLetterThreshold = options.deadLetterThreshold ?? DEFAULT_DEAD_LETTER_THRESHOLD;
   const logger = options.logger;
@@ -398,8 +411,23 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
     if (sqlHandle) return sqlHandle;
     const dsn = resolveDsn();
     if (!dsn) return null;
-    sqlHandle = new Bun.SQL(dsn, { max: dbMax });
+    // Shared driver hygiene (component 1), with the worker's own overrides:
+    // its capped pool size and a longer 300 s statement_timeout (embed claims
+    // batch-update many rows). FORTRESS_DB_STATEMENT_TIMEOUT_MS=0 omits the
+    // startup param here too — the pooled-DSN escape hatch covers EVERY
+    // consumer, this override included.
+    sqlHandle = new Bun.SQL(
+      dsn,
+      hxPoolOptions(process.env, { max: dbMax, statementTimeoutMs: 300_000 }),
+    );
     return sqlHandle;
+  }
+
+  function resetDb(): void {
+    // Null WITHOUT close: an in-flight pass holds its own `sql` local and must
+    // finish (or die to the pool's own bounds) undisturbed; the retired pool
+    // drains via idleTimeout/maxLifetime.
+    sqlHandle = null;
   }
 
   // Run one pass and fold its failures into the dead-letter bookkeeping. Shared
@@ -457,6 +485,10 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
         error: sanitizeDbError(err),
         account: err instanceof EmbedAccountError,
       });
+      // A connection-lifecycle kill means THIS pool is dead/rotated — drop the
+      // handle (raw Bun.SQL throws the kill BARE) so the next pass rebuilds
+      // instead of failing forever on a poisoned pool.
+      if (isKillClassDbError(err) && sqlHandle === sql) resetDb();
     }
     return claimedFull;
   }
@@ -466,10 +498,15 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
     if (stopped) return;
     const sql = ensureSql();
     if (!sql) {
-      if (dsnRetries < dsnRetryLimit) {
-        dsnRetries += 1;
-        timer = setTimeout(() => void tick(), dsnRetryMs);
-      }
+      // Boot burst at dsnRetryMs, then a forever cadence at dormantRetryMs —
+      // never dormant: component 3's re-probe loop can take hours to bring an
+      // external PG ready, and a zero-traffic fortress would otherwise strand
+      // its embed backlog until a restart.
+      dsnRetries += 1;
+      timer = setTimeout(
+        () => void tick(),
+        dsnRetries <= dsnRetryLimit ? dsnRetryMs : dormantRetryMs,
+      );
       return;
     }
     dsnRetries = 0;
@@ -504,6 +541,7 @@ export function createEmbedWorker(options: EmbedWorkerOptions): EmbedWorker {
     signal() {
       arm();
     },
+    resetDb,
     async runOnce() {
       const sql = ensureSql();
       if (!sql) return emptyResult();

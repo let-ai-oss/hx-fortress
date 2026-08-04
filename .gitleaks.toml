@@ -20,3 +20,10 @@ description = "Redacted secret-scrub test fixtures (test/embed-scrub.test.ts) �
 paths = [
   '''test/embed-scrub\.test\.ts''',
 ]
+
+[[allowlists]]
+description = "The canonical 0123…cdef placeholder the console tests use as a credential REFERENCE id (they assert the reference is NOT the credential) — self-evidently synthetic. Scoped to the exact secret VALUE, so the files stay fully scanned for anything real."
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef0123456789abcdef$''',
+]

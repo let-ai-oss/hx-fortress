@@ -23,6 +23,7 @@ import type {
 import type { GrantClaims } from "../gateway/capability-token";
 import { GRANT_REQUIRED_ERROR, isTunnelGrantEnforcing } from "../gateway/capability-token";
 import { sanitizeDbError } from "../host/postgres/sanitize";
+import { withDeadline } from "../host/with-deadline";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { CloudCredential, CredentialStore } from "./credentials";
@@ -82,24 +83,8 @@ export interface WsCloudConnectionDeps {
   collectionStats?: () => Promise<CollectionStats | null>;
 }
 
-/** Reject if `p` doesn't settle within `ms` (MC-2517 fortress dispatch ceiling).
- *  The underlying handler isn't cancellable, so a late settle is ignored — but its
- *  rejection is still observed here, so it never surfaces as an unhandled rejection. */
-function withDeadline<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms);
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
-}
+// MC-2517 fortress dispatch ceiling — withDeadline now lives in
+// ../host/with-deadline (shared with the vault RPC PG-phase races).
 
 /** Dispatch one reverse-tunnel MCP request to the fortress tool handler + reply. */
 export async function dispatchMcpFrame(
