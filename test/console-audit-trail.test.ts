@@ -303,6 +303,31 @@ describe("the drain", () => {
   });
 });
 
+describe("who owns the signal", () => {
+  test("starting the drain registers no process handler", () => {
+    const { audit } = consoleAudit();
+    const drain = drainOf(null, audit);
+    const before = {
+      term: process.listenerCount("SIGTERM"),
+      int: process.listenerCount("SIGINT"),
+    };
+    drain.start(60_000);
+    try {
+      // A handler here is worse than none: under Bun a registered listener
+      // SUPPRESSES the default termination, and this component cannot end the
+      // process — so the console flushed its spool on SIGTERM and went on
+      // serving the admin surface for the whole grace period, with the operator
+      // already told it had stopped.
+      expect({
+        term: process.listenerCount("SIGTERM"),
+        int: process.listenerCount("SIGINT"),
+      }).toEqual(before);
+    } finally {
+      drain.stop();
+    }
+  });
+});
+
 describe("the same-uid spool", () => {
   test("refuses a writer that is not the owning user, by name", async () => {
     const owner = "fortress";

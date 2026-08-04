@@ -181,7 +181,7 @@ export class AuditDrain {
   private readonly disputed = new Set<string>();
   private running: Promise<DrainResult> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private signals: (() => void) | null = null;
+
 
   constructor(options: AuditDrainOptions) {
     this.options = options;
@@ -344,27 +344,26 @@ export class AuditDrain {
     return raised;
   }
 
-  /** Boot, first recovery and every 30 seconds after. The signal handlers exist
-   *  for the ONE thing a clean stop can still save: the open failure window. */
+  /**
+   * Boot, first recovery and every 30 seconds after.
+   *
+   * NO SIGNAL HANDLER. This component has no authority to end the process and
+   * nothing else in the console verb would: a listener registered here
+   * SUPPRESSES the default termination under Bun, so the console flushed its
+   * spool on SIGTERM and then went on serving the whole admin surface — through
+   * the runtime's entire grace period and out the other side into SIGKILL, with
+   * the operator already told it had stopped. The verb that owns the server, the
+   * lock and this timer owns the signal, and calls stop() as part of the exit it
+   * performs.
+   */
   start(intervalMs = DRAIN_INTERVAL_MS): void {
     if (this.timer) return;
     this.timer = setInterval(() => void this.run(), intervalMs);
     this.timer.unref?.();
-    const close = (): void => {
-      void this.options.audit.flushFailures(true);
-    };
-    process.once("SIGTERM", close);
-    process.once("SIGINT", close);
-    this.signals = (): void => {
-      process.off("SIGTERM", close);
-      process.off("SIGINT", close);
-    };
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    this.signals?.();
-    this.signals = null;
   }
 }

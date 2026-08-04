@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { runCli } from "../src/cli";
-import { runUiCommand, type UiCommandDeps } from "../src/cli-ui";
+import { runUiCommand, stopConsole, type UiCommandDeps } from "../src/cli-ui";
 import type { UiAssets } from "../src/ui/assets";
 
 const ASSETS: UiAssets = {
@@ -162,5 +162,45 @@ describe("hx-fortress ui", () => {
     const code = await runCli(["ui", "--wat"], { writeLine: (line) => lines.push(line) });
     expect(code).toBe(1);
     expect(lines.join("\n")).toContain("unknown option --wat");
+  });
+});
+
+describe("stopping the console", () => {
+  test("a signal ends the process, and flushes before it does", async () => {
+    const order: string[] = [];
+    const lines: string[] = [];
+    await stopConsole("SIGTERM", {
+      write: (line) => lines.push(line),
+      stopServer: () => order.push("server"),
+      stopSweep: () => order.push("sweep"),
+      stopDrain: () => order.push("drain"),
+      flush: async () => void order.push("flush"),
+      releaseLock: async () => void order.push("lock"),
+      exit: (code) => order.push(`exit:${code}`),
+    });
+    // The server closes before the flush so no request can append a record
+    // after the window it covers was written, and the EXIT is the point: a stop
+    // that only released things left the admin surface serving through the
+    // runtime's whole grace period.
+    expect(order).toEqual(["server", "sweep", "drain", "flush", "lock", "exit:0"]);
+    expect(lines).toEqual(["stopping on SIGTERM"]);
+  });
+
+  test("it still exits when a release throws", async () => {
+    const order: string[] = [];
+    await stopConsole("SIGINT", {
+      write: () => {},
+      stopServer: () => order.push("server"),
+      stopSweep: () => order.push("sweep"),
+      stopDrain: () => order.push("drain"),
+      flush: async () => {
+        throw new Error("postgres went away");
+      },
+      releaseLock: async () => {
+        throw new Error("read-only filesystem");
+      },
+      exit: (code) => order.push(`exit:${code}`),
+    });
+    expect(order).toEqual(["server", "sweep", "drain", "exit:0"]);
   });
 });

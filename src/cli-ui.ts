@@ -78,6 +78,45 @@ export interface UiCommandDeps {
     hostname: string,
     fallbackHostname?: string,
   ) => { readonly port?: number | null };
+  /** Injected in tests. The console's exit really is an exit: a stop that only
+   *  released things would leave the surface serving. */
+  exit?: (code: number) => void;
+}
+
+/**
+ * Stop serving, then let go of everything the console was holding.
+ *
+ * ORDER MATTERS. The server closes FIRST, so no request can append a record
+ * after the failure window has been flushed; the timers stop next so nothing
+ * re-opens one; the flush is what a clean stop exists to save; the instance lock
+ * is released last, because a lock let go before the port is closed invites the
+ * respawn to fail its bind instead.
+ *
+ * It ENDS THE PROCESS. Everything above is release, and release is not exit —
+ * the defect this replaces flushed the spool and then served on.
+ */
+export async function stopConsole(
+  signal: string,
+  deps: {
+    write: (line: string) => void;
+    stopServer: () => void;
+    stopSweep: () => void;
+    stopDrain: () => void;
+    flush: () => Promise<unknown>;
+    releaseLock: () => Promise<void>;
+    exit: (code: number) => void;
+  },
+): Promise<void> {
+  deps.write(`stopping on ${signal}`);
+  try {
+    deps.stopServer();
+    deps.stopSweep();
+    deps.stopDrain();
+    await deps.flush().catch(() => {});
+    await deps.releaseLock().catch(() => {});
+  } finally {
+    deps.exit(0);
+  }
 }
 
 interface UiFlags {
@@ -315,6 +354,27 @@ export async function runUiCommand(
   // first tick 30 seconds from here.
   mount.drain.start();
   void mount.drain.run();
+
+  // A signal is the ONLY way a supervised console is told to go away: `ui
+  // disable` flips the setting and the supervisor signals, and `docker stop`
+  // signals the entrypoint which forwards it. Owned here because this is the
+  // only frame holding everything a stop has to release, and because a handler
+  // registered anywhere at all suppresses the default termination — which is
+  // how a console that was told to stop kept serving the admin surface while the
+  // operator read "Console disabled."
+  const shutdown = (signal: NodeJS.Signals): void => {
+    void stopConsole(signal, {
+      write,
+      stopServer: () => (started as { stop?: (closeActive?: boolean) => void }).stop?.(true),
+      stopSweep: () => runtime.stopSweepTimer(),
+      stopDrain: () => mount.drain.stop(),
+      flush: () => mount.audit.flushFailures(true),
+      releaseLock: () => lock.release(),
+      exit: deps.exit ?? ((code: number): void => process.exit(code)),
+    });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 
   const boundPort = started.port ?? port;
   const url = printedUrl({
