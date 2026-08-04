@@ -22,6 +22,7 @@ import {
   unknownProvenanceCause,
   verdictFor,
   VERDICT_CAUSE,
+  VERDICT_REMEDIATION,
   witnessEligible,
   type ResidencyVerdict,
   type RollUpCounts,
@@ -191,10 +192,15 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
       sessionId: row.sessionId,
       verdict,
       ingestChannel: row.ingestChannel,
-      detail:
+      // Cause AND remediation for anything that fails: the finding rows are the
+      // operator's only record of a specific session, and a failing verdict they
+      // cannot acknowledge is useless without the sentence saying what to do.
+      detail: [
         verdict === "unknown_provenance"
           ? unknownProvenanceCause(row.ingestChannel)
           : VERDICT_CAUSE[verdict],
+        ...(sessionCheckPasses(verdict, ack) ? [] : [VERDICT_REMEDIATION[verdict]]),
+      ].join(" — "),
       acknowledged: ack,
     });
   }

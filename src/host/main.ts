@@ -56,7 +56,7 @@ import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
 import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
-import { awaitParkDrain, drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
+import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
 import { forgetCopiedSessions } from "../console/migration-store";
 import { addForgetPending, readForgetPending, removeForgetPending } from "../console/runtime-files";
 import { migrationIsRunning } from "../console/migration-runner";
@@ -634,7 +634,22 @@ export async function runFortressHost(
   });
 
   const parkLatch = new ParkReplayLatch();
-  const replayParked = async (): Promise<void> => {
+  // The WHOLE replay is the thing a migration has to wait out, not just the
+  // drain inside it. `awaitParkDrain` covers `drainOnce` only, and the pending
+  // append happens after that promise resolves — so a preamble that waited on
+  // the drain still read the pending file before the drain's keys were in it,
+  // and the refusal that makes this recoverable never fired.
+  let replayInFlight: Promise<void> | null = null;
+  const replayParked = (): Promise<void> => {
+    replayInFlight ??= replayParkedOnce().finally(() => {
+      replayInFlight = null;
+    });
+    return replayInFlight;
+  };
+  const awaitReplay = async (): Promise<void> => {
+    await replayInFlight?.catch(() => {});
+  };
+  const replayParkedOnce = async (): Promise<void> => {
     const store = vaultModule.getStore();
     if (!store) return;
     // NOT while a storage migration is between its copy and its cut.
@@ -851,7 +866,7 @@ export async function runFortressHost(
       // that reaches nothing. If it cannot be applied the run does not start —
       // cutting over an unknown set of stale sidecars is the failure this whole
       // mechanism exists to prevent, and a refusal is recoverable.
-      await awaitParkDrain(parkedArtifactsPath);
+      await awaitReplay();
       const stale = await readForgetPending(forgetPendingPath);
       if (stale.length > 0) {
         const db = postgres.isReady() ? resolveHxDb() : null;

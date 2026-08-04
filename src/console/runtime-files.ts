@@ -199,13 +199,3 @@ export async function removeForgetPending(
     await writePrivateJson(filePath, left);
   });
 }
-
-export async function writeForgetPending(filePath: string, keys: readonly SessionKey[]): Promise<void> {
-  await serialized(filePath, async () => {
-    if (keys.length === 0) {
-      await unlink(filePath).catch(() => {});
-      return;
-    }
-    await writePrivateJson(filePath, keys);
-  });
-}

@@ -252,6 +252,12 @@ describe("one audit run", () => {
     expect(result.counts.residencyUnchecked).toBe(3);
     // And it has to reach the operator as something to act on.
     expect(failingFindings(result.findings).length).toBe(3);
+    // And the fleet verdict has to fail with it — qualifying would leave this
+    // behaving exactly like the `no_record` it replaced.
+    expect(result.verdict).toBe("failed");
+    // The operator's only per-session record has to say what to do, since this
+    // verdict is not acknowledgeable.
+    expect(result.findings[0]!.detail).toContain("re-run the audit");
   });
 
   test("a switched-off witness is never read as 'no copies'", async () => {

@@ -128,8 +128,21 @@ export function createWitnessClient(
       }
       let result: FortressQueryResultPayload | null = null;
       while (result === null) {
+        // Inside the loop, not only between batches. A hub that answers slowly
+        // and THEN refuses spends its time in `ask`, which `waitedMs` does not
+        // count — so a single batch could sit here for many times the stated
+        // ceiling while the console mutation plane waited behind it.
+        const remaining = totalWaitCap - elapsed();
+        if (remaining <= 0) {
+          deps.onUnavailable?.(
+            `the sweep of ${batches} batches did not finish within ${Math.round(totalWaitCap / 1000)}s`,
+          );
+          return null;
+        }
         try {
-          result = await ask({ kind: "residencyWitness", sessionIds: [...batch] });
+          // The request carries the remaining budget, so one slow answer cannot
+          // overshoot it either.
+          result = await ask({ kind: "residencyWitness", sessionIds: [...batch] }, remaining);
         } catch (err) {
           // Only a refusal that names its wait is worth sitting out, and only
           // while the RUN still has budget. Everything else — a timeout, a

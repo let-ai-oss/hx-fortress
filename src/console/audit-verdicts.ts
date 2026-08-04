@@ -173,6 +173,17 @@ export function rollUp(
       qualification: `${counts.notDeliveredHere} session${counts.notDeliveredHere === 1 ? "" : "s"} should be on this fortress and ${counts.notDeliveredHere === 1 ? "is" : "are"} not`,
     };
   }
+  // Fails at the roll-up too, not only per session. Leaving it to qualify would
+  // make it behave exactly like the `no_record` it replaced, which is the
+  // downgrade 0020 exists to undo: the object really is absent from this
+  // fortress, and the unknown is only whether let.ai ever routed it here.
+  if (counts.residencyUnchecked > 0) {
+    const n = counts.residencyUnchecked;
+    return {
+      verdict: "failed",
+      qualification: `${n} session${n === 1 ? "" : "s"} missing here that the witness could not account for — re-run once let.ai is reachable, or with the cloud witness on`,
+    };
+  }
   const outstanding = counts.alsoAtLetai - counts.alsoAtLetaiAcknowledged;
   if (outstanding > 0) {
     return {
@@ -191,11 +202,6 @@ export function rollUp(
   }
   if (counts.notApplicable > 0) {
     notes.push(`${counts.notApplicable} uploaded directly and never named to let.ai`);
-  }
-  if (counts.residencyUnchecked > 0) {
-    notes.push(
-      `${counts.residencyUnchecked} missing here that the witness could not account for`,
-    );
   }
   if (counts.noRecord > 0) {
     notes.push(`${counts.noRecord} predating per-destination tracking`);

@@ -80,14 +80,6 @@ export async function drainParkedArtifacts(
   return await run;
 }
 
-/** Wait for any drain already running against this park, then return. A caller
- *  that must not overlap a replay — a storage migration about to walk the source
- *  — needs ordering, and the replay's own `migrationIsRunning()` guard is a check
- *  rather than a lock: it cannot stop a drain that started first. */
-export async function awaitParkDrain(filePath: string): Promise<void> {
-  await draining.get(filePath)?.catch(() => {});
-}
-
 async function drainOnce(
   filePath: string,
   write: (entry: ParkedArtifact) => Promise<void>,
