@@ -670,7 +670,43 @@ describe("a budget refusal is a wait, not a failure", () => {
     });
 
     expect(await ask(["a"])).toBeNull();
-    // Bounded: the first try plus MAX_BUDGET_WAITS retries, and no more.
-    expect(attempts).toBe(7);
+    expect(attempts).toBeGreaterThan(1);
+    expect(attempts).toBeLessThan(100);
+  });
+
+  test("the wait budget belongs to the RUN, not to each batch", async () => {
+    // A per-batch allowance multiplies by ceil(n / batchSize): a hub answering
+    // the maximum wait before every batch would hold the audit for hours, and
+    // the whole console mutation plane sits behind this call.
+    const attemptsFor = async (ids: string[]): Promise<number> => {
+      let attempts = 0;
+      const ask = createWitnessClient({
+        batchSize: 1,
+        wait: async () => {},
+        request: async () => {
+          attempts += 1;
+          throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 1_000);
+        },
+      });
+      expect(await ask(ids)).toBeNull();
+      return attempts;
+    };
+
+    // Twenty times the batches must not buy twenty times the retries.
+    expect(await attemptsFor(Array.from({ length: 20 }, (_, i) => `s${i}`))).toBe(await attemptsFor(["a"]));
+  });
+
+  test("many small waits cannot add up to the same stall", async () => {
+    let waited = 0;
+    const ask = createWitnessClient({
+      wait: async (ms) => {
+        waited += ms;
+      },
+      request: async () => {
+        throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 5_000);
+      },
+    });
+    expect(await ask(["a"])).toBeNull();
+    expect(waited).toBeLessThanOrEqual(60_000);
   });
 });

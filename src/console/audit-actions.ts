@@ -114,9 +114,16 @@ export function sanitizeParams(
   }
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(params)) {
-    // The one carve-out, and it is the same one `command-params.ts` makes: a
-    // credentialRef is 32 hex naming a file, not a credential, and the belt
-    // below would otherwise drop the very field the allowlist just admitted.
+    // The one carve-out. It is safe for reasons about this value specifically,
+    // not by appeal to another module: the reference is minted server-side, is
+    // 32 random hex naming a 0600 file that is unlinked on read, is unreachable
+    // by client input, and only `console.command.submit` carries it. What it
+    // names never travels. Without the carve-out the secret-shaped belt drops
+    // the very field the allowlist just admitted.
+    //
+    // (`command-params.ts` refuses a `credentialRef` PARAMETER, which is the
+    // opposite rule for the opposite reason: on that path the reference belongs
+    // in the row's column, not in caller-supplied params.)
     if (!allowed.includes(key)) continue;
     if (key !== "credentialRef" && SECRET_KEYS.test(key)) continue;
     if (value === null || typeof value === "number" || typeof value === "boolean") {

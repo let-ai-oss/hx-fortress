@@ -48,10 +48,14 @@ export const ADOPTION_STAGES: readonly AdoptionStage[] = [
   },
   {
     id: "installed",
-    label: "Client installed",
+    label: "Has worked here",
     source: "roster device inventory",
     attestation: "cloud-attested",
-    detail: "members with at least one active install, counted by machine",
+    // NOT an install count. The roster's `installed` counts machines whose
+    // device_id produced a session attributed to THIS organization — that
+    // scoping is what keeps another tenant's estate off this console — so a
+    // person who installed the client and has only worked elsewhere counts zero.
+    detail: "members with at least one machine that has produced a session for this organization",
   },
   {
     id: "sync",
@@ -120,7 +124,7 @@ export function adoptionStages(counts: AdoptionCounts): AdoptionStageView[] {
   }));
 }
 
-export type AttentionKind = "never-installed" | "never-uploaded" | "quiet" | "backfill-outstanding";
+export type AttentionKind = "nothing-here-yet" | "never-uploaded" | "quiet" | "backfill-outstanding";
 
 export interface AttentionRow {
   externalId: string;
@@ -130,7 +134,7 @@ export interface AttentionRow {
 }
 
 export const ATTENTION_COPY: Record<AttentionKind, string> = {
-  "never-installed": "on the roster with no install reported",
+  "nothing-here-yet": "on the roster, with no machine of theirs having produced a session here",
   "never-uploaded": "has an install that has never uploaded anything",
   quiet: `has an install that has not uploaded for over ${QUIET_AFTER_DAYS} days`,
   "backfill-outstanding": "is still backfilling — sessions from before the install are on their way",
@@ -159,14 +163,18 @@ export function attentionRows(
       detail: ATTENTION_COPY[kind],
     });
   }
-  const order: AttentionKind[] = ["never-installed", "never-uploaded", "quiet", "backfill-outstanding"];
+  const order: AttentionKind[] = ["nothing-here-yet", "never-uploaded", "quiet", "backfill-outstanding"];
   return out.sort(
     (a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || a.externalId.localeCompare(b.externalId),
   );
 }
 
 function attentionKind(row: RosterPersonRow, now: number): AttentionKind | null {
-  if (row.installed === 0) return "never-installed";
+  // The observed fact, not an inferred install state: `installed === 0` means no
+  // machine of theirs has produced a session for this organization. It does NOT
+  // mean they have no client — saying so would send an operator chasing an
+  // install that already exists.
+  if (row.installed === 0) return "nothing-here-yet";
   // lastUploadAt, never lastSeenAt: a heartbeat is not an upload.
   if (row.lastUploadAt === null) return "never-uploaded";
   const age = now - Date.parse(row.lastUploadAt);

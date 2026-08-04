@@ -543,7 +543,7 @@ async function replayTombstones(
 }
 
 /**
- * Every OBJECT the source holds that the new bucket does not hold whole.
+ * Every OBJECT the source holds that the new bucket does not.
  *
  * Re-listed rather than taken from the run's own counters: the question is what
  * the fortress can serve now, and only the bucket can answer it. Object SETS
@@ -551,13 +551,26 @@ async function replayTombstones(
  * would report a clean switch over a target missing every sidecar, which is the
  * shape the loss took when the copy walked three fixed names.
  *
- * SIZES, not names. A name-set comparison passes over an object that arrived and
- * was then left behind by the source: the canonical of a session appended to
- * mid-run, or a `session.json` the ingest path rewrites on every commit. It is
- * SHORTER-than rather than differs-from because the target is the live bucket
- * from the cut onward — an object that has grown since is a new write landing
- * where it should, and only a short one is the partial copy this pass exists to
- * name.
+ * The two object classes are checked differently, and the reason is that this
+ * runs AFTER the cut, when the target is the live bucket and the source is
+ * frozen:
+ *
+ *   CANONICAL — by size, shorter-than. It is append-only, so a target shorter
+ *   than the source is a partial copy however the two buckets are being written.
+ *   One that has GROWN is a new write landing where it should.
+ *
+ *   SIDECARS — by presence only. A sidecar is rewritten whole on every commit,
+ *   not appended to, and a live rewrite is routinely shorter than the copy taken
+ *   before the cut (a first-message-derived title replaced by the real one).
+ *   Comparing their bytes here reports an intact session as a partial loss on
+ *   the one surface an auditor reads; no measurement fixes that, because the
+ *   comparison itself is unsound across a live cut.
+ *
+ * Sidecar STALENESS is caught before the cut instead, by the delta pass — which
+ * is why a parked-artifact replay clears the copy record for the sessions it
+ * rewrites. That replay is the one writer that changes a sidecar without
+ * appending a canonical, so it is the one case the delta pass cannot see by
+ * measuring canonical length.
  */
 async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
   const keys = await deps.source.listAllCanonicalKeys();

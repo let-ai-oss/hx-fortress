@@ -138,7 +138,7 @@ describe("who needs attention", () => {
       NOW,
     );
     expect(rows.map((r) => r.externalId)).toEqual(["noclient", "silent", "backlog"]);
-    expect(rows.map((r) => r.kind)).toEqual(["never-installed", "never-uploaded", "backfill-outstanding"]);
+    expect(rows.map((r) => r.kind)).toEqual(["nothing-here-yet", "never-uploaded", "backfill-outstanding"]);
   });
 });
 

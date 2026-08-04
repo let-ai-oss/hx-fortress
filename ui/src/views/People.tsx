@@ -397,9 +397,9 @@ export function PersonDetail(): React.ReactElement {
                     tone={member.active ? "ok" : "warn"}
                   />
                   <FactRow
-                    k="Installs"
+                    k="Machines here"
                     v={fmt.int(member.installed)}
-                    vs="machines with an active client token, counted by let.ai"
+                    vs="machines of theirs that have produced a session for this organization"
                   />
                   <FactRow
                     k="Last upload"

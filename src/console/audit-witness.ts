@@ -48,14 +48,20 @@ export interface WitnessClientDeps {
   wait?: (ms: number) => Promise<void>;
 }
 
-/** How many budget refusals one batch may sit out before the run gives up. A
- *  sweep pays at most one wait per batch once the burst is spent, so a handful
- *  of retries per batch is generous; an unbounded loop would turn a hub that is
- *  refusing for some other reason into an audit that never returns. */
-const MAX_BUDGET_WAITS = 6;
-/** No single wait longer than this, whatever the hub asks for — a bad or hostile
- *  number must not park the audit for an hour. */
-const MAX_WAIT_MS = 60_000;
+/** How many budget refusals a RUN may sit out in total — not per batch. A sweep
+ *  is ceil(n / WITNESS_MAX_IDS) batches, so a per-batch allowance multiplies:
+ *  at 50,000 sessions a hub answering the maximum wait before every batch would
+ *  hold the audit for hours. This is one budget for the whole sweep. */
+const MAX_BUDGET_WAITS = 24;
+/** No single wait longer than this, whatever the hub asks for. An honest hub
+ *  cannot exceed one second — its refusal is `ceil((1 - refilled) / refillPerMs)`
+ *  with refilled in [0,1) — so anything larger is a broken or hostile peer, and
+ *  D9 puts a compromised let.ai in scope. */
+const MAX_WAIT_MS = 5_000;
+/** And a ceiling on the total, so many small waits cannot add up to the same
+ *  stall. The whole console mutation plane runs behind this call: one poll pass
+ *  at a time, executors serial, so an audit that parks parks everything. */
+const MAX_TOTAL_WAIT_MS = 60_000;
 
 /**
  * Ask let.ai about a batch of eligible session ids.
@@ -84,24 +90,29 @@ export function createWitnessClient(
 
     const copies = new Set<string>();
     const known = new Set<string>();
+    // One wait budget for the whole sweep, spent across every batch.
+    let waitsLeft = MAX_BUDGET_WAITS;
+    let waitedMs = 0;
     for (let from = 0; from < ids.length; from += batchSize) {
       const batch = ids.slice(from, from + batchSize);
       let result: FortressQueryResultPayload | null = null;
-      for (let attempt = 0; result === null; attempt += 1) {
+      while (result === null) {
         try {
           result = await ask({ kind: "residencyWitness", sessionIds: [...batch] });
         } catch (err) {
           // Only a refusal that names its wait is worth sitting out, and only
-          // while the run still has waits left. Everything else — a timeout, a
+          // while the RUN still has budget. Everything else — a timeout, a
           // closed socket, an old hub — is the unanswered question this adapter
           // reports as such.
           const retryAfterMs = (err as { retryAfterMs?: unknown })?.retryAfterMs;
-          const waitable = typeof retryAfterMs === "number" && retryAfterMs > 0 && attempt < MAX_BUDGET_WAITS;
-          if (!waitable) {
+          const wait = typeof retryAfterMs === "number" && retryAfterMs > 0 ? Math.min(retryAfterMs, MAX_WAIT_MS) : 0;
+          if (wait === 0 || waitsLeft <= 0 || waitedMs + wait > MAX_TOTAL_WAIT_MS) {
             deps.onUnavailable?.(err instanceof Error ? err.message : String(err));
             return null;
           }
-          await (deps.wait ?? sleep)(Math.min(retryAfterMs, MAX_WAIT_MS));
+          waitsLeft -= 1;
+          waitedMs += wait;
+          await (deps.wait ?? sleep)(wait);
         }
       }
       // A hub that answered a DIFFERENT question has not answered this one. The
