@@ -9,6 +9,7 @@ import { MetricsRegistry, writeMetrics } from "../src/console/metrics";
 import {
   drainParkedArtifacts,
   parkArtifact,
+  ParkReplayLatch,
   readParkedArtifacts,
 } from "../src/console/artifact-replay";
 import type { SessionKey } from "../src/modules/session-vault/store/types";
@@ -176,6 +177,31 @@ describe("the artifact replay park", () => {
 
   test("draining an empty park is a no-op", async () => {
     expect(await drainParkedArtifacts(file, async () => {})).toEqual({ replayed: 0, failed: 0 });
+  });
+
+  test("a pause that lapsed on its own deadline still owes a replay", () => {
+    const latch = new ParkReplayLatch();
+    latch.settle(0);
+    expect(latch.due(false)).toBe(false);
+    // Armed. Nothing to drain while the gate is shut — the writes are still
+    // being refused.
+    expect(latch.due(true)).toBe(false);
+    // The deadline passes with nobody resuming anything. There is no edge here:
+    // the cached pause simply answers "open" the next time it is asked, which is
+    // why a paused→open comparison never fired and the park sat there forever.
+    expect(latch.due(false)).toBe(true);
+  });
+
+  test("a daemon that restarted mid-pause owes one before it observes anything", () => {
+    expect(new ParkReplayLatch().due(false)).toBe(true);
+  });
+
+  test("entries that failed again stay owed", () => {
+    const latch = new ParkReplayLatch();
+    latch.settle(1);
+    expect(latch.due(false)).toBe(true);
+    latch.settle(0);
+    expect(latch.due(false)).toBe(false);
   });
 
   test("a write parked DURING the drain is not truncated away", async () => {

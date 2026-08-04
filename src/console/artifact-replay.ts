@@ -82,3 +82,37 @@ export async function drainParkedArtifacts(
   await writeFile(draining, "", { mode: 0o600 }).catch(() => {});
   return { replayed, failed: stillFailing.length };
 }
+
+/**
+ * When the park is owed a drain.
+ *
+ * A LATCH, not a paused→open edge. An edge can only be observed when a pause
+ * ends by an explicit resume: the daemon's cached pause answers against the
+ * clock, so a pause that lapses on its own deadline is already open the next
+ * time anything looks — the edge test reads false at exactly the expiry it
+ * exists to catch, and the parked write is stranded with no surface that would
+ * ever mention it again. The entries are metadata for commits already
+ * acknowledged to a device, so "stranded" means the fortress permanently holds
+ * less than it told the device it had.
+ *
+ * Starts OWED, because a daemon restarted mid-pause has no edge to observe
+ * either, and clears only on a drain that left nothing behind.
+ */
+export class ParkReplayLatch {
+  private owed = true;
+
+  /** Whether a drain is owed right now, given what the gate is doing. */
+  due(paused: boolean): boolean {
+    if (paused) {
+      this.owed = true;
+      return false;
+    }
+    return this.owed;
+  }
+
+  /** Record what a drain left behind. Anything still failing stays owed, so the
+   *  next pass retries it rather than forgetting it. */
+  settle(failed: number): void {
+    if (failed === 0) this.owed = false;
+  }
+}

@@ -56,7 +56,7 @@ import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
 import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
-import { drainParkedArtifacts, parkArtifact } from "../console/artifact-replay";
+import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
 import { createCommandGateway } from "../console/command-gateway";
 import { pollCommands, runBootFence } from "../console/commands";
 import { createCommandExecutors } from "../console/executors";
@@ -616,6 +616,25 @@ export async function runFortressHost(
       }),
   });
 
+  const parkLatch = new ParkReplayLatch();
+  const replayParked = async (): Promise<void> => {
+    const store = vaultModule.getStore();
+    if (!store) return;
+    const result = await drainParkedArtifacts(parkedArtifactsPath, (entry) =>
+      store.writeArtifact(entry.key, entry.name, entry.text),
+    );
+    parkLatch.settle(result.failed);
+    if (result.replayed > 0 || result.failed > 0) {
+      consoleLog.info("replayed parked artifact writes", {
+        replayed: result.replayed,
+        failed: result.failed,
+      });
+      await daemonAudit.record("system.artifact_replay", {
+        params: { engine: "artifact replay", count: result.replayed },
+      });
+    }
+  };
+
   const refreshPause = async (): Promise<void> => {
     const db = resolveHxDb();
     if (!db || !postgres.isReady()) return;
@@ -641,7 +660,6 @@ export async function runFortressHost(
       await clearPauseAnchor(paths.pauseAnchor);
     }
     const pause = effectivePause({ row, firstObservedAt, now });
-    const wasPaused = pauseState.isPaused(now);
     pauseState.observe(pause);
     if (pause.capped) {
       consoleLog.warn("ingest pause deadline exceeds the cap and was clamped", {
@@ -649,25 +667,21 @@ export async function runFortressHost(
         effective: pause.pausedUntil?.toISOString() ?? null,
       });
     }
-    if (wasPaused && !pauseState.isPaused(now)) {
-      // Writes are open again — replay everything the gate refused.
-      const store = vaultModule.getStore();
-      if (store) {
-        const result = await drainParkedArtifacts(parkedArtifactsPath, (entry) =>
-          store.writeArtifact(entry.key, entry.name, entry.text),
-        );
-        if (result.replayed > 0 || result.failed > 0) {
-          consoleLog.info("replayed parked artifact writes after resume", {
-            replayed: result.replayed,
-            failed: result.failed,
-          });
-          await daemonAudit.record("system.artifact_replay", {
-            params: { engine: "artifact replay", count: result.replayed },
-          });
-        }
-      }
-    }
+    // Writes are open — replay everything the gate refused while they were not.
+    //
+    // Driven by the LATCH rather than by a paused→open edge. The edge could only
+    // ever be seen when a pause ended by an explicit resume: a pause that lapses
+    // on its own deadline is ALREADY open by the time this line runs, because the
+    // cached state answers against the clock — so the edge test read false at
+    // exactly the expiry it existed to catch, and every natural expiry, failed
+    // resume and restart left the park stranded with no operator surface that
+    // would ever mention it. Commits are acknowledged BEFORE their
+    // sidecar is written, so what is parked is metadata the fortress already
+    // promised a device it had, with no other surface that would ever mention it
+    // again.
+    if (parkLatch.due(pauseState.isPaused(now))) await replayParked();
   };
+
   const pauseTimer = setInterval(() => void refreshPause(), 5_000);
   (pauseTimer as { unref?: () => void }).unref?.();
 
@@ -976,6 +990,11 @@ export async function runFortressHost(
 
   async function bootConsolePlane(): Promise<void> {
     await refreshPause();
+    // A restart is the one way out of a pause that leaves nothing to observe an
+    // edge on: the park survives the process, the pause row does not have to.
+    // Idempotent, and a no-op on the overwhelming majority of boots where the
+    // park file does not exist at all.
+    if (parkLatch.due(pauseState.isPaused())) await replayParked();
     // A fortress that is off for a month must not wait another day for the
     // retention it already owes.
     await sweepRoster();
