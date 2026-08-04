@@ -17,6 +17,7 @@
 // server's own refusal sentence — the same words the disabled control carries.
 
 import { validateCommandParams, type CommandParams } from "../console/command-params";
+
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { heartbeatFresh } from "../console/commands";
 import { CONTAINER_SERVICE_REFUSAL, NO_POLLER_REFUSAL } from "./copy";
@@ -77,11 +78,14 @@ export interface ConsoleWritePort {
   service(action: ServiceAction): Promise<ServiceResult>;
   /** The daemon's last heartbeat, for the poller check. */
   heartbeatAt(): Promise<string | null>;
-  /** Mint one console_commands row, attributed to the signed-in operator. */
+  /** Mint one console_commands row, attributed to the signed-in operator. The
+   *  credential reference is a COLUMN, because that is where the daemon reads
+   *  it from — never a parameter that happens to be named like one. */
   submit(
     kind: ConsoleCommandKind,
     params: CommandParams,
     requestedBy: string,
+    credentialRef: string | null,
   ): Promise<{ id: string }>;
   /** Write a secret to its own 0600 single-use file and return the reference
    *  the row will carry. The secret itself never reaches the row, the trail or
@@ -155,28 +159,39 @@ export async function handleMutateRoute(
     // the row carries only its reference, so a command row is never a place a
     // credential can be read from — by an operator, by an auditor, or by anyone
     // holding SELECT on the table.
-    const params: Record<string, unknown> = { ...((body?.params as Record<string, unknown>) ?? {}) };
-    if (body?.secret !== undefined) {
-      if (!body.secret || typeof body.secret !== "object" || Array.isArray(body.secret)) {
-        return refusal("the rotation material must be an object");
-      }
-      params.credentialRef = await ctx.port.mintCredential(body.secret);
+    const secret = body?.secret;
+    if (secret !== undefined && (!secret || typeof secret !== "object" || Array.isArray(secret))) {
+      return refusal("the rotation material must be an object");
     }
+    // Every refusal happens BEFORE anything is minted. A kind this console does
+    // not offer, a malformed parameter or a daemon nobody is polling used to
+    // leave live key material on disk to sit out its whole TTL unconsumed.
+    const params: Record<string, unknown> = { ...((body?.params as Record<string, unknown>) ?? {}) };
     const checked = validateCommandParams(kind, params);
     if (!checked.ok) return refusal(checked.reason);
     if (!ctx.port.offered().includes(checked.kind)) {
       return refusal(`this console has no control for ${checked.kind}`, 404);
     }
     if (!heartbeatFresh(await ctx.port.heartbeatAt())) return refusal(NO_POLLER_REFUSAL, 409);
+    // The reference rides its own COLUMN, not the params blob: the daemon reads
+    // console_commands.credential_ref, and a reference that only ever appeared
+    // inside params left ctx.credentialRef null on every row — so every rotation
+    // and every migration arm and swap failed with a message that reads like
+    // corrupted state, while the minted secret sat at rest for its full TTL.
+    const credentialRef = secret === undefined ? null : await ctx.port.mintCredential(secret);
+    const rowParams: CommandParams = checked.params;
     try {
       const submitted = await ctx.audit.run(
         AUDIT_ACTIONS.commandSubmitted,
         {
           actor: ctx.actor,
           sessionRef: ctx.sessionId,
-          params: { commandKind: checked.kind, ...checked.params },
+          // The REAL reference in the trail, never the placeholder: it names a
+          // file, not a secret, and it is what ties this submission to the
+          // daemon's own record of consuming it.
+          params: { commandKind: checked.kind, ...rowParams, ...(credentialRef ? { credentialRef } : {}) },
         },
-        () => ctx.port.submit(checked.kind, checked.params, ctx.actor),
+        () => ctx.port.submit(checked.kind, rowParams, ctx.actor, credentialRef),
       );
       // The row is a REQUEST. The console renders its outcome from the daemon's
       // own record, never from the fact that the request was accepted.

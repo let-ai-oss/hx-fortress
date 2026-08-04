@@ -406,8 +406,8 @@ describe("the console's rotation request", () => {
           minted.push(payload);
           return "a".repeat(32);
         },
-        async submit(_kind, params) {
-          submitted.push(params);
+        async submit(_kind, params, _requestedBy, credentialRef) {
+          submitted.push({ params, credentialRef });
           return { id: "id-1" };
         },
       };
@@ -424,7 +424,9 @@ describe("the console's rotation request", () => {
       );
       expect(res?.status).toBe(202);
       expect(minted).toEqual([{ target: "openai", apiKey: "sk-super-secret-value" }]);
-      expect(submitted).toEqual([{ credentialRef: "a".repeat(32) }]);
+      // The row's params carry nothing at all; the reference is a column, which
+      // is where the daemon reads it from.
+      expect(submitted).toEqual([{ params: {}, credentialRef: "a".repeat(32) }]);
 
       // And nothing that was typed reaches the trail.
       const spool = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));

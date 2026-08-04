@@ -58,9 +58,13 @@ interface KindSpec {
  *  exhaustive over ConsoleCommandKind). */
 const KIND_SPECS: Record<ConsoleCommandKind, KindSpec> = {
   update_apply: { required: [], optional: ["version"] },
-  // The new credential travels as a 0600 file; the row carries only its id.
-  rotate_credentials: { required: ["credentialRef"], optional: [] },
-  run_migration: { required: ["phase"], optional: ["target", "credentialRef"] },
+  // The new credential travels as a 0600 file, and its reference travels in the
+  // row's own credential_ref COLUMN — which is where the daemon reads it. It is
+  // not a parameter: named as one it was written where nothing looks, and the
+  // executor refused every rotation for want of a reference the console thought
+  // it had sent.
+  rotate_credentials: { required: [], optional: [] },
+  run_migration: { required: ["phase"], optional: ["target"] },
   run_checkup: { required: [], optional: [] },
   self_test: { required: [], optional: [] },
   run_audit: { required: [], optional: ["scope"] },
@@ -100,9 +104,7 @@ export function validateCommandParams(kind: unknown, rawParams: unknown): ParamC
   const params: CommandParams = {};
   for (const [key, value] of Object.entries(rawParams as Record<string, unknown>)) {
     if (!allowed.has(key)) return { ok: false, reason: `unexpected parameter for ${kind}: ${key}` };
-    // `credentialRef` names the INDIRECTION, not the secret — it is the answer
-    // to the rule below, so it cannot also be caught by it.
-    if (key !== "credentialRef" && SECRET_KEY_PATTERN.test(key)) {
+    if (SECRET_KEY_PATTERN.test(key)) {
       return { ok: false, reason: `parameter ${key} names a secret; pass a credential reference instead` };
     }
     if (!isParamValue(value)) return { ok: false, reason: `parameter ${key} must be a scalar or string array` };
@@ -114,9 +116,7 @@ export function validateCommandParams(kind: unknown, rawParams: unknown): ParamC
   for (const key of spec.required) {
     if (!(key in params)) return { ok: false, reason: `${kind} requires parameter ${key}` };
   }
-  if ("credentialRef" in params && !isCredentialRef(params.credentialRef)) {
-    return { ok: false, reason: "credentialRef must be 32 lowercase hex characters" };
-  }
+
   if (kind === "run_migration") {
     const phase = params.phase;
     if (typeof phase !== "string" || !(MIGRATION_PHASES as readonly string[]).includes(phase)) {

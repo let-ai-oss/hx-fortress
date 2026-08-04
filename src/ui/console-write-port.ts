@@ -97,13 +97,17 @@ export function createConsoleWritePort(options: ConsoleWritePortOptions): Consol
       kind: ConsoleCommandKind,
       params: CommandParams,
       requestedBy: string,
+      credentialRef: string | null = null,
     ): Promise<{ id: string }> {
       const db = options.db();
       if (!db) throw new Error("this console cannot reach the fortress database, so it cannot ask the daemon for anything");
       const deadline = new Date(Date.now() + COMMAND_REQUEST_TTL_MS).toISOString();
+      // credential_ref is NAMED here because it is the column the daemon reads.
+      // Omitted, every rotation and every migration arm and swap reached its
+      // executor with a null reference and failed on it.
       const result = await db.execute(
-        sql`INSERT INTO hx.console_commands (kind, params, requested_by, deadline_at)
-            VALUES (${kind}, ${JSON.stringify(params)}::jsonb, ${requestedBy}, ${deadline}::timestamptz)
+        sql`INSERT INTO hx.console_commands (kind, params, requested_by, deadline_at, credential_ref)
+            VALUES (${kind}, ${JSON.stringify(params)}::jsonb, ${requestedBy}, ${deadline}::timestamptz, ${credentialRef})
             RETURNING id`,
       );
       const rows = Array.isArray(result)

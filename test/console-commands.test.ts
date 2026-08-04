@@ -15,8 +15,17 @@ import {
   type CommandGateway,
   type CommandRow,
 } from "../src/console/commands";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+
 import { validateCommandParams } from "../src/console/command-params";
+import { consumeCredentialRef } from "../src/console/cmd-creds";
 import { readInFlight } from "../src/console/runtime-files";
+import { AuditSpool } from "../src/console/audit-spool";
+import { ConsoleAudit } from "../src/ui/audit-writer";
+import { createConsoleWritePort } from "../src/ui/console-write-port";
+import { handleMutateRoute, MUTATE_PATHS, OFFERED_COMMAND_KINDS } from "../src/ui/mutate-routes";
+import type { HxDb } from "../src/host/postgres/db";
 
 const NOW = new Date("2026-07-31T12:00:00.000Z");
 
@@ -109,13 +118,18 @@ describe("command parameter validation", () => {
     expect(highEntropy.ok).toBe(false);
   });
 
-  test("a rotation carries a reference id, never the credential", () => {
-    expect(validateCommandParams("rotate_credentials", {}).ok).toBe(false);
-    expect(validateCommandParams("rotate_credentials", { credentialRef: "nope" }).ok).toBe(false);
-    const ok = validateCommandParams("rotate_credentials", {
+  test("a rotation's reference is a column, so it is not a parameter either", () => {
+    // The row's params are empty; the reference rides console_commands
+    // .credential_ref, which is the only place the daemon reads it from. Named
+    // as a parameter it was written where nothing looks.
+    expect(validateCommandParams("rotate_credentials", {}).ok).toBe(true);
+    const asParam = validateCommandParams("rotate_credentials", {
       credentialRef: "0123456789abcdef0123456789abcdef",
     });
-    expect(ok.ok).toBe(true);
+    expect([asParam.ok, asParam.ok ? "" : asParam.reason]).toEqual([
+      false,
+      "unexpected parameter for rotate_credentials: credentialRef",
+    ]);
   });
 
   test("per-kind shapes are enforced", () => {
@@ -338,5 +352,94 @@ describe("the in-flight file", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the credential a rotation carries", () => {
+  const dialect = new PgDialect();
+  let root = "";
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-cmd-cred-"));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("reaches the executor: route → row → poll → ctx.credentialRef", async () => {
+    const cmdCredsDir = path.join(root, "cmd-creds");
+    const statements: string[] = [];
+    const values: unknown[][] = [];
+    const db = {
+      execute: async (statement: SQL) => {
+        const query = dialect.sqlToQuery(statement);
+        statements.push(query.sql);
+        values.push(query.params);
+        return [{ id: "11111111-1111-4111-8111-111111111111" }];
+      },
+    } as unknown as HxDb;
+
+    // The REAL write port, so the statement under test is the one that ships.
+    const port = createConsoleWritePort({
+      service: null,
+      serviceLogPath: path.join(root, "service.log"),
+      executablePath: "/bin/hx-fortress",
+      db: () => db,
+      heartbeatAt: async () => new Date().toISOString(),
+      offered: OFFERED_COMMAND_KINDS,
+      cmdCredsDir,
+    });
+    const audit = new ConsoleAudit(new AuditSpool({ dir: path.join(root, "spool"), writer: "ui" }));
+    const res = await handleMutateRoute(
+      new Request(`http://console.local${MUTATE_PATHS.commands}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "rotate_credentials",
+          secret: { target: "openai", apiKey: "sk-the-new-embedding-key" },
+        }),
+      }),
+      { port, audit, actor: "op", sessionId: "s1" },
+    );
+    expect(res?.status).toBe(202);
+
+    const at = statements.findIndex((s) => s.includes("INSERT INTO hx.console_commands"));
+    expect(at).toBeGreaterThanOrEqual(0);
+    // The COLUMN, which is what the daemon reads. Written into params instead,
+    // every rotation and every migration arm and swap reached its executor with
+    // a null reference and failed on a message that reads like corrupted state,
+    // while the minted secret sat at rest for its whole TTL unconsumed.
+    expect(statements[at]).toContain("credential_ref");
+    const ref = (values[at] ?? []).find(
+      (v): v is string => typeof v === "string" && /^[0-9a-f]{32}$/.test(v),
+    );
+    expect(ref).toBeDefined();
+    // …and the params blob does not also carry it.
+    const params = JSON.parse(String((values[at] ?? [])[1])) as Record<string, unknown>;
+    expect(params).toEqual({});
+
+    // The daemon side, over the row the gateway would hand it.
+    const gateway = fakeGateway([row({ kind: "rotate_credentials", credentialRef: ref ?? null })]);
+    let seen: string | null | undefined;
+    const ran: string[] = [];
+    const base = executors(ran);
+    await pollCommands({
+      gateway,
+      executors: {
+        ...base,
+        rotate_credentials: async (ctx) => {
+          seen = ctx.credentialRef;
+          return "rotated";
+        },
+      },
+      inFlightPath: path.join(root, "commands-inflight.json"),
+      claimedBy: "pid:1",
+      clock: () => NOW,
+    });
+    expect(seen).toBe(ref);
+    // And the reference names the file the material was written to.
+    expect(await consumeCredentialRef<Record<string, string>>(cmdCredsDir, ref ?? "")).toEqual({
+      target: "openai",
+      apiKey: "sk-the-new-embedding-key",
+    });
   });
 });

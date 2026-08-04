@@ -289,8 +289,11 @@ the command plane refuses a configuration key as a parameter.
 A credential a command needs — the storage migration's target keys, a rotation's
 replacement — never travels in the row. The request body carries it once, the
 console writes it to a single-use `0600` file, and the row carries a 32-hex
-reference the daemon reads and unlinks in one step. The row is durable and
-readable by everything holding `SELECT`; the secret it points at is neither.
+reference in a column of its own — `console_commands.credential_ref`, never a
+parameter — which the daemon reads and unlinks in one step. The file is written
+only after every refusal the submission can meet, so a kind this console does
+not offer leaves no key material on disk. The row is durable and readable by
+everything holding `SELECT`; the secret it points at is neither.
 
 ## Where the audit trail lives
 

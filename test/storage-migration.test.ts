@@ -1068,8 +1068,8 @@ describe("the command surface", () => {
         minted.push(payload);
         return "a".repeat(32);
       },
-      async submit(_kind, params) {
-        submitted.push(params);
+      async submit(_kind, params, _requestedBy, credentialRef) {
+        submitted.push({ ...params, credentialRef });
         return { id: "id-1" };
       },
     };
@@ -1090,6 +1090,8 @@ describe("the command surface", () => {
     // The key goes to a 0600 single-use file; the row carries its reference and
     // the bucket NAME, which is what makes the run record auditable at all.
     expect(minted).toEqual([secret]);
+    // The bucket NAME is a parameter; the key's reference is the row's own
+    // column, which is the only place the daemon reads it from.
     expect(submitted).toEqual([
       { phase: "arm", target: TARGET_CREDS.bucket, credentialRef: "a".repeat(32) },
     ]);
