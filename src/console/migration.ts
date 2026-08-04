@@ -601,9 +601,8 @@ async function verifyTarget(deps: MigrationDeps): Promise<string[]> {
     //
     // The canonical above is different and still compared: it is append-only, so
     // a target shorter than the source is a real loss whatever else is writing.
-    // Staleness is the delta pass's job, and it is sound there because a sidecar
-    // only changes on a commit, which also appends the canonical the delta pass
-    // measures.
+    // Sidecar staleness is handled before the cut — see the header for how, and
+    // for why canonical length alone cannot express it.
     //
     // It is also what makes this affordable: two listings per session rather
     // than a full GET of every artifact from both buckets, serially.

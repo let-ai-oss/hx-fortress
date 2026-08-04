@@ -1,8 +1,12 @@
 // Adoption, and where every number in it comes from.
 //
-// The page answers "who has this, and who is using it" — a question with two
-// halves that must never be blended. The hub knows who the organization employs
-// and what they have installed; only this host knows what actually arrived here.
+// The page answers "whose machines have worked here, and who is still using
+// them" — a question with two halves that must never be blended. The hub knows
+// who the organization employs and which of their machines produced a session
+// for it; only this host knows what actually arrived here. Note what the hub
+// does NOT know: whether somebody has the client installed at all. The roster's
+// count is org-scoped, so a person who installed it and works only elsewhere is
+// zero — see the `installed` stage below, and the protocol's own contract.
 // So every stage carries the SOURCE it was computed from and whether that source
 // is cloud-attested or fortress-observed, and the table below is the whole
 // mapping. A stage with two sources would be a figure nobody could reconcile
@@ -84,8 +88,8 @@ export const ADOPTION_STAGES: readonly AdoptionStage[] = [
  *  apart. */
 export const ADOPTION_ACTIVE_DAYS = 30;
 
-/** How long an install may go without uploading before it is worth an
- *  operator's attention. */
+/** How long a machine that has worked here may go without uploading before it
+ *  is worth an operator's attention. */
 export const QUIET_AFTER_DAYS = 14;
 
 export interface AdoptionCounts {
@@ -135,9 +139,9 @@ export interface AttentionRow {
 
 export const ATTENTION_COPY: Record<AttentionKind, string> = {
   "nothing-here-yet": "on the roster, with no machine of theirs having produced a session here",
-  "never-uploaded": "has an install that has never uploaded anything",
-  quiet: `has an install that has not uploaded for over ${QUIET_AFTER_DAYS} days`,
-  "backfill-outstanding": "is still backfilling — sessions from before the install are on their way",
+  "never-uploaded": "has a machine that worked here, with no upload recorded",
+  quiet: `has a machine that worked here, with nothing uploaded for over ${QUIET_AFTER_DAYS} days`,
+  "backfill-outstanding": "is still backfilling — earlier sessions are on their way",
 };
 
 /**

@@ -48,20 +48,29 @@ export interface WitnessClientDeps {
   wait?: (ms: number) => Promise<void>;
 }
 
-/** How many budget refusals a RUN may sit out in total — not per batch. A sweep
- *  is ceil(n / WITNESS_MAX_IDS) batches, so a per-batch allowance multiplies:
- *  at 50,000 sessions a hub answering the maximum wait before every batch would
- *  hold the audit for hours. This is one budget for the whole sweep. */
-const MAX_BUDGET_WAITS = 24;
+// Sizing the allowance has now gone wrong twice in opposite directions, so state
+// the rule rather than a number: ONE WAIT PER BATCH IS WHAT SUCCESS COSTS.
+//
+// Once the hub's burst is spent, an honest hub refuses each remaining batch once
+// and names a wait under a second. A flat count therefore makes the witness
+// unobtainable above some session count — first at ~5,000 when the count was
+// per-batch and too small, then at ~42,000 when it was per-run and flat. The
+// budget scales with the sweep, and TIME is the ceiling that bounds a hostile
+// peer, because time is the thing that actually costs anything.
+
+/** Slack over one-wait-per-batch, for a hub whose burst is smaller than assumed. */
+const EXTRA_WAITS = 12;
 /** No single wait longer than this, whatever the hub asks for. An honest hub
  *  cannot exceed one second — its refusal is `ceil((1 - refilled) / refillPerMs)`
  *  with refilled in [0,1) — so anything larger is a broken or hostile peer, and
  *  D9 puts a compromised let.ai in scope. */
 const MAX_WAIT_MS = 5_000;
-/** And a ceiling on the total, so many small waits cannot add up to the same
- *  stall. The whole console mutation plane runs behind this call: one poll pass
- *  at a time, executors serial, so an audit that parks parks everything. */
-const MAX_TOTAL_WAIT_MS = 60_000;
+/** Room for one honest wait per batch, plus slack. */
+const WAIT_MS_PER_BATCH = 2_000;
+/** The absolute ceiling, whatever the sweep. The whole console mutation plane
+ *  runs behind this call — one poll pass at a time, executors serial — so an
+ *  audit that parks parks everything, and it has to come back. */
+const MAX_TOTAL_WAIT_MS = 120_000;
 
 /**
  * Ask let.ai about a batch of eligible session ids.
@@ -90,8 +99,10 @@ export function createWitnessClient(
 
     const copies = new Set<string>();
     const known = new Set<string>();
-    // One wait budget for the whole sweep, spent across every batch.
-    let waitsLeft = MAX_BUDGET_WAITS;
+    // One budget for the whole sweep, sized to it rather than to a constant.
+    const batches = Math.ceil(ids.length / batchSize);
+    let waitsLeft = batches + EXTRA_WAITS;
+    const totalWaitCap = Math.min(batches * WAIT_MS_PER_BATCH + 10_000, MAX_TOTAL_WAIT_MS);
     let waitedMs = 0;
     for (let from = 0; from < ids.length; from += batchSize) {
       const batch = ids.slice(from, from + batchSize);
@@ -106,7 +117,7 @@ export function createWitnessClient(
           // reports as such.
           const retryAfterMs = (err as { retryAfterMs?: unknown })?.retryAfterMs;
           const wait = typeof retryAfterMs === "number" && retryAfterMs > 0 ? Math.min(retryAfterMs, MAX_WAIT_MS) : 0;
-          if (wait === 0 || waitsLeft <= 0 || waitedMs + wait > MAX_TOTAL_WAIT_MS) {
+          if (wait === 0 || waitsLeft <= 0 || waitedMs + wait > totalWaitCap) {
             deps.onUnavailable?.(err instanceof Error ? err.message : String(err));
             return null;
           }

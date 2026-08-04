@@ -125,7 +125,15 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   await pace.spend();
 
   const eligible = rows.filter((r) => witnessEligible(r.ingestChannel));
-  const witness = deps.askWitness ? await deps.askWitness(eligible.map((r) => r.sessionId)) : null;
+  // Ask only about what this run can actually reach. The loop below stops at
+  // `perRunBudget` and spends at least one unit per row, so nothing past that
+  // many rows is ever checked — and the hub bounds how fast it will answer, so a
+  // sweep of every id on a large fortress is not merely wasted work: it is
+  // enough questions to exhaust the budget and come back with NOTHING, turning
+  // a partial witness into no witness at all. That regression has now been
+  // introduced twice by sizing the retry allowance instead of the ask.
+  const askable = eligible.slice(0, limits.perRunBudget);
+  const witness = deps.askWitness ? await deps.askWitness(askable.map((r) => r.sessionId)) : null;
   // Off (nobody asked) and unavailable (asked, unanswered) are different facts
   // about this organization, and the run reports which one it was.
   const witnessState: WitnessState = witness ? "attested" : deps.askWitness ? "unavailable" : "off";

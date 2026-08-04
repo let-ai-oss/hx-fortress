@@ -157,15 +157,23 @@ export async function saveMigrationRun(
  * resumed later is the same defect deferred.
  */
 export async function forgetCopiedSessions(db: HxDb, keys: readonly SessionKey[]): Promise<number> {
-  let forgotten = 0;
-  for (const key of keys) {
-    const result = await db.execute(
-      sql`DELETE FROM hx.migration_objects
-           WHERE user_id = ${key.userId} AND family = ${key.family} AND session_id = ${key.sessionId}`,
-    );
-    forgotten += affectedRows(result);
-  }
-  return forgotten;
+  // Deduped first: the park holds one entry per COMMIT, so a busy session
+  // contributes many identical keys, and each would otherwise be its own scan.
+  const unique = new Map<string, SessionKey>();
+  for (const key of keys) unique.set(sessionRef(key), key);
+  if (unique.size === 0) return 0;
+
+  // One statement rather than one per session. The predicate omits run_id, which
+  // is the primary key's leading column, so every one of these is a sequential
+  // scan — doing it once matters more than the statement being tidy.
+  const tuples = [...unique.values()].map(
+    (k) => sql`(${k.userId}, ${k.family}, ${k.sessionId})`,
+  );
+  const result = await db.execute(
+    sql`DELETE FROM hx.migration_objects
+         WHERE (user_id, family, session_id) IN (${sql.join(tuples, sql`, `)})`,
+  );
+  return affectedRows(result);
 }
 
 /** Rows Postgres reports as changed, across the shapes the driver returns. */

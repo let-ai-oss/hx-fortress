@@ -406,7 +406,7 @@ export function PersonDetail(): React.ReactElement {
                     v={fmt.when(member.lastUploadAt)}
                     vs={
                       member.lastUploadAt === null
-                        ? "no install of theirs has ever uploaded"
+                        ? "no machine of theirs has uploaded anything"
                         : fmt.ago(member.lastUploadAt)
                     }
                   />
@@ -415,7 +415,7 @@ export function PersonDetail(): React.ReactElement {
                     v={backfill(member)}
                     vs={
                       member.syncReportedAt === null
-                        ? "no install has reported progress"
+                        ? "no machine of theirs has reported progress"
                         : `reported ${fmt.ago(member.syncReportedAt)}`
                     }
                   />

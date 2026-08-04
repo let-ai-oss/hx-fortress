@@ -674,26 +674,65 @@ describe("a budget refusal is a wait, not a failure", () => {
     expect(attempts).toBeLessThan(100);
   });
 
-  test("the wait budget belongs to the RUN, not to each batch", async () => {
-    // A per-batch allowance multiplies by ceil(n / batchSize): a hub answering
-    // the maximum wait before every batch would hold the audit for hours, and
-    // the whole console mutation plane sits behind this call.
-    const attemptsFor = async (ids: string[]): Promise<number> => {
-      let attempts = 0;
+  test("a hostile hub cannot stall the run for longer than the ceiling, at any sweep size", async () => {
+    // The allowance scales with the sweep on purpose — one wait per batch is what
+    // success costs — so the thing that has to be bounded is TIME, not count. A
+    // per-batch allowance of a large wait would otherwise hold the audit for
+    // hours, and the whole console mutation plane sits behind this call: one poll
+    // pass at a time, executors serial.
+    const waitedFor = async (batchCount: number): Promise<number> => {
+      let waited = 0;
       const ask = createWitnessClient({
         batchSize: 1,
-        wait: async () => {},
+        wait: async (ms) => {
+          waited += ms;
+        },
         request: async () => {
-          attempts += 1;
-          throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 1_000);
+          // Far above anything an honest hub can ask for.
+          throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 3_600_000);
         },
       });
-      expect(await ask(ids)).toBeNull();
-      return attempts;
+      expect(await ask(Array.from({ length: batchCount }, (_, i) => `s${i}`))).toBeNull();
+      return waited;
     };
 
-    // Twenty times the batches must not buy twenty times the retries.
-    expect(await attemptsFor(Array.from({ length: 20 }, (_, i) => `s${i}`))).toBe(await attemptsFor(["a"]));
+    // 50x the batches must not buy anything close to 50x the stall.
+    expect(await waitedFor(20)).toBeLessThanOrEqual(120_000);
+    expect(await waitedFor(1_000)).toBeLessThanOrEqual(120_000);
+  });
+
+  test("a sweep an honest hub paces still completes — the budget must not be the binding limit", async () => {
+    // The real regression this guards: an allowance sized in RETRIES rather than
+    // in batches makes the witness unobtainable above some session count, and the
+    // operator reads a rate limit as a broken hub. An honest hub never asks for
+    // more than ~1s, so a sweep that pays one wait per batch has to finish.
+    let refuseNext = true;
+    const seen: string[] = [];
+    const ask = createWitnessClient({
+      batchSize: 1,
+      wait: async () => {},
+      request: async (query) => {
+        // Every other question is refused with an honest hub's maximum wait.
+        refuseNext = !refuseNext;
+        if (refuseNext) throw new FortressQueryUnavailable("error", "fortress_query_rate_limited", 1_000);
+        const ids = query.kind === "residencyWitness" ? query.sessionIds : [];
+        seen.push(...ids);
+        return {
+          kind: "residencyWitness",
+          residencyWitness: ids.map((sessionId) => ({
+            sessionId,
+            letaiCopy: true,
+            hubRoutedHere: true,
+            anyDestinationRecord: true,
+          })),
+        };
+      },
+    });
+
+    const ids = Array.from({ length: 100 }, (_, i) => `s${i}`);
+    const answer = await ask(ids);
+    expect(answer).not.toBeNull();
+    expect(seen.sort()).toEqual([...ids].sort());
   });
 
   test("many small waits cannot add up to the same stall", async () => {
@@ -707,6 +746,6 @@ describe("a budget refusal is a wait, not a failure", () => {
       },
     });
     expect(await ask(["a"])).toBeNull();
-    expect(waited).toBeLessThanOrEqual(60_000);
+    expect(waited).toBeLessThanOrEqual(120_000);
   });
 });

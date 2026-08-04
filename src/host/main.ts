@@ -58,6 +58,8 @@ import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/gua
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
 import { forgetCopiedSessions } from "../console/migration-store";
+import { readForgetPending, writeForgetPending } from "../console/runtime-files";
+import { migrationIsRunning } from "../console/migration-runner";
 import { createCommandGateway } from "../console/command-gateway";
 import { pollCommands, runBootFence } from "../console/commands";
 import { createCommandExecutors } from "../console/executors";
@@ -199,6 +201,7 @@ export async function runFortressHost(
   // restart clears it, which bounds an armed migration nobody followed up.
   let drainArmed = false;
   const parkedArtifactsPath = path.join(paths.runtimeRoot, "artifact-replay.jsonl");
+  const forgetPendingPath = path.join(paths.runtimeRoot, "migration-forget-pending.json");
   const metrics = new MetricsRegistry();
   metrics.declareCounter("ingest.paused_refusals");
   metrics.registerGauge("ingest.pause_seconds_remaining", () => {
@@ -634,22 +637,48 @@ export async function runFortressHost(
   const replayParked = async (): Promise<void> => {
     const store = vaultModule.getStore();
     if (!store) return;
+    // NOT while a storage migration is between its copy and its cut.
+    //
+    // A replay writes a sidecar without appending a canonical, and the delta
+    // pass decides what to re-carry by comparing canonical LENGTH — so a sidecar
+    // rewritten into the source mid-run is a change no later pass can see, and
+    // the new bucket keeps the stale one. Clearing the copy record does not help:
+    // `deltaPass` selects from `targetIsCurrent` alone and never reads that
+    // table, so the record only matters to a run RESUMED under the same id.
+    //
+    // Holding the entries costs nothing — they are already durable, and the park
+    // exists precisely because writes were refused. Once the run ends the bound
+    // store is whichever bucket is now live, so the replay lands in the right
+    // one either way: the target after a cut, the source after an abort.
+    if (migrationIsRunning()) return;
     const result = await drainParkedArtifacts(parkedArtifactsPath, (entry) =>
       store.writeArtifact(entry.key, entry.name, entry.text),
     );
     parkLatch.settle(result.failed);
-    // A replay rewrites sidecars without appending a canonical, which is the one
-    // change a storage migration's delta pass cannot see — it measures canonical
-    // length. Forget the copy records so the next pass carries them again.
-    const replayDb = result.rewrote.length > 0 && postgres.isReady() ? resolveHxDb() : null;
-    if (replayDb) {
-      await forgetCopiedSessions(replayDb, result.rewrote).catch((err: unknown) => {
-        consoleLog.warn("could not clear the copy records for replayed sidecars", {
-          sessions: result.rewrote.length,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return 0;
-      });
+    // A run that is RESUMED under the same id re-copies from its own record
+    // (`copyMissing(plan)`), so for that one path the record has to go — a
+    // sidecar replayed after the abort would otherwise be skipped on resume.
+    // Durable, because the park is already gone by the time this runs: if the
+    // DELETE fails the list of rewritten sessions exists nowhere else, and a
+    // resumed run would cut over stale sidecars with only a log line to say so.
+    // Pending keys are written before the attempt and cleared only on success,
+    // so a failure is retried on the next replay rather than lost.
+    const pending = [...(await readForgetPending(forgetPendingPath)), ...result.rewrote];
+    if (pending.length > 0) {
+      await writeForgetPending(forgetPendingPath, pending);
+      const replayDb = postgres.isReady() ? resolveHxDb() : null;
+      if (replayDb) {
+        const cleared = await forgetCopiedSessions(replayDb, pending)
+          .then(() => true)
+          .catch((err: unknown) => {
+            consoleLog.warn("could not clear the copy records for replayed sidecars — will retry", {
+              entries: pending.length,
+              error: err instanceof Error ? err.message : String(err),
+            });
+            return false;
+          });
+        if (cleared) await writeForgetPending(forgetPendingPath, []);
+      }
     }
     if (result.replayed > 0 || result.failed > 0) {
       consoleLog.info("replayed parked artifact writes", {

@@ -12,6 +12,7 @@
 import { readFile, unlink } from "node:fs/promises";
 
 import { writePrivateJson } from "../host/private-json";
+import type { SessionKey } from "../modules/session-vault/store/types";
 
 /**
  * One update at a time per FILE.
@@ -134,4 +135,25 @@ export async function stampPauseAnchor(
  *  one. Belt to the episode key above rather than the only strap. */
 export async function clearPauseAnchor(filePath: string): Promise<void> {
   await unlink(filePath).catch(() => {});
+}
+
+/**
+ * Sessions whose copy records still have to be forgotten.
+ *
+ * A parked-artifact replay rewrites sidecars into the bucket a resumed storage
+ * migration would otherwise skip, so the replay clears those sessions' copy
+ * records. The park file is unlinked before that DELETE runs, so a failure would
+ * leave the list nowhere — these two keep it on disk until the delete lands.
+ */
+export async function readForgetPending(filePath: string): Promise<SessionKey[]> {
+  const parsed = await readJson<SessionKey[]>(filePath);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+export async function writeForgetPending(filePath: string, keys: readonly SessionKey[]): Promise<void> {
+  if (keys.length === 0) {
+    await unlink(filePath).catch(() => {});
+    return;
+  }
+  await writePrivateJson(filePath, keys);
 }
