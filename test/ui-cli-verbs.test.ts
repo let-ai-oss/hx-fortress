@@ -375,6 +375,21 @@ describe("ui user", () => {
     expect(run.out).not.toContain("ssh -L");
   });
 
+  test("uses FORTRESS_UI_PUBLIC_URL too — a container has no ui.json to read", async () => {
+    // A container is configured by ENVIRONMENT. On Railway or Kubernetes the
+    // public URL is a variable and ui.json carries none, so this printed a link
+    // at the bind address — 0.0.0.0 or 127.0.0.1 — that nobody outside the
+    // container could open, on the one command whose whole output is a link
+    // somebody is meant to click. The advertiser and the runtime already
+    // resolved it env-first; this did not.
+    const run = await ui(["user", "create", "grace", "--role", "operator"], {
+      env: { FORTRESS_UI_ENABLE: "1", FORTRESS_UI_PUBLIC_URL: "https://fortress.up.railway.app" },
+    });
+    expect(run.out).toContain("https://fortress.up.railway.app/setup#t=");
+    expect(run.out).not.toContain("0.0.0.0");
+    expect(run.out).not.toContain("127.0.0.1");
+  });
+
   test("requires a role, and validates the login", async () => {
     expect((await ui(["user", "create", "ada"])).error).toContain("--role is required");
     expect((await ui(["user", "create", "ada", "--role", "admin"])).error).toContain("--role is required");

@@ -441,7 +441,13 @@ async function printSetupLink(ctx: Ctx, login: string, token: string): Promise<v
   const config = await ctx.config.load();
   const url = printedUrl({
     urlOverride: null,
-    publicUrl: config.publicUrl,
+    // The ENV var first, exactly as the advertiser and the runtime resolve it.
+    // A container is configured by environment, not by ui.json — so on Railway
+    // or Kubernetes, where FORTRESS_UI_PUBLIC_URL is the whole configuration,
+    // this printed a link at the BIND address (0.0.0.0/127.0.0.1) that nobody
+    // could open, on the one command whose entire output is a link somebody is
+    // meant to click.
+    publicUrl: ctx.env.FORTRESS_UI_PUBLIC_URL?.trim() || config.publicUrl,
     hostname: config.bind,
     dualStack: false,
     port: config.port,
