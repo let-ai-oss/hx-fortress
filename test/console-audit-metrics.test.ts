@@ -161,8 +161,20 @@ describe("the artifact replay park", () => {
     const result = await drainParkedArtifacts(file, async (entry) => {
       written.push(entry.name);
     });
-    expect(result).toEqual({ replayed: 1, failed: 0, rewrote: [KEY] });
+    expect(result).toEqual({ replayed: 1, failed: 0, dropped: 0, rewrote: [KEY] });
     expect(written).toEqual(["session.json"]);
+    expect(await readParkedArtifacts(file)).toEqual([]);
+  });
+
+  test("an entry the writer DROPS is not counted as replayed", async () => {
+    // The drop path exists for a sidecar whose session has since been
+    // permanently deleted. Counting it as a replay put a write that never
+    // happened into the daemon's audit record — a compliance surface — and fed a
+    // session that no longer exists into the copy-record sweep.
+    await parkArtifact(file, { key: KEY, name: "session.json", text: "{}", parkedAt: NOW.toISOString() });
+    const result = await drainParkedArtifacts(file, async () => false);
+    expect(result).toEqual({ replayed: 0, failed: 0, dropped: 1, rewrote: [] });
+    // Dropped, not re-parked: it is never coming back.
     expect(await readParkedArtifacts(file)).toEqual([]);
   });
 
@@ -171,7 +183,7 @@ describe("the artifact replay park", () => {
     const result = await drainParkedArtifacts(file, async () => {
       throw new Error("still down");
     });
-    expect(result).toEqual({ replayed: 0, failed: 1, rewrote: [] });
+    expect(result).toEqual({ replayed: 0, failed: 1, dropped: 0, rewrote: [] });
     expect((await readParkedArtifacts(file)).length).toBe(1);
   });
 
@@ -258,7 +270,7 @@ describe("the artifact replay park", () => {
   });
 
   test("draining an empty park is a no-op", async () => {
-    expect(await drainParkedArtifacts(file, async () => {})).toEqual({ replayed: 0, failed: 0, rewrote: [] });
+    expect(await drainParkedArtifacts(file, async () => {})).toEqual({ replayed: 0, failed: 0, dropped: 0, rewrote: [] });
   });
 
   test("a pause that lapsed on its own deadline still owes a replay", () => {

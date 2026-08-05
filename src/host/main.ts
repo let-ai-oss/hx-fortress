@@ -777,7 +777,10 @@ export async function runFortressHost(
           sessionId: entry.key.sessionId,
           name: entry.name,
         });
-        return;
+        // NOT replayed. Reporting it as one put a write that never happened into
+        // the daemon's audit record, and fed a session that no longer exists
+        // into the copy-record sweep.
+        return false;
       }
       // MERGED, not overwritten. The parked text is a whole composition made
       // from the sidecar as it stood before the pause, and reads stay open
@@ -841,13 +844,18 @@ export async function runFortressHost(
         if (cleared) await removeForgetPending(forgetPendingPath, pending);
       }
     }
-    if (result.replayed > 0 || result.failed > 0) {
+    if (result.replayed > 0 || result.failed > 0 || result.dropped > 0) {
       consoleLog.info("replayed parked artifact writes", {
         replayed: result.replayed,
         failed: result.failed,
+        dropped: result.dropped,
       });
       await daemonAudit.record("system.artifact_replay", {
-        params: { engine: "artifact replay", count: result.replayed },
+        // `count` is what was WRITTEN. A sidecar dropped because its session has
+        // since been permanently deleted is reported separately — the audit
+        // trail is a compliance surface, and it must not claim a write that did
+        // not happen.
+        params: { engine: "artifact replay", count: result.replayed, dropped: result.dropped },
       });
     }
   };

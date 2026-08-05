@@ -110,7 +110,13 @@ export function mergeReplayedMetadata(
   replace = false,
 ): SessionMetadata {
   if (!current) return incoming;
-  if (replace) return incoming;
+  // A replace is authoritative over what it SUPERSEDED, which is not the same as
+  // authoritative over whatever is in the bucket now. A parked sidecar waits out
+  // the pause AND any migration — hours on a real one — while writes stay open,
+  // so `current` can be far newer than this composition. Taking it verbatim then
+  // walks the customer's only copy back to a pre-pause snapshot. It wins only
+  // where it is also the later statement.
+  if (replace && Date.parse(incoming.updatedAt) >= Date.parse(current.updatedAt)) return incoming;
   const laterIso = (a: string | null, b: string | null): string | null => {
     if (!a) return b;
     if (!b) return a;
@@ -120,11 +126,24 @@ export function mergeReplayedMetadata(
   return {
     family: incoming.family,
     sessionId: incoming.sessionId,
-    // TOGETHER. Resolving them from different sides labelled an AI-derived
-    // title as operator-set: the title is the value and the source is a claim
-    // ABOUT that value, so they move as one.
-    title: incoming.title ?? current.title,
-    titleSource: incoming.title !== null ? incoming.titleSource : current.titleSource,
+    // TOGETHER, and only when the incoming title is genuinely the winning
+    // value. Resolving them from different sides labelled an AI-derived title as
+    // operator-set; firing on "incoming has a title" rather than "incoming has a
+    // DIFFERENT title" then dropped a `user` provenance to null whenever a
+    // legacy sidecar re-stated the same text with no source.
+    ...(() => {
+      // …and only when this composition is not OLDER than what is in the
+      // bucket. A different title from a stale replay is a stale title, and the
+      // one thing a replay must never do is rename a session back.
+      const wins =
+        incoming.title !== null &&
+        incoming.title !== current.title &&
+        Date.parse(incoming.updatedAt) >= Date.parse(current.updatedAt);
+      return {
+        title: wins ? incoming.title : (current.title ?? incoming.title),
+        titleSource: wins ? incoming.titleSource : (current.titleSource ?? incoming.titleSource),
+      };
+    })(),
     // Monotonic: a replay carries a snapshot of the totals as they were, and a
     // later chunk's totals are the larger ones.
     bytesUploaded: Math.max(incoming.bytesUploaded, current.bytesUploaded),

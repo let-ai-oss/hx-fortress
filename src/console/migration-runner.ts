@@ -149,22 +149,40 @@ export interface MigrationCommandArgs {
  *  tombstone refuses a re-UPLOAD and says nothing about an object a migration
  *  put there. */
 export async function migrationTombstones(db: HxDb, runId: string): Promise<SessionKey[]> {
-  // BOUNDED BY THE RUN. Every tombstone this fortress has ever recorded is not
-  // the question: a session deleted BEFORE this run started was already gone
-  // from the source listing the copy walks, so nothing of it can be in the
-  // target and the delete has nothing to undo. Replaying the whole history cost
-  // two bucket listings per tombstone, all of it inside the ≤5-minute armed
-  // window — so an install with a few thousand historical deletes could never
-  // finish a migration, aborting late every time with the barrier and the final
-  // delta already paid for.
+  // BOUNDED BY WHAT THIS RUN COULD HAVE CARRIED, on two arms, because either one
+  // alone is wrong.
   //
-  // A RESUMED run keeps its original `started_at`, which is the right anchor:
-  // the objects at risk are the ones that run copied.
+  // Replaying the WHOLE history cost two bucket listings per tombstone inside
+  // the ≤5-minute armed window, so an install with a few thousand historical
+  // deletes could never finish a migration.
+  //
+  // But `deleted_at >= started_at` alone is not safe either. A tombstone is
+  // stamped when the purge BEGINS, and a purge is multi-call — the bucket half
+  // deletes in batches, and on a versioned bucket a busy session's `.staging/`
+  // versions sort ahead of its canonical, so the canonical can still be there
+  // for several calls. A migration armed in that window copies it, the source
+  // then finishes purging, and `targetIsCurrent` defers to this replay for
+  // exactly that case — while `verifyTarget` walks the SOURCE and so can never
+  // see the extra objects. `now()` is also transaction-start time, and the
+  // tombstone's transaction takes an advisory lock first, so its stamp can
+  // precede a run row inserted after that transaction began.
+  //
+  // So the second arm asks the question directly: did THIS run copy it? A
+  // resumed run keeps its original `started_at` and its own copy records, which
+  // are the right anchors for both arms. `migration_objects.session_id` can be
+  // the `sid:a:agent` composite while a tombstone is always the base id, so the
+  // join is on the base.
   const result = await db.execute(
     sql`SELECT d.user_external_id AS "userId", d.family, d.session_id AS "sessionId"
           FROM hx.deleted_sessions d
           JOIN hx.migration_runs r ON r.id = ${runId}::uuid
-         WHERE d.deleted_at >= r.started_at`,
+         WHERE d.deleted_at >= r.started_at
+            OR EXISTS (
+                 SELECT 1 FROM hx.migration_objects o
+                  WHERE o.run_id = r.id
+                    AND o.user_id = d.user_external_id
+                    AND split_part(o.session_id, ':', 1) = d.session_id
+               )`,
   );
   const raw: unknown = Array.isArray(result) ? result : (result as { rows?: unknown[] })?.rows;
   const list = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];

@@ -101,6 +101,50 @@ describe("mergeReplayedMetadata", () => {
     expect(mergeReplayedMetadata(bucket, replaced, false).eventCount).toBe(42);
   });
 
+  test("a replace that is OLDER than the bucket does not walk it back", () => {
+    // A replace is authoritative over what it superseded, not over whatever is
+    // in the bucket now — and a parked sidecar waits out the pause and any
+    // migration, hours on a real one, with writes open throughout. Taking it
+    // verbatim then reverted the customer's only copy to a pre-pause snapshot.
+    const bucket = meta({
+      title: "Q3 payroll audit",
+      titleSource: "user",
+      bytesUploaded: 940_000,
+      eventCount: 812,
+      updatedAt: "2026-08-05T09:30:00.000Z",
+      lastActivityAt: "2026-08-05T09:30:00.000Z",
+    });
+    const staleReplace = meta({
+      title: "re-upload",
+      titleSource: "ai",
+      bytesUploaded: 120,
+      eventCount: 2,
+      updatedAt: "2026-08-05T04:01:00.000Z",
+      lastActivityAt: "2026-08-05T04:01:00.000Z",
+    });
+    const merged = mergeReplayedMetadata(bucket, staleReplace, true);
+    expect(merged.eventCount).toBe(812);
+    expect(merged.bytesUploaded).toBe(940_000);
+    expect(merged.title).toBe("Q3 payroll audit");
+    expect(merged.titleSource).toBe("user");
+
+    // A replace that IS the later statement still wins outright.
+    const freshReplace = meta({ ...staleReplace, updatedAt: "2026-08-05T10:00:00.000Z" });
+    expect(mergeReplayedMetadata(bucket, freshReplace, true).eventCount).toBe(2);
+  });
+
+  test("a re-stated title does not downgrade its provenance", () => {
+    // The pair fired on "incoming has a title" rather than "incoming has a
+    // DIFFERENT title", so a legacy sidecar re-stating the same text with no
+    // source dropped a `user` provenance to null.
+    const merged = mergeReplayedMetadata(
+      meta({ title: "same title", titleSource: "user" }),
+      meta({ title: "same title", titleSource: null }),
+    );
+    expect(merged.title).toBe("same title");
+    expect(merged.titleSource).toBe("user");
+  });
+
   test("title and its PROVENANCE move together", () => {
     // Resolved from different sides, an AI-derived title ended up labelled
     // operator-set: the source is a claim about the value, not a value of its

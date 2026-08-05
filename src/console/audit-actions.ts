@@ -78,7 +78,7 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "console.service.": ["action", "manager", "pid", "state"],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
   "cli.update": ["binPath", "asset", "version"],
-  "system.": ["engine", "kind", "count", "reason", "from", "to"],
+  "system.": ["engine", "kind", "count", "dropped", "reason", "from", "to"],
 };
 
 /** Key names that never reach the spool whatever an action declares. The

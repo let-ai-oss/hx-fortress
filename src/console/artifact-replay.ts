@@ -52,6 +52,11 @@ export async function readParkedArtifacts(filePath: string): Promise<ParkedArtif
 export interface ReplayResult {
   replayed: number;
   failed: number;
+  /** Entries deliberately NOT written — a sidecar for a session that has since
+   *  been permanently deleted. Kept apart from `replayed` because the daemon's
+   *  audit record reports that count, and a compliance surface must not say a
+   *  write happened when it did not. */
+  dropped: number;
   /** Sessions whose sidecars this drain rewrote. A replay is the one writer that
    *  changes a sidecar without appending the canonical, so a storage migration
    *  cannot see it by measuring canonical length — it has to be told. */
@@ -76,7 +81,8 @@ const draining = new Map<string, Promise<ReplayResult>>();
  */
 export async function drainParkedArtifacts(
   filePath: string,
-  write: (entry: ParkedArtifact) => Promise<void>,
+  /** Resolve `false` for an entry deliberately NOT written — see drainOnce. */
+  write: (entry: ParkedArtifact) => Promise<boolean | void>,
 ): Promise<ReplayResult> {
   const inFlight = draining.get(filePath);
   if (inFlight) return await inFlight;
@@ -87,7 +93,11 @@ export async function drainParkedArtifacts(
 
 async function drainOnce(
   filePath: string,
-  write: (entry: ParkedArtifact) => Promise<void>,
+  /** Resolves `false` for an entry deliberately NOT written — a sidecar for a
+   *  session that has since been permanently deleted. Counting that as replayed
+   *  put it in the daemon's audit record, which is a compliance surface, and
+   *  fed a session that no longer exists into the copy-record sweep. */
+  write: (entry: ParkedArtifact) => Promise<boolean | void>,
 ): Promise<ReplayResult> {
   const drainingPath = `${filePath}.draining`;
 
@@ -132,14 +142,19 @@ async function drainOnce(
     .map((held) => held.entry);
   if (entries.length === 0) {
     await unlink(drainingPath).catch(() => {});
-    return { replayed: 0, failed: 0, rewrote: [] };
+    return { replayed: 0, failed: 0, dropped: 0, rewrote: [] };
   }
   let replayed = 0;
+  let dropped = 0;
   const rewrote: SessionKey[] = [];
   const stillFailing: ParkedArtifact[] = [];
   for (const entry of entries) {
     try {
-      await write(entry);
+      const wrote = await write(entry);
+      if (wrote === false) {
+        dropped += 1;
+        continue;
+      }
       replayed += 1;
       rewrote.push(entry.key);
     } catch {
@@ -150,7 +165,7 @@ async function drainOnce(
   // Unlinked, not truncated: an empty file and a finished drain must not look the
   // same to the recovery above, or a crash mid-drain reads as nothing to recover.
   await unlink(drainingPath).catch(() => {});
-  return { replayed, failed: stillFailing.length, rewrote };
+  return { replayed, failed: stillFailing.length, dropped, rewrote };
 }
 
 /**
