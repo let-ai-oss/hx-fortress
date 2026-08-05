@@ -25,15 +25,58 @@ describe("release workflow", () => {
     expect(workflow).toContain("dist/hx-fortress-version");
   });
 
+  test("builds the console before the compile and refuses an irreproducible rebuild", () => {
+    expect(workflow).toContain("bun run build:ui");
+    expect(workflow).toContain("scripts/gen-ui-assets.ts --print-hash");
+    expect(workflow).toContain('if [[ "$first" != "$second" ]]; then');
+    expect(workflow).toContain("bun run gen:ui");
+    // Order is load-bearing: the compile embeds whatever gen:ui wrote.
+    expect(workflow.indexOf("bun run gen:ui")).toBeLessThan(
+      workflow.indexOf("Compile darwin/linux binaries"),
+    );
+  });
+
+  test("a console-only change triggers the release", () => {
+    expect(workflow).toContain('- "ui/**"');
+    expect(workflow).toContain('- "scripts/**"');
+  });
+
   test("publishes rolling releases and immutable releases on manual dispatch", () => {
     expect(workflow).toContain("contents: write");
     expect(workflow).toContain('gh release create "$tag" dist/hx-fortress-*');
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
   });
 
+  test("the rolling release publishes only on a push to main", () => {
+    // A workflow_dispatch is how the IMMUTABLE release is cut, from a build tag
+    // that already exists. Ungated, the rolling step would run there too and
+    // delete that tag's release, then force-move the very tag the pre-dispatch
+    // check verified — underneath the ceremony reading it.
+    const step = workflow.indexOf("- name: Publish rolling release");
+    expect(step).toBeGreaterThan(-1);
+    const gate = workflow.indexOf(
+      "if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+      step,
+    );
+    expect(gate).toBeGreaterThan(step);
+    // The gate is this step's own, not one belonging to a later step.
+    expect(gate).toBeLessThan(workflow.indexOf('gh release create "$tag"', step));
+  });
+
   test("signs artifacts and attests build provenance (supply-chain)", () => {
     // Ed25519 detached signatures over the binaries + pgvector tarball…
     expect(workflow).toContain("scripts/sign-artifact.ts");
+    // WHAT is signed, and WHEN. The signature sidecar the updater fetches is
+    // `<name>.sig` for the UNCOMPRESSED artifact, so signing after the gzip — a
+    // natural "sign what you upload" edit — publishes `<name>.gz.sig`. Every
+    // fortress then 404s on the path it asks for, and because enforcement is off
+    // by default the missing-signature branch warns and installs anyway: an
+    // authenticity gate disabled fleet-wide with this suite green.
+    const signAt = workflow.indexOf("scripts/sign-artifact.ts");
+    const gzipAt = workflow.indexOf("gzip -9 -f");
+    expect(gzipAt).toBeGreaterThan(-1);
+    expect(signAt).toBeLessThan(gzipAt);
+    expect(workflow).toMatch(/sign-artifact\.ts[^\n]*"\$out_path"/);
     expect(workflow).toContain("FORTRESS_SIGNING_KEY");
     // …plus GitHub build-provenance attestation…
     expect(workflow).toContain("attest-build-provenance");

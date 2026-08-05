@@ -111,6 +111,7 @@ describe.if(!!DSN)("hx-fortress query + MCP slice (A4/A5/A6)", () => {
     await runMigrations(sqlx, migrations);
     db = createHxDb(dsn);
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c1",

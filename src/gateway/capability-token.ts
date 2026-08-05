@@ -91,6 +91,13 @@ export async function verifyCapabilityToken(
   if (typeof org !== "string" || typeof repo !== "string") {
     throw new Error("capability token missing org/repo");
   }
+  // A purpose this realm does not serve is a REFUSAL, never a token read as
+  // purpose-less. The console door mints and accepts `console`; coercing an
+  // unknown purpose to undefined would make such a grant indistinguishable from
+  // a legacy token here, and the compat window would admit it.
+  if (purpose !== undefined && purpose !== "ingest" && purpose !== "read") {
+    throw new Error(`capability token purpose is not valid here: ${String(purpose)}`);
+  }
   const claims: CapabilityClaims = {
     org,
     repo,

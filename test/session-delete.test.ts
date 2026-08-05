@@ -104,6 +104,7 @@ describe.if(!!DSN)("session delete — Postgres purge + tombstone guards", () =>
     await runMigrations(sql, migrations);
     db = createHxDb(dsn);
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c1",
@@ -114,6 +115,7 @@ describe.if(!!DSN)("session delete — Postgres purge + tombstone guards", () =>
       meta: { title: "Delete me" },
     });
     await ingestAgentCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       agentId: "agent-1",
@@ -172,6 +174,7 @@ describe.if(!!DSN)("session delete — Postgres purge + tombstone guards", () =>
   test("re-ingest of a tombstoned session is refused — parent, and agent lane cross-family", async () => {
     await expect(
       ingestCommit(db, {
+        ingestChannel: "tunnel",
         attribution: ATTR,
         key: KEY,
         chunkId: "c2",
@@ -185,6 +188,7 @@ describe.if(!!DSN)("session delete — Postgres purge + tombstone guards", () =>
     // Stale-family child upload: guard matches on (user, sessionId) across families.
     await expect(
       ingestAgentCommit(db, {
+        ingestChannel: "tunnel",
         attribution: ATTR,
         key: { ...KEY, family: "claude-desktop" },
         agentId: "agent-2",

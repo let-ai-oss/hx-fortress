@@ -157,15 +157,33 @@ function deps(manager: FakeManager, lines: string[]) {
 
 interface FakeManager extends ServiceManager {
   installs: number;
+  starts: number;
+  unitPresent: boolean;
 }
 
 function fakeManager(
   states: ServiceState[],
   wasRunning = false,
+  unitPresent = false,
 ): FakeManager {
   return {
     name: "launchd",
     installs: 0,
+    starts: 0,
+    unitPresent,
+    async unit() {
+      return {
+        path: "/Users/test/Library/LaunchAgents/ai.let.hx-fortress.plist",
+        present: this.unitPresent,
+        executablePath: this.unitPresent ? "/usr/local/bin/hx-fortress" : null,
+      };
+    },
+    async start() {
+      this.starts += 1;
+    },
+    async restart() {},
+    async uninstall() {},
+    async ensureLogDir() {},
     async install() {
       this.installs += 1;
     },

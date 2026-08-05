@@ -101,8 +101,41 @@ const ARTIFACT_ALLOWLIST = new Set(["session.json", "tasks.json", "plan.json"]);
 // (no ".", no "/") keeps it traversal-safe just like an assertSegment segment.
 const WORKFLOW_ARTIFACT = /^workflow-[A-Za-z0-9_-]{4,200}\.json$/;
 
+/**
+ * Every sidecar name a session may carry — the fixed allowlist AND the unbounded
+ * per-run workflow class, as ONE predicate.
+ *
+ * Exported because a second copy of this rule is how objects go missing. A
+ * storage migration that walked the three fixed names left every
+ * `workflow-<runId>.json` behind in the old bucket, and a verification that
+ * compared only canonicals reported that cut as clean. The migration now
+ * enumerates what a session's prefix actually holds and asks this function what
+ * it is looking at, so a fifth artifact class is carried the day it is admitted
+ * here.
+ */
+export function isSessionArtifactName(name: string): boolean {
+  return ARTIFACT_ALLOWLIST.has(name) || WORKFLOW_ARTIFACT.test(name);
+}
+
+/** The sidecar names in a raw listing of ONE session's prefix.
+ *
+ *  A prefix listing carries no delimiter, so it also returns the canonical log
+ *  and the internal `.staging/` chunks — neither is a sidecar, and neither is a
+ *  name `writeArtifact` would accept. Filtering through the same predicate the
+ *  write door uses is what keeps "what is here" and "what may be written here"
+ *  from drifting apart. */
+export function sessionArtifactNames(objectNames: Iterable<string>, prefix: string): string[] {
+  const names = new Set<string>();
+  for (const objectName of objectNames) {
+    if (!objectName.startsWith(prefix)) continue;
+    const name = objectName.slice(prefix.length);
+    if (isSessionArtifactName(name)) names.add(name);
+  }
+  return [...names].sort();
+}
+
 export function artifactObject(k: SessionKey, name: string): string {
-  if (!ARTIFACT_ALLOWLIST.has(name) && !WORKFLOW_ARTIFACT.test(name)) {
+  if (!isSessionArtifactName(name)) {
     throw new Error(`artifact not allowed: ${name}`);
   }
   return `${sessionPrefix(k)}/${name}`;

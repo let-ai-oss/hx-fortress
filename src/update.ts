@@ -18,8 +18,8 @@
 // a successful install. runFortressUpdate itself only swaps the binary.
 
 import { arch, platform } from "node:os";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { chmod, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import {
@@ -29,6 +29,7 @@ import {
 } from "./version.js";
 import { assertHttpsDownloadUrl, isLoopbackHost } from "./host/config";
 import { SIGNATURE_ENFORCE, verifyFetchedArtifact } from "./host/trust/verify";
+import type { TrustedSigningKey } from "./host/trust/signing-keys";
 
 /** Hard ceiling on the decompressed self-update binary — a gzip-bomb guard. Well
  *  above a real single-file fortress binary, so it never trips on a legit build. */
@@ -52,6 +53,16 @@ export interface UpdateOpts {
   binPath?: string;
   log?: (msg: string) => void;
   onProgress?: (ev: UpdateProgress) => void;
+  /**
+   * Trust anchors for the detached signature. Defaults to the anchors baked into
+   * this binary — the ONLY set a released fortress ever uses. The rig overrides
+   * it so the enforced path can be driven against a fixture origin whose key
+   * exists nowhere in the repository.
+   */
+  trustedKeys?: readonly TrustedSigningKey[];
+  /** Defaults to SIGNATURE_ENFORCE. Overridden only to prove the enforcing
+   *  release's behaviour before the flag flips. */
+  enforceSignature?: boolean;
 }
 
 export interface UpdateResult {
@@ -99,8 +110,80 @@ export function downloadBaseFromCloudUrl(cloudUrl: string): string {
   return base;
 }
 
+/**
+ * One updater at a time per binary.
+ *
+ * The console and the terminal can both reach this, and two swaps racing on one
+ * path is a half-written binary or a lost one. The lock is an O_EXCL create
+ * beside the target, so the two callers collide on the same name whichever
+ * process they run in; a lock whose holder is gone is reclaimed, because a
+ * crashed updater must not brick every later one.
+ */
+export async function acquireUpdateLock(
+  binPath: string,
+): Promise<{ ok: true; release: () => Promise<void> } | { ok: false; holder: number }> {
+  const lockPath = `${binPath}.update.lock`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+      await handle.close();
+      return {
+        ok: true,
+        release: async (): Promise<void> => {
+          await rm(lockPath, { force: true });
+        },
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const holder = await readLockHolder(lockPath);
+      if (holder !== null && processAlive(holder)) return { ok: false, holder };
+      // The holder is gone. Clear it once and try again; a second EEXIST means
+      // somebody else won the reclaim, and they are the live updater.
+      await rm(lockPath, { force: true });
+    }
+  }
+  return { ok: false, holder: 0 };
+}
+
+async function readLockHolder(lockPath: string): Promise<number | null> {
+  try {
+    const raw: unknown = JSON.parse(await readFile(lockPath, "utf8"));
+    const pid = (raw as { pid?: unknown }).pid;
+    return typeof pid === "number" && Number.isInteger(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult> {
   const binPath = opts.binPath ?? process.execPath;
+  const lock = await acquireUpdateLock(binPath);
+  if (!lock.ok) {
+    throw new Error(
+      `another update is already running for ${binPath}` +
+        (lock.holder ? ` (pid ${lock.holder})` : "") +
+        ". Wait for it to finish, then run this again.",
+    );
+  }
+  try {
+    return await performUpdate(opts, binPath);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function performUpdate(opts: UpdateOpts, binPath: string): Promise<UpdateResult> {
   const log = opts.log ?? noop;
   const onProgress = opts.onProgress ?? noopProgress;
   const downloadBase = opts.downloadBaseUrl.replace(/\/+$/, "");
@@ -169,14 +252,17 @@ export async function runFortressUpdate(opts: UpdateOpts): Promise<UpdateResult>
     fetchImpl: fetch,
     url: `${downloadBase}/${asset}`,
     bytes: binBytes,
-    enforce: SIGNATURE_ENFORCE,
+    enforce: opts.enforceSignature ?? SIGNATURE_ENFORCE,
+    trustedKeys: opts.trustedKeys,
     // Surface the "proceeding unverified" SECURITY warning (verify-if-present) —
     // without a log it is silently swallowed on every update.
     log,
   });
 
   await mkdir(dirname(binPath), { recursive: true });
-  const tmpPath = `${binPath}.new`;
+  // Unique per attempt: a fixed `.new` is a name two updaters would write at
+  // once, and the loser's bytes would be the ones renamed into place.
+  const tmpPath = `${binPath}.${process.pid}.${randomBytes(4).toString("hex")}.new`;
   await writeFile(tmpPath, binBytes);
   await chmod(tmpPath, 0o755);
 

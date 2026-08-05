@@ -32,6 +32,9 @@ export interface ApplyHeadlessBootstrapDeps {
   credentialStore: Pick<CredentialStore, "load">;
   pendingEnrollmentStore: PendingEnrollmentWriter;
   writeVaultCredentials: (creds: VaultCredentials) => Promise<void>;
+  /** The on-disk credentials, so the fields the environment does not manage
+   *  survive the rebuild. Omitted ⇒ nothing to carry over (a fresh volume). */
+  readVaultCredentials?: () => Promise<VaultCredentials | null>;
   logger: HeadlessLogger;
 }
 
@@ -85,11 +88,35 @@ export async function applyHeadlessBootstrap(
 
   const vaultCreds = parseVaultCredentialsFromEnv(env);
   if (vaultCreds) {
-    await deps.writeVaultCredentials(vaultCreds);
+    // Rebuild from the environment (so REMOVING an env var actually takes
+    // effect), then carry back exactly the fields the environment does not
+    // manage. `version` is one of them: without it every redeploy would rewrite
+    // the file with the counter absent — reading as 0 — and the console would
+    // see 1 → 1 across genuinely different credentials and keep signing with
+    // the old ones.
+    //
+    // A read that FAILS is not a read that found nothing. `readVaultCredentials`
+    // refuses on unparseable JSON precisely so a torn file is never silently
+    // rebuilt; catching that to null here reinstated the loss it was written to
+    // stop — `openaiApiKey` gone and the CAS `version` rewound — on every boot of
+    // the container path, since the raw writer takes no lock and asks no
+    // questions. ENOENT is the only absence: the reader already returns null for
+    // it, so anything thrown is a real fault and is re-raised by name.
+    const existing = await deps.readVaultCredentials?.().catch((err: unknown) => {
+      throw new Error(
+        "the existing session_vault credentials could not be read, so this fortress will not rebuild " +
+          `them from the environment and overwrite what is there (${
+            err instanceof Error ? err.message : String(err)
+          }). Move the file aside once you have a copy, then restart.`,
+        { cause: err },
+      );
+    });
+    const merged = reattachUnmanaged(vaultCreds, existing ?? null);
+    await deps.writeVaultCredentials(merged);
     wroteVaultCredentials = true;
     logger.info("Applied session_vault storage credentials from environment", {
-      store: vaultCreds.store,
-      bucket: vaultCreds.bucket,
+      store: merged.store,
+      bucket: merged.bucket,
     });
   }
 
@@ -110,6 +137,22 @@ export async function applyHeadlessBootstrap(
   }
 
   return { wroteVaultCredentials, wrotePendingEnrollment };
+}
+
+/** The fields a headless rebuild carries over from the previous file. Keep this
+ *  list and the reason for each entry together — anything not named here is
+ *  env-managed and is meant to disappear when its variable does. */
+export function reattachUnmanaged(
+  fromEnv: VaultCredentials,
+  existing: VaultCredentials | null,
+): VaultCredentials {
+  if (!existing) return fromEnv;
+  const merged: VaultCredentials = { ...fromEnv };
+  // Set in the enroll wizard, never by the container environment.
+  if (existing.openaiApiKey) merged.openaiApiKey = existing.openaiApiKey;
+  // Monotonic across redeploys — see the call site.
+  if (typeof existing.version === "number") merged.version = existing.version;
+  return merged;
 }
 
 async function loadCredentialQuietly(

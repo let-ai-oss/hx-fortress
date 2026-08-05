@@ -17,6 +17,7 @@ describe("handleTerminalKey", () => {
         selectedAction: 0,
         pendingDetailsFor: null,
         error: null,
+        notice: null,
       }),
       moveRow: (delta) => rowMoves.push(delta),
       moveAction: (delta) => actionMoves.push(delta),

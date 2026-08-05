@@ -76,6 +76,7 @@ describe.if(!!DSN)("hx-fortress foundation — kind + tool-text rows (A2)", () =
     await runMigrations(sql, migrations);
     db = createHxDb(dsn);
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c1",

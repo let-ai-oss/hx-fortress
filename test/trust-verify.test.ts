@@ -19,7 +19,7 @@ async function makeSigner(keyid: string): Promise<{
     "verify",
   ])) as CryptoKeyPair;
   const pub = (await crypto.subtle.exportKey("jwk", kp.publicKey)) as JsonWebKey;
-  const trusted: TrustedSigningKey[] = [{ keyid, publicKey: pub.x ?? "" }];
+  const trusted: TrustedSigningKey[] = [{ keyid, publicKey: pub.x ?? "", production: false }];
   const sidecarFor = async (bytes: Uint8Array): Promise<string> => {
     // Fresh ArrayBuffer-backed copy to satisfy WebCrypto's BufferSource typing.
     const data = new Uint8Array(bytes.byteLength);
@@ -75,7 +75,7 @@ describe("verifyDetachedSignature", () => {
     // Verify against a DIFFERENT trusted set (empty of this key id).
     await expect(
       verifyDetachedSignature(bytes, await sidecarFor(bytes), [
-        { keyid: "some-other-key", publicKey: "AAAA" },
+        { keyid: "some-other-key", publicKey: "AAAA", production: false },
       ]),
     ).rejects.toThrow(/untrusted signing key id/);
   });

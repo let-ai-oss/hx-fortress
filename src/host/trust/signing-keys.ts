@@ -18,24 +18,60 @@ export interface TrustedSigningKey {
   keyid: string;
   /** base64url raw 32-byte Ed25519 public key (JWK `x`). */
   publicKey: string;
+  /** True only for an anchor whose private half lives in the release pipeline's
+   *  secret store. The console's update-apply enforces signatures and therefore
+   *  refuses to run at all unless at least one baked anchor is production: a
+   *  development key would make the enforcement a formality anybody who has the
+   *  repository could satisfy. */
+  production: boolean;
 }
 
-// TODO(prod-key): this is a DEV key — generate a production keypair, store the
-// private JWK as the FORTRESS_SIGNING_KEY CI secret, replace the entry below,
-// and rotate. Ship N+1 keys for a rotation window (verify against both the
-// outgoing and incoming key so a mid-rotation release is never rejected).
+/** The keyid shape a production anchor must carry. Pinned in both directions —
+ *  the flag and the prefix have to agree — so a key promoted by editing one
+ *  field alone is not silently trusted. */
+export const PRODUCTION_KEYID_PREFIX = "hxf-prod-";
+
+export function isProductionAnchor(key: TrustedSigningKey): boolean {
+  return key.production && key.keyid.startsWith(PRODUCTION_KEYID_PREFIX);
+}
+
+/** Whether this BUILD can enforce artifact signatures at all. */
+export function hasProductionAnchor(
+  keys: readonly TrustedSigningKey[] = TRUSTED_SIGNING_KEYS,
+): boolean {
+  return keys.some(isProductionAnchor);
+}
+
+// The anchor set replacement is a RELEASE act, not a code edit: the production
+// keypairs are generated into the release pipeline's secret store (private JWK =
+// the FORTRESS_SIGNING_KEY secret) and only their public halves land here, as a
+// CURRENT and a NEXT entry so a mid-rotation release verifies against both. That
+// replacement drops the development key below. Until it happens no anchor is
+// production, and every path that requires one refuses BY NAME rather than
+// pretending a development key is a release key.
 export const TRUSTED_SIGNING_KEYS: readonly TrustedSigningKey[] = [
-  { keyid: "hxf-dev-2026-07", publicKey: "2MkypwQYWd8sFrN2hvhWzkf4gf6wg8KFB50Njy_l5Os" },
+  {
+    keyid: "hxf-dev-2026-07",
+    publicKey: "2MkypwQYWd8sFrN2hvhWzkf4gf6wg8KFB50Njy_l5Os",
+    production: false,
+  },
 ];
 
 // The let.ai ROOT trust anchor for org signing-key pushes (H-2). Distinct from
 // TRUSTED_SIGNING_KEYS (artifact authenticity): this key signs the KeyProof that
 // authenticates a `${orgId}|${signingPublicKey}|${notBefore}` binding, so a hub
 // can no longer silently swap the per-org key the gateway verifies tokens with.
-// TODO(prod-key): DEV let.ai root key — replace with the production root public key
-// (private = workbench LETAI_FORTRESS_ROOT_SIGNING_KEY secret).
+// Carries BOTH roots across the changeover release: fortresses in the field
+// verify proofs signed by whichever root the hub is using at the moment they
+// reconnect, and dropping one before every peer has moved would reject a proof
+// that is perfectly valid. The development root leaves one release AFTER the
+// production root is live.
 export const LETAI_ROOT_KEYS: readonly TrustedSigningKey[] = [
-  { keyid: "letai-root-dev-2026-07", publicKey: "KSjNxrdnHOqj2k-Ij179B55ZK_Uu5G0jpBXx-3SacEQ" },
+  {
+    keyid: "letai-root-dev-2026-07",
+    publicKey: "KSjNxrdnHOqj2k-Ij179B55ZK_Uu5G0jpBXx-3SacEQ",
+    production: false,
+  },
 ];
 
 // WebCrypto's verify() wants a concrete ArrayBuffer view, not the generic

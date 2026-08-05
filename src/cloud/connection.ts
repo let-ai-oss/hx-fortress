@@ -9,6 +9,7 @@ import {
   type McpTunnelRequest,
   type McpTunnelResult,
   type MsgData,
+  type RosterSyncPayload,
 } from "../protocol";
 import type {
   CloudConnection,
@@ -27,6 +28,13 @@ import { withDeadline } from "../host/with-deadline";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { CloudCredential, CredentialStore } from "./credentials";
+import {
+  FortressQueryRegistry,
+  FortressQueryUnavailable,
+  isFortressQueryAnswer,
+  type FortressQueryAnswerFrame,
+} from "./fortress-query";
+import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
 
 export const SUPPORTED_PROTOCOL_VERSION = 1;
 
@@ -51,7 +59,16 @@ export interface WsCloudConnectionDeps {
   dispatcher: MessageDispatcher;
   credentialStore: CredentialStore;
   logger: HostLogger;
-  identity: FortressIdentity;
+  /**
+   * What this fortress says about itself in `hello` / `enroll`.
+   *
+   * EVALUATED PER CONNECTION ATTEMPT when it is a function, because two of its
+   * fields are operator settings that change while the daemon runs: a frozen
+   * snapshot makes `ui sso off` and `ui disable` unable to clear the advertised
+   * console URL — the next reconnect re-sends whatever boot happened to read,
+   * and the workbench button never goes away.
+   */
+  identity: FortressIdentity | (() => FortressIdentity | Promise<FortressIdentity>);
   moduleLoader?: ModuleLifecycleHandler;
   /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled, so
    *  the gateway can verify capability tokens offline. H-2: the store PINS the key
@@ -81,7 +98,21 @@ export interface WsCloudConnectionDeps {
   /** MC-2368: computes the fortress's collection counts, piggybacked onto the
    *  heartbeat (throttled). Returns null when the DB isn't ready. Omit to disable. */
   collectionStats?: () => Promise<CollectionStats | null>;
+  /** Receives one rosterSync: the organization's active members and their device
+   *  inventory. Omit and the frame is accepted and dropped — which is what an
+   *  older build did to every frame it did not know, silently. */
+  onRoster?: (roster: RosterSyncPayload) => Promise<void>;
 }
+
+/** How long composing the identity may take before the connection proceeds with
+ *  a degraded one. Well inside any reconnect cadence: the alternative is a boot
+ *  that never completes. */
+const IDENTITY_DEADLINE_MS = 2_000;
+
+/** How many distinct unknown frame kinds are worth naming once each. The set
+ *  exists so a frame on every heartbeat cannot become the log; the cap exists so
+ *  a peer choosing a fresh discriminator per frame cannot become the heap. */
+const UNKNOWN_FRAME_KINDS_LOGGED = 32;
 
 // MC-2517 fortress dispatch ceiling — withDeadline now lives in
 // ../host/with-deadline (shared with the vault RPC PG-phase races).
@@ -130,6 +161,9 @@ export class WsCloudConnection implements CloudConnection {
   private readonly reconnectMaxMs: number;
   private readonly maxFrameBytes: number;
   private closeResolve: (() => void) | null = null;
+  private readonly queries = new FortressQueryRegistry();
+  /** Frame kinds already reported as unknown. Logged once each, not per frame. */
+  private readonly unknownFrames = new Set<string>();
 
   constructor(private readonly deps: WsCloudConnectionDeps) {
     this.reconnectMinMs = deps.reconnectMinMs ?? RECONNECT_MIN_MS;
@@ -180,10 +214,46 @@ export class WsCloudConnection implements CloudConnection {
     }
   }
 
+  /**
+   * Ask the hub a bounded question and wait for its answer.
+   *
+   * Daemon-only, and it NEVER hangs and never invents an answer: no socket, a
+   * saturated registry, a close, a reconnect and a hub too old to recognise the
+   * frame all reject with FortressQueryUnavailable. The last of those is the
+   * silent case — an unupgraded hub sends nothing at all — which is why the
+   * timeout, not an error frame, is what makes it terminate.
+   */
+  request(
+    query: FortressQueryPayload,
+    timeoutMs?: number,
+  ): Promise<FortressQueryResultPayload> {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new FortressQueryUnavailable("offline"));
+    }
+    const opened = this.queries.open(timeoutMs);
+    if (!opened.id) return opened.answer;
+    // Typed as the union the daemon SENDS on: the question travels
+    // fortress→hub, and letting the package say so is what keeps this file from
+    // agreeing with itself about a direction it does not own.
+    const frame: FortressToHubFrame = { t: "fortressQuery", id: opened.id, query };
+    try {
+      ws.send(encodeFrame(frame));
+    } catch (err) {
+      this.queries.settle({
+        t: "fortressQueryError",
+        id: opened.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return opened.answer;
+  }
+
   close(): Promise<void> {
     this.stopped = true;
     this._state = "closing";
     this.clearHeartbeat();
+    this.queries.drain("closed");
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -197,6 +267,33 @@ export class WsCloudConnection implements CloudConnection {
       this.closeResolve = resolve;
       ws.close();
     });
+  }
+
+  /** The identity as of THIS attempt. A failure to read it must not stop the
+   *  fortress connecting: an omitted field leaves the hub holding what it has,
+   *  which is the documented absent state. */
+  private async resolveIdentity(): Promise<FortressIdentity> {
+    const source = this.deps.identity;
+    if (typeof source !== "function") return source;
+    try {
+      // BOUNDED. This became an async function that reads ui.json off disk, and
+      // it sits on the boot-critical path: `open()` settles only on
+      // enrolled/welcome/fatal/close, and the runtime awaits it before starting
+      // the HTTP gateway and the session-vault module. A wedged mount (NFS,
+      // FUSE, a bind mount whose backing store went away) makes that read never
+      // settle, so `hello` is never sent, the hub never authenticates — and
+      // nothing times out, because the heartbeat keeps the socket alive past the
+      // reaper. Total silent ingest outage with the status stuck at `starting`.
+      // The degraded identity below is exactly what this arm is for.
+      return await withDeadline(
+        Promise.resolve(source()),
+        IDENTITY_DEADLINE_MS,
+        "composing the fortress identity took too long",
+      );
+    } catch (err) {
+      this.deps.logger.error("could not compose the fortress identity for this connection", err);
+      return { version: "unknown", protocolVersion: 0 };
+    }
   }
 
   private async dial(
@@ -232,6 +329,15 @@ export class WsCloudConnection implements CloudConnection {
       return;
     }
 
+    // close() may have landed while the credential load was in flight. The check
+    // at the top of dial() ran before that await, so without this one a reconnect
+    // opens a socket AFTER the caller was told the connection was closed — and
+    // nothing ever closes it, because close() already saw the old socket.
+    if (this.stopped) {
+      this._state = "offline";
+      return;
+    }
+
     const ws = new WebSocket(config.cloud.url);
     this.ws = ws;
 
@@ -246,17 +352,23 @@ export class WsCloudConnection implements CloudConnection {
       // (re-)bootstrap intent and must win over any leftover credentials.json
       // from a previous install — otherwise a stale credential shadows the token
       // and the hub rejects the stale `hello` with `invalid_credential`.
-      if (this.activeEnrollToken) {
-        send({ t: "enroll", enrollToken: this.activeEnrollToken, ...this.deps.identity });
-      } else if (cred) {
-        send({
-          t: "hello",
-          fortressId: cred.fortressId,
-          credential: cred.credential,
-          ...this.deps.identity,
-        });
-      }
-      let lastStatsAt = 0;
+      void (async (): Promise<void> => {
+        const identity = await this.resolveIdentity();
+        if (this.activeEnrollToken) {
+          send({ t: "enroll", enrollToken: this.activeEnrollToken, ...identity });
+        } else if (cred) {
+          send({
+            t: "hello",
+            fortressId: cred.fortressId,
+            credential: cred.credential,
+            ...identity,
+          });
+        }
+        // The heartbeat starts only once the greeting is actually on the wire.
+        // Started outside this closure it kept an UNAUTHENTICATED socket alive —
+        // the hub bumps its liveness watchdog on every frame before dispatch, so
+        // the reaper never fired on a connection that had said nothing.
+        let lastStatsAt = 0;
       const STATS_MIN_INTERVAL_MS = 60_000;
       this.heartbeatTimer = setInterval(() => {
         send({ t: "heartbeat" });
@@ -273,7 +385,8 @@ export class WsCloudConnection implements CloudConnection {
             })
             .catch(() => {});
         }
-      }, this.heartbeatMs);
+        }, this.heartbeatMs);
+      })();
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
@@ -284,13 +397,23 @@ export class WsCloudConnection implements CloudConnection {
       // `raw.length` (UTF-16 code units), so a multi-byte payload can't sneak past
       // the byte ceiling.
       if (Buffer.byteLength(raw) > this.maxFrameBytes) return;
-      const decoded = safeDecodeFrame<HubToFortressFrame>(raw);
+      const decoded = safeDecodeFrame<HubToFortressFrame | FortressQueryAnswerFrame>(raw);
       if (!decoded.ok) return;
+      // Answers are correlated, not dispatched: they belong to a caller holding a
+      // promise, and an unknown id is dropped rather than routed anywhere.
+      if (isFortressQueryAnswer(decoded.frame)) {
+        this.queries.settle(decoded.frame);
+        return;
+      }
       void this.handleFrame(decoded.frame, send, settle);
     });
 
     ws.addEventListener("close", () => {
       this.clearHeartbeat();
+      // Correlation ids do not survive a socket: the hub on the other side of the
+      // next one has never heard of them, so anything outstanding is answered
+      // now rather than left to its own timeout.
+      this.queries.drain(this.stopped ? "closed" : "offline");
       if (this.stopped) {
         this._state = "offline";
         const resolve = this.closeResolve;
@@ -439,6 +562,18 @@ export class WsCloudConnection implements CloudConnection {
         if (this.deps.mcp) await dispatchMcpFrame(this.deps.mcp, frame, send, this.deps.logger);
         break;
       }
+      case "rosterSync": {
+        if (!this.deps.onRoster) break;
+        try {
+          await this.deps.onRoster(frame.roster);
+        } catch (err) {
+          // A roster that cannot be stored is not a connection problem: the hub
+          // re-sends the whole set on the next sync, so the console keeps
+          // rendering the roster it has and says how old it is.
+          this.deps.logger.error("could not apply the roster let.ai sent", err);
+        }
+        break;
+      }
       case "heartbeatAck":
         break;
       case "moduleAdvertise": {
@@ -489,6 +624,27 @@ export class WsCloudConnection implements CloudConnection {
         this.stopped = true;
         settle(new Error(this._message));
         this.ws?.close();
+        break;
+      }
+      default: {
+        // A hub ahead of this fortress. Dropping it is correct — the envelope is
+        // additive precisely so an older peer keeps working — but dropping it
+        // SILENTLY is how a frame that was supposed to be handled goes unnoticed
+        // for a release. Logged once per kind, so a frame on every heartbeat
+        // cannot become the log.
+        // TRUNCATED and CAPPED. The discriminator is peer-chosen text bounded
+        // only by the frame size, and a compromised hub is explicitly in this
+        // appliance's threat model — an unbounded set keyed on it is memory the
+        // peer decides, and a log line the peer writes.
+        const kind = String((frame as { t?: unknown }).t ?? "unnamed").slice(0, 64);
+        if (!this.unknownFrames.has(kind)) {
+          if (this.unknownFrames.size < UNKNOWN_FRAME_KINDS_LOGGED) {
+            this.unknownFrames.add(kind);
+            this.deps.logger.error(
+              `ignoring a hub frame this build does not understand: ${kind} (the hub is newer than this fortress)`,
+            );
+          }
+        }
         break;
       }
     }

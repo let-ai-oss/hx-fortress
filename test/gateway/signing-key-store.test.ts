@@ -22,7 +22,7 @@ async function makeRootKeypair(): Promise<{
   const { publicKey, privateKey } = await generateKeyPair("EdDSA", { extractable: true });
   const publicKeyB64url = (await exportJWK(publicKey)).x as string;
   return {
-    anchor: { keyid: "letai-root-test", publicKey: publicKeyB64url },
+    anchor: { keyid: "letai-root-test", publicKey: publicKeyB64url, production: false },
     async sign(orgId, key, notBefore) {
       const msg = new TextEncoder().encode(`${orgId}|${key}|${notBefore}`);
       const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, msg));

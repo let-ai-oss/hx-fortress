@@ -30,9 +30,13 @@ import {
   ListObjectVersionsCommand,
   DeleteObjectsCommand,
   type S3ClientConfig,
+  GetBucketVersioningCommand,
+  GetBucketLifecycleConfigurationCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { BUCKET_CONFIG_UNAVAILABLE } from "./types.js";
 import type {
+  BucketConfigFact,
   AppendOptions,
   ComposeResult,
   DeleteSessionOptions,
@@ -42,6 +46,7 @@ import type {
   SessionStore,
   SignedDownload,
   SignedUpload,
+  StagingUploadOptions,
 } from "./types.js";
 import {
   metadataFromCanonicalObjectName,
@@ -53,10 +58,12 @@ import {
   canonicalObject,
   listPrefix,
   parseCanonicalKey,
+  sessionArtifactNames,
   sessionDeletePrefixes,
+  sessionPrefix,
   stagingObject,
 } from "./keys.js";
-import { maxCanonicalBytes } from "./limits.js";
+import { clampStagingTtl, maxCanonicalBytes } from "./limits.js";
 import { randomUUID } from "node:crypto";
 
 export interface S3StoreConfig {
@@ -70,7 +77,6 @@ export interface S3StoreConfig {
   forcePathStyle?: boolean;
 }
 
-const STAGING_PUT_TTL_S = 15 * 60;
 const CANONICAL_GET_TTL_S = 5 * 60;
 const MULTIPART_MIN_PART = 5 * 1024 * 1024; // S3: non-last parts must be ≥ 5 MiB
 const NDJSON = "application/x-ndjson";
@@ -98,17 +104,25 @@ export class S3Store implements SessionStore {
     this.bucket = cfg.bucketName;
   }
 
-  async signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
+  async signStagingUpload(
+    key: SessionKey,
+    chunkId: string,
+    opts?: StagingUploadOptions,
+  ): Promise<SignedUpload> {
     const objectName = stagingObject(key, chunkId);
+    // A caller may shorten the signature but never extend it: the quiesce
+    // barrier waits out every signature still outstanding, so a longer one
+    // would push a storage swap arbitrarily far into the future.
+    const ttl = clampStagingTtl(opts?.ttlSeconds);
     const url = await getSignedUrl(
       this.s3,
       new PutObjectCommand({ Bucket: this.bucket, Key: objectName, ContentType: NDJSON }),
-      { expiresIn: STAGING_PUT_TTL_S },
+      { expiresIn: ttl },
     );
     return {
       url,
       objectName,
-      expiresAt: new Date(Date.now() + STAGING_PUT_TTL_S * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + ttl * 1000).toISOString(),
     };
   }
 
@@ -263,6 +277,20 @@ export class S3Store implements SessionStore {
     return out;
   }
 
+  async listSessionArtifacts(key: SessionKey): Promise<string[]> {
+    const prefix = `${sessionPrefix(key)}/`;
+    const names: string[] = [];
+    let token: string | undefined;
+    do {
+      const page = await this.s3.send(
+        new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: token }),
+      );
+      for (const obj of page.Contents ?? []) names.push(obj.Key ?? "");
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    return sessionArtifactNames(names, prefix);
+  }
+
   async listAllCanonicalKeys(): Promise<SessionKey[]> {
     const out: SessionKey[] = [];
     let token: string | undefined;
@@ -321,6 +349,36 @@ export class S3Store implements SessionStore {
    *  the old pool (S3Client owns its handler, unlike GCS's shared agent). */
   destroyClient(): void {
     this.s3.destroy();
+  }
+
+  /** s3:GetBucketVersioning. The fortress key is provisioned for objects, so
+   *  this is expected to be refused on most deployments - which is a fact the
+   *  report states rather than a failure it hides. */
+  async getBucketVersioning(): Promise<BucketConfigFact> {
+    try {
+      const res = await this.s3.send(new GetBucketVersioningCommand({ Bucket: this.bucket }));
+      return res.Status ?? "Unversioned";
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
+  }
+
+  /** s3:GetLifecycleConfiguration. A bucket with no rules answers with an error
+   *  rather than an empty list, so "none" cannot be distinguished from "not
+   *  permitted" here - and claiming either would be an invention. */
+  async getLifecycle(): Promise<BucketConfigFact> {
+    try {
+      const res = await this.s3.send(
+        new GetBucketLifecycleConfigurationCommand({ Bucket: this.bucket }),
+      );
+      const rules = res.Rules ?? [];
+      if (rules.length === 0) return "no lifecycle rules";
+      return rules
+        .map((r) => `${r.ID ?? "(unnamed)"}: ${r.Status ?? "unknown"}`)
+        .join("; ");
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
   }
 
   async selfTest(): Promise<void> {

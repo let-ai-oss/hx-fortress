@@ -48,10 +48,38 @@ export function defaultFortressRoot(): string {
 export function fortressPaths(root = defaultFortressRoot()) {
   const modules = path.join(root, "modules");
   const postgres = path.join(root, "postgres");
+  // Daemon-only, 0700. The files under it are the medium a Postgres-role
+  // adversary cannot reach — which is what makes them usable as security
+  // anchors (crash-recovery eligibility, the pause clamp) where a SQL-visible
+  // value would be forgeable.
+  const runtime = path.join(root, "runtime");
+  // Console-owned, 0700. pg.json is written by the daemon for the console to
+  // read; ui.json is the console's own configuration.
+  const ui = path.join(root, "ui");
 
   return {
     root,
     config: path.join(root, "config.json"),
+    runtimeRoot: runtime,
+    uiRoot: ui,
+    /** Console DB coordinates (hx_ui credentials only), rewritten every boot. */
+    pgJson: path.join(ui, "pg.json"),
+    /** Console configuration — read-only to the daemon. */
+    uiConfig: path.join(ui, "ui.json"),
+    /** Daemon-published counters for the console (10s cadence). */
+    metrics: path.join(runtime, "metrics.json"),
+    /** Command ids this daemon claimed and has not yet finished. */
+    commandsInFlight: path.join(runtime, "commands-inflight.json"),
+    /** First-observed timestamp of the CURRENT pause episode; cleared on resume. */
+    pauseAnchor: path.join(runtime, "pause-anchor.json"),
+    /** 0600 single-use credential files referenced by command params. */
+    cmdCreds: path.join(runtime, "cmd-creds"),
+    /** Append-only audit spool, drained into Postgres as hx_ui. It sits under
+     *  the console's own directory rather than the daemon's: the ui server, the
+     *  daemon and every CLI invocation write here, and the drain, the rotation
+     *  and the retention floor are all the console's. Same 0700 rule either way
+     *  - one owning user, no group, no second uid. */
+    auditSpool: path.join(ui, "spool"),
     postgresRoot: postgres,
     postgresCache: path.join(postgres, "cache"),
     postgresSocket: path.join(postgres, "socket"),

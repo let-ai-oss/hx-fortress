@@ -14,6 +14,7 @@ import {
   hxSessions,
   hxToolCalls,
   hxTurns,
+  type HxIngestChannel,
   type HxSessionAgentKind,
   type HxTitleSource,
 } from "../host/postgres/schema";
@@ -226,6 +227,12 @@ export interface IngestAttribution {
 export interface IngestCommitInput {
   attribution: IngestAttribution;
   key: SessionKey;
+  /** How this session reached the fortress. REQUIRED — the residency
+   *  disclosure that reads it is fail-private, so an entry point that forgot to
+   *  say would silently make every session it writes ineligible. The two INSERT
+   *  sites below assert it through `satisfies`, so a new call path cannot
+   *  compile without choosing a value. */
+  ingestChannel: HxIngestChannel;
   chunkId: string;
   chunkText: string;
   totalBytes: number;
@@ -250,6 +257,19 @@ interface ResolvedDimensions {
   repoId: string | null;
   deviceId: string | null;
   modelId: string | null;
+}
+
+/** The provenance stamp for a new hx.sessions row, as a `satisfies`-checked
+ *  object. Spread into BOTH inserts: `.values()` treats a nullable column as
+ *  optional, so nothing but an explicit assertion makes a missing channel a
+ *  compile error. Stamped at FIRST write only — a later update never rewrites
+ *  it, because the channel a session arrived on is a historical fact. */
+function provenance(
+  input: Pick<IngestCommitInput, "ingestChannel">,
+): { ingestChannel: HxIngestChannel } {
+  return { ingestChannel: input.ingestChannel } satisfies Required<
+    Pick<IngestCommitInput, "ingestChannel">
+  >;
 }
 
 function metaStr(meta: Record<string, unknown> | null, key: string): string | null {
@@ -625,6 +645,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
           entrypoint: metaStr(meta, "entrypoint"),
           originator: metaStr(meta, "originator"),
           attributionSource: input.recovered ? "recovered" : "auto",
+          ...provenance(input),
           lastUserText: parsed.lastUserText,
           lastAssistantText: parsed.lastAssistantText,
           ...rollup,
@@ -808,6 +829,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
           family: input.key.family,
           sessionId: input.key.sessionId,
           attributionSource: input.recovered ? "recovered" : "auto",
+          ...provenance(input),
           firstEventAt: parsed.firstActivityAt ?? now,
           lastActivityAt: parsed.lastActivityAt ?? now,
         })

@@ -8,6 +8,8 @@ on:
     branches: ["main"]
     paths:
       - "src/**"
+      - "ui/**"
+      - "scripts/**"
       - "Dockerfile"
       - "package.json"
       - "bun.lock"
@@ -58,6 +60,26 @@ jobs:
         run: |
           set -euo pipefail
           echo "value=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+
+      # The console is embedded into every binary by the compile below, so it is
+      # built FIRST. The independent rebuild is compared before the embed: a
+      # release must never ship assets that this commit's sources cannot
+      # reproduce. keep in sync with dev-build.yml "Build and embed the console"
+      - name: Build and embed the console
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run build:ui
+          first="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          rm -rf ui/dist
+          bun run build:ui
+          second="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          if [[ "$first" != "$second" ]]; then
+            echo "console assets are not reproducible: $first != $second" >&2
+            exit 1
+          fi
+          echo "console assets sha256 $first"
+          bun run gen:ui
 
       - name: Compile darwin/linux binaries
         shell: bash
@@ -119,7 +141,12 @@ jobs:
         with:
           subject-path: "dist/hx-fortress-*.gz"
 
+      # Pushes only. A manual dispatch is how an immutable release is cut from an
+      # existing build tag; letting the rolling step run there would delete and
+      # recreate that same tag's release underneath the ceremony that is reading
+      # it, and force-move the tag the pre-dispatch check just verified.
       - name: Publish rolling release
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash

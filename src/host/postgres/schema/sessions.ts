@@ -7,6 +7,12 @@ import { hxSchema } from "./namespace";
 export type HxTitleSource = "user" | "ai" | "fallback";
 export type HxSessionOrigin = "local" | "let_ai_cloud";
 export type HxAttributionSource = "auto" | "manual" | "recovered";
+/** Which entry point FIRST wrote this session. Residency disclosure sends raw
+ *  session ids only for provenance-proven cloud-relayed sessions, so this is a
+ *  fail-private eligibility gate: only 'tunnel' is eligible. 'reconciled' shares
+ *  the unknown-provenance bucket with NULL — the reconciler recovers a row after
+ *  an index outage and cannot know how the bytes originally arrived. */
+export type HxIngestChannel = "tunnel" | "gateway" | "reconciled";
 
 // ── Sessions ────────────────────────────────────────────────────────────────
 // One index row per mirrored session. Denormalized rollup counters live here
@@ -38,6 +44,9 @@ export const hxSessions = hxSchema.table(
     originator: text("originator"),
     sessionOrigin: text("session_origin").$type<HxSessionOrigin>().notNull().default("local"),
     attributionSource: text("attribution_source").$type<HxAttributionSource>(),
+    // Nullable: every session mirrored before this column existed predates the
+    // provenance record and stays ineligible.
+    ingestChannel: text("ingest_channel").$type<HxIngestChannel>(),
     assignedAt: ts("assigned_at"),
     assignedBy: text("assigned_by"),
     eventCount: counter("event_count"),

@@ -1,5 +1,11 @@
 import { createTuiApp } from "./app";
-import { startFortress, stopFortress } from "../cli-lifecycle";
+import {
+  divergenceRefusal,
+  startFortress,
+  stopFortress,
+  uiUnitLines,
+  type LifecycleManager,
+} from "../cli-lifecycle";
 import { FsModuleInventoryStore } from "../host/module-inventory";
 import { fortressPaths } from "../host/paths";
 import { FileStatusReader } from "../status-reader";
@@ -17,11 +23,12 @@ import type {
 } from "../host/module-inventory";
 import type { ModuleUpdateMap } from "./types";
 import type { StatusReader } from "../status-reader";
+import type { UiUnitDecision } from "../cli-lifecycle";
 import type { ServiceManager } from "../service";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 type TuiServiceStateReader = Pick<ServiceManager, "state">;
-type TuiLifecycleManager = Pick<ServiceManager, "install" | "name" | "state" | "stop">;
+type TuiLifecycleManager = LifecycleManager;
 
 interface UninstallHandler {
   uninstall(moduleId: string): Promise<void>;
@@ -37,6 +44,7 @@ interface TuiModelDependencies {
 
 interface TuiActionDependencies {
   serviceManager?: TuiLifecycleManager;
+  ensureUiUnit?: (mayInstall: boolean) => Promise<UiUnitDecision>;
   moduleLifecycleHandler?: UninstallHandler;
   executablePath?: string;
   writeLine?: (line: string) => void;
@@ -73,13 +81,23 @@ export async function runFortressTui(
     model,
     reloadModel: () => loadMainScreenModel(modelDeps),
     actions: {
-      start: async () =>
-        await startFortress({
+      start: async () => {
+        // The console unit is NOT installed from here without an explicit
+        // gesture: this renderer owns stdin, so a prompt would be invisible and
+        // an install would be silent.
+        const result = await startFortress({
           manager: serviceManager,
           executablePath: dependencies.executablePath ?? process.execPath,
           paths,
           writeLine,
-        }),
+          mayInstallUiUnit: false,
+          ...(dependencies.ensureUiUnit ? { ensureUiUnit: dependencies.ensureUiUnit } : {}),
+        });
+        if (result.refused && result.divergence) {
+          throw new Error(divergenceRefusal(result.divergence));
+        }
+        return uiUnitLines(result.uiUnit);
+      },
       stop: async () =>
         await stopFortress({
           manager: serviceManager,

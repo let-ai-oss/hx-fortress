@@ -4,8 +4,9 @@
 
 import { handleVaultRpc, type VaultAuthz, type VaultRpcRequest } from "./store/rpc.js";
 import type { SessionStore } from "./store/types.js";
-import { readVaultCredentials } from "./credentials.js";
-import { buildStore } from "./store.js";
+import { readVaultCredentials, type VaultCredentials } from "./credentials.js";
+import { buildDirectStore, buildStore, type StorePauseHooks } from "./store.js";
+import { isIngestPaused } from "../../console/pause-gate.js";
 import type { HxDb } from "../../host/postgres/db.js";
 import { sanitizeDbError } from "../../host/postgres/sanitize.js";
 import type {
@@ -19,6 +20,22 @@ import type {
  *  gateway can presign against the same store the tunnel RPCs already use. */
 export interface SessionVaultModule extends Module {
   getStore(): SessionStore | null;
+  /**
+   * Re-read credentials.json and swap the live store binding.
+   *
+   * The ONLY way a rotation reaches the running daemon. Stopping and restarting
+   * the module instead would answer every tunnel vault RPC with "Module not
+   * running: session_vault" for the duration — an error class the cloud does not
+   * classify as retryable, so purge jobs would consume attempts and dead-letter
+   * — and a throwing init() would leave the module dead until a daemon restart
+   * while the HTTP gateway kept ingesting on the old key.
+   *
+   * The new credentials are PROVEN before anything is bound to them. A failure
+   * keeps the old store, leaves the module running, and fails the rotation that
+   * asked for it: a rotation reported as done over a store that cannot write is
+   * the outcome this ordering exists to prevent.
+   */
+  rebindStore(): Promise<void>;
 }
 
 export interface SessionVaultDeps {
@@ -35,6 +52,9 @@ export interface SessionVaultDeps {
    *  no cgroup kill, so a hard exit would orphan the daemonized postmaster and
    *  the restarted fortress boots Postgres-less. Bounded by the caller. */
   stopEmbeddedPostgres?: () => Promise<void>;
+  /** Compose the store-write pause gate around the store. Omitted in tests and
+   *  wherever no pause plane exists. */
+  pause?: StorePauseHooks;
   /** Resolves the RW DSN for deleteSession's DEDICATED purge client (built
    *  param-free per invocation — no statement_timeout / maxLifetime — so an
    *  oversized purge keeps its zombie-convergence). Null until Postgres is
@@ -68,9 +88,28 @@ const PROBE_INTERVAL_MS = (() => {
 export default function createModule(deps: SessionVaultDeps = {}): SessionVaultModule {
   let store: SessionStore | null = null;
   let logger: ScopedLogger | null = null;
+
+  /**
+   * The one factory both init() and rebindStore() go through.
+   *
+   * buildStore is what INSTALLS the pause gate, the per-call deadlines and the
+   * poisoned-pool rebuild, and all three are per-instance wrappers. A rebind
+   * that constructed a backend directly would return a bare store, and every
+   * ingest route, artifact write, deleteSession and self-test would bypass
+   * ingest_control from that moment on.
+   */
+  const bindStore = (creds: VaultCredentials): SessionStore =>
+    buildStore(creds, logger ?? undefined, {
+      ...(deps.stopEmbeddedPostgres ? { beforeExit: deps.stopEmbeddedPostgres } : {}),
+      ...(deps.pause ? { pause: deps.pause } : {}),
+    });
+
   let probeTimer: ReturnType<typeof setInterval> | null = null;
   let probeBusy = false;
   let probeFailing = false;
+  // Per-EPISODE pause logging state: one summary line per deadline, then debug.
+  let pauseSummaryAt = 0;
+  let pausedRefusals = 0;
 
   return {
     id: "session_vault",
@@ -79,13 +118,40 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       return store;
     },
 
+    async rebindStore(): Promise<void> {
+      const creds = await readVaultCredentials();
+      if (!creds) {
+        throw new Error("session-vault: no credentials.json to rebind to");
+      }
+      // Proven against the real bucket before anything points at it — through
+      // the UNGATED backend, which is the only store that can answer while a
+      // pause is armed.
+      //
+      // The one caller that rebinds under a pause is the storage-migration
+      // swap, and it arms that pause itself: probing through the serving store
+      // asks the write gate to admit the very write it was armed to refuse, so
+      // the cut threw `vault_offline:ingest_paused` with credentials.json
+      // already naming the new bucket. The daemon kept writing the old one, the
+      // operator was told the swap failed, and the next restart silently served
+      // the target — without everything written in between. This is the probe
+      // the rotation executor already takes, for the same reason: it proves
+      // CREDENTIALS, not the serving path.
+      await buildDirectStore(creds).selfTest();
+      store = bindStore(creds);
+      logger?.info("store rebound onto rotated credentials", {
+        kind: creds.store,
+        bucket: creds.bucket,
+        version: creds.version ?? 0,
+      });
+    },
+
     async init(context: ModuleContext): Promise<void> {
       logger = context.logger;
       const creds = await readVaultCredentials();
       if (!creds) {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");
       }
-      store = buildStore(creds, context.logger, { beforeExit: deps.stopEmbeddedPostgres });
+      store = bindStore(creds);
 
       const { fortressIdentity } = context;
       if (fortressIdentity) {
@@ -110,6 +176,13 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
       if (PROBE_INTERVAL_MS > 0) {
         probeTimer = setInterval(() => {
           if (probeBusy || !store) return;
+          // NOT while the gate is shut. The probe is a real bucket WRITE, so a
+          // pause refuses it — and the refusal was logged at ERROR as "store
+          // write-path self-test failed" every minute for the whole pause. That
+          // is the exact line an operator watches for a wedged bucket, printed
+          // for a fortress that is deliberately holding writes, during the one
+          // operation that arms a pause.
+          if (deps.pause?.state.isPaused()) return;
           probeBusy = true;
           void store
             .selfTest()
@@ -118,6 +191,9 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
               probeFailing = false;
             })
             .catch((err: unknown) => {
+              // A pause armed between the check above and the call: still a
+              // deliberate refusal, still not a fault.
+              if (isIngestPaused(err)) return;
               probeFailing = true;
               logger?.error("store write-path self-test failed", {
                 error: err instanceof Error ? err.message : String(err),
@@ -172,6 +248,25 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
         // The error string is logged AND returned to the cloud on the wire, so
         // redact any DSN a Postgres/driver error might have echoed (Low).
         const message = sanitizeDbError(err);
+        if (isIngestPaused(err)) {
+          // A pause is a deliberate, time-bounded refusal, and a drain can
+          // refuse thousands of RPCs. Error-level per request would bury the
+          // reason it was armed under its own noise — so one summary per pause
+          // episode, and the individual refusals at info.
+          if (pauseSummaryAt !== err.pausedUntil.getTime()) {
+            pauseSummaryAt = err.pausedUntil.getTime();
+            pausedRefusals = 0;
+            logger?.info("ingest paused — refusing store writes until the deadline", {
+              pausedUntil: err.pausedUntil.toISOString(),
+            });
+          }
+          pausedRefusals += 1;
+          logger?.debug("vault RPC refused: ingest paused", {
+            method: req.method,
+            refusals: pausedRefusals,
+          });
+          return { ok: false, error: message };
+        }
         logger?.error("vault RPC failed", {
           method: req.method,
           error: message,

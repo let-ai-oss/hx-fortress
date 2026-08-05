@@ -35,6 +35,13 @@ jobs:
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
+      # keep in sync with release.yml "Build and embed the console"
+      - name: Build and embed the console
+        run: |
+          set -euo pipefail
+          bun run build:ui
+          bun run gen:ui
+
       # keep in sync with release.yml "Compile darwin/linux binaries"
       - name: Compile darwin/linux binaries
         shell: bash

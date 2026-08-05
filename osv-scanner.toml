@@ -13,4 +13,7 @@ ignoreUntil = 2026-10-13
 # Fixed upstream in esbuild 0.25.0, but the @esbuild-kit loader cannot take it
 # without breaking. Not reachable/exploitable here. Re-triage when drizzle-kit
 # drops @esbuild-kit or by the review date above.
-reason = "esbuild dev-server CORS (GHSA-67mh-4wv8-2f99): dev-only transitive via drizzle-kit; esbuild serve is never used and esbuild is not shipped. Unreachable."
+# Re-triaged when ui/bun.lock joined the scan: the console's Vite toolchain
+# resolves esbuild 0.25.x, which is PAST the 0.25.0 fix, so it needs no
+# exception. This entry covers only the 0.18.20 copy under drizzle-kit.
+reason = "esbuild dev-server CORS (GHSA-67mh-4wv8-2f99): dev-only transitive via drizzle-kit (esbuild 0.18.20); esbuild serve is never used and esbuild is not shipped. The console's own esbuild is 0.25.x, already fixed. Unreachable."

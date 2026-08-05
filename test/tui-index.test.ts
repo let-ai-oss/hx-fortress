@@ -241,6 +241,13 @@ function fakeManager(
     name: "launchd",
     installCalls: [],
     stopCalls: 0,
+    async unit() {
+      return { path: "/tmp/fortress.plist", present: false, executablePath: null };
+    },
+    async start() {},
+    async restart() {},
+    async uninstall() {},
+    async ensureLogDir() {},
     async install(options) {
       this.installCalls.push(options);
     },

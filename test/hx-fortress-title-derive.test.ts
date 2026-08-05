@@ -46,7 +46,7 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     return { userId: `user-title-${SUFFIX}`, family: "claude-cli", sessionId };
   };
   const commit = (k: ReturnType<typeof key>, chunkId: string, chunkText: string, meta: Record<string, unknown> | null) =>
-    ingestCommit(db, { attribution: ATTR, key: k, chunkId, replace: false, chunkText, totalBytes: chunkText.length, componentCount: 1, meta });
+    ingestCommit(db, { ingestChannel: "tunnel", attribution: ATTR, key: k, chunkId, replace: false, chunkText, totalBytes: chunkText.length, componentCount: 1, meta });
   const titleOf = async (sessionId: string) =>
     (await sql.query<{ title: string | null; title_source: string | null }>(
       `SELECT title, title_source FROM hx.sessions WHERE session_id = '${sessionId}'`,

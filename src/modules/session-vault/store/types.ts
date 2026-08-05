@@ -32,6 +32,14 @@ export interface ComposeResult {
   componentCount: number;
 }
 
+export interface StagingUploadOptions {
+  /** Shorten the signature's lifetime. The quiesce barrier before a storage
+   *  swap has to wait out every signature the bucket will still honour, so a
+   *  drain cuts new ones short instead of waiting the default TTL. Clamped by
+   *  the backend to its own maximum. */
+  ttlSeconds?: number;
+}
+
 export interface AppendOptions {
   /** Overwrite the canonical with this chunk instead of appending. The client
    *  sends this on the first chunk of a from-zero (re)upload so a canonical
@@ -73,9 +81,25 @@ export interface DeleteSessionOptions {
   batchLimit?: number;
 }
 
+/**
+ * The one honest answer when the bucket's configuration cannot be read.
+ *
+ * The fortress key is provisioned for OBJECT access. Reading a bucket's
+ * versioning or lifecycle policy is a bucket-level permission the customer never
+ * granted, and asking for it would widen the credential to make a compliance
+ * report prettier. So the report says what is true - it could not check - rather
+ * than "versioning: off", which is a claim about the bucket the fortress is in
+ * no position to make.
+ */
+export const BUCKET_CONFIG_UNAVAILABLE =
+  "unavailable - the fortress key cannot read bucket configuration";
+
+/** A provider-read bucket fact: the value, or the honest unavailable string. */
+export type BucketConfigFact = string;
+
 export interface SessionStore {
   /** Mint a signed PUT URL for a staging chunk. The caller PUTs raw NDJSON bytes. */
-  signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload>;
+  signStagingUpload(key: SessionKey, chunkId: string, opts?: StagingUploadOptions): Promise<SignedUpload>;
   /** Read a freshly-uploaded staging chunk as UTF-8 text (used for indexing). */
   readChunkText(key: SessionKey, chunkId: string): Promise<string>;
   /** Append a staging chunk onto the canonical session log; returns new totals.
@@ -100,6 +124,13 @@ export interface SessionStore {
   writeArtifact(key: SessionKey, name: string, text: string): Promise<void>;
   /** Read a sidecar artifact as UTF-8 text, or null if it doesn't exist. */
   readArtifactText(key: SessionKey, name: string): Promise<string | null>;
+  /** The sidecar artifacts this session actually HAS, by name — the objects
+   *  directly under its prefix, minus the canonical log and the internal
+   *  `.staging/` chunks. Asked rather than assumed: `workflow-<runId>.json` is an
+   *  unbounded class, so no fixed list of names describes a session's objects,
+   *  and a storage migration that copied a fixed list would leave the rest in the
+   *  bucket it is moving away from. */
+  listSessionArtifacts(key: SessionKey): Promise<string[]>;
   /** List lightweight session metadata for one user without reading every
    *  canonical transcript. */
   listSessionMetadata(userId: string): Promise<SessionMetadata[]>;
@@ -108,6 +139,14 @@ export interface SessionStore {
    *  the G reconciler's orphan anti-join. Whole-bucket scan; agent lanes appear
    *  as their `:a:` composite sessionId. */
   listAllCanonicalKeys(): Promise<SessionKey[]>;
+  /** Whether the bucket keeps noncurrent versions, as the provider reports it.
+   *  Read rather than assumed: the compliance report's residency line turns on
+   *  it, and both provisioners enable versioning, so an assumption would be
+   *  right until somebody pointed the fortress at a bucket they made by hand. */
+  getBucketVersioning(): Promise<BucketConfigFact>;
+  /** The bucket's lifecycle policy, as the provider reports it. Objects under an
+   *  expiring rule are objects that will leave without anybody deleting them. */
+  getLifecycle(): Promise<BucketConfigFact>;
   /** Prove the bucket + credentials actually work: write→read→delete a
    *  throwaway probe object. Throws on any failure. Run at enroll time (so a
    *  bad bucket/permission surfaces immediately, not at the first session) and

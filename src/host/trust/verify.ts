@@ -17,11 +17,71 @@
 
 import { importJWK } from "jose";
 
-import { TRUSTED_SIGNING_KEYS, type TrustedSigningKey } from "./signing-keys";
+import {
+  hasProductionAnchor,
+  TRUSTED_SIGNING_KEYS,
+  type TrustedSigningKey,
+} from "./signing-keys";
 
 /** Release A = verify-if-present. The enforcing release flips this to `true`,
  *  turning a MISSING signature into a hard failure. Do not flip here. */
 export const SIGNATURE_ENFORCE = false;
+
+/**
+ * The CONSOLE's update path enforces separately from the terminal's.
+ *
+ * A console operator applying an update is host code execution reached through a
+ * browser session, so that path takes the strictest available verification: with
+ * production anchors baked in it enforces, and an unsigned artifact is refused by
+ * name. It flips to `true` at the release where production-signed artifacts
+ * exist; until then the console runs verify-if-present and SAYS SO — a button
+ * that is simply dead teaches an operator that the console is broken, not that
+ * this build cannot prove authenticity.
+ */
+export const CONSOLE_SIGNATURE_ENFORCE = false;
+
+/** Shown wherever the console offers an update it cannot prove the origin of. */
+export const UNSIGNED_BUILD_WARNING =
+  "this build has no release signing anchor, so an update is checked against its published " +
+  "checksum only — that proves the bytes were not corrupted, not who produced them";
+
+export function productionAnchorRefusal(): string {
+  return (
+    "refusing to apply an update from the console: signature enforcement is on, but this binary " +
+    "carries no production signing anchor to enforce against. Install a release build, or apply " +
+    "the update from the fortress terminal."
+  );
+}
+
+export interface ConsoleUpdateGate {
+  /** Whether the artifact's detached signature is REQUIRED. */
+  enforce: boolean;
+  /** What the operator is told when it is not. Null when it is. */
+  warning: string | null;
+}
+
+/** The console's verification posture for THIS build. Throws the named refusal
+ *  when enforcement is on and no production anchor exists to enforce with. */
+export function consoleUpdateGate(
+  trustedKeys: readonly TrustedSigningKey[] = TRUSTED_SIGNING_KEYS,
+  enforcing: boolean = CONSOLE_SIGNATURE_ENFORCE,
+): ConsoleUpdateGate {
+  // BOTH conditions. Enforcing on the anchor alone made the release runbook's own
+  // sequence break the Update button: rung 8 bakes production anchors while its
+  // acceptance criterion is that the assets still carry no `.sig`, and signing
+  // does not start until rung 12 — a separate later release. For that whole
+  // window every console-initiated update failed on a missing signature, which
+  // is the outcome this file names as the one to avoid.
+  //
+  // The refusal keeps its own case: asking for enforcement with nothing to
+  // enforce with is a misconfiguration, not a posture.
+  if (enforcing && !hasProductionAnchor(trustedKeys)) throw new Error(productionAnchorRefusal());
+  if (hasProductionAnchor(trustedKeys) && enforcing) return { enforce: true, warning: null };
+  return {
+    enforce: false,
+    warning: hasProductionAnchor(trustedKeys) ? null : UNSIGNED_BUILD_WARNING,
+  };
+}
 
 /** The detached-signature sidecar written next to an artifact as `<name>.sig`.
  *  `sig` is base64url(raw Ed25519 signature); `keyid` selects the trust anchor. */

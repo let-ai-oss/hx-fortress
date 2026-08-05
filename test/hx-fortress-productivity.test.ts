@@ -178,6 +178,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
     await runMigrations(sqlx, migrations);
     db = createHxDb(dsn);
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c1",
@@ -294,6 +295,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
 
     // Seed the MULTI-DAY session: primary_day = 2026-06-28, last_activity = 07-02.
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: MULTI_KEY,
       chunkId: "m1",
@@ -344,6 +346,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
 
   test("(f) a replace recomputes the facts row โ€” no double-count", async () => {
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: KEY,
       chunkId: "c2",
@@ -378,6 +381,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
       JSON.stringify({ type: "user", timestamp: ts, message: { content: [{ type: "text", text: "hi" }] } });
     const ingest = (chunkId: string, ts: string, replace: boolean) =>
       ingestCommit(db, {
+        ingestChannel: "tunnel",
         attribution: ATTR,
         key: MONO_KEY,
         chunkId,
@@ -411,6 +415,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
     // last_activity_at = 2026-07-08T01:00Z โ€” calendar day 07-08 in UTC, but 07-07
     // in America/New_York (EDT, UTC-4: 2026-07-07 21:00 local).
     await ingestCommit(db, {
+      ingestChannel: "tunnel",
       attribution: ATTR,
       key: TZ_KEY,
       chunkId: "h1",

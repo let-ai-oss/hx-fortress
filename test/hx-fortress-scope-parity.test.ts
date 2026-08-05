@@ -78,6 +78,7 @@ describe.if(!!DSN)("hx-fortress §13-C scope parity (identities, never the froze
 
     for (const sessionId of [SESSION_X, SESSION_Y]) {
       await ingestCommit(db, {
+        ingestChannel: "tunnel",
         attribution: NULL_ATTR, // ingest stamps org_id = NULL (Uncategorized)…
         key: { userId: USER_ID, family: FAMILY, sessionId },
         chunkId: "c1",

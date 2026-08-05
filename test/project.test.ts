@@ -22,7 +22,11 @@ describe("project skeleton", () => {
   test("defines local dev and build scripts", () => {
     expect(packageJson.scripts).toMatchObject({
       dev: "bun --watch src/cli.ts",
-      build: "mkdir -p ./dist && bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
+      // The console is built and embedded before the compile, so a binary can
+      // never ship without the assets it serves.
+      build:
+        "bun run build:ui && bun run gen:ui && mkdir -p ./dist && " +
+        "bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
     });
   });
 

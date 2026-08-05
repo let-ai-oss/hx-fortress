@@ -1,11 +1,20 @@
 import type { Migration } from "../migrate";
 
-// Migrations in apply order. Each entry imports a drizzle-kit-generated `.sql`
-// file as embedded text (so it survives `bun build --compile` — the runtime
-// never reads a migrations folder). The `name` matches the drizzle journal tag.
+// THE registry of migrations, in apply order — nothing else decides what runs or
+// when. Each entry imports a `.sql` file as embedded text (so it survives
+// `bun build --compile`; the runtime never reads a migrations folder), and `name`
+// is the key the runner records as applied.
 //
-// Adding a migration: run `bunx drizzle-kit generate` (or `--custom` for
-// extensions/views/roles), then append one import + one array entry here.
+// There is no drizzle journal or snapshot set behind this list. 0000-0014 are
+// drizzle-kit output kept verbatim; 0015 onward are hand-written SQL, because what
+// they express — roles, REVOKEs, the SECURITY DEFINER apparatus, data backfills —
+// is not derivable from the Drizzle schema, and a generator that cannot emit them
+// cannot verify them either. `drizzle-kit check` went with the snapshots; the
+// ordering invariant it nominally covered is asserted against these entries
+// directly (test/host-postgres-migrate.test.ts).
+//
+// Adding a migration: write `NNNN_<name>.sql` with the next unused number, then
+// append one import + one array entry here. Never edit an applied file.
 import sql0000Extensions from "./0000_extensions.sql" with { type: "text" };
 import sql0001Dimensions from "./0001_dimensions.sql" with { type: "text" };
 import sql0002Sessions from "./0002_sessions.sql" with { type: "text" };
@@ -20,6 +29,19 @@ import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "t
 import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
 import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { type: "text" };
+import sql0015ConsolePlane from "./0015_console_plane.sql" with { type: "text" };
+import sql0017AuditEngine from "./0017_audit_engine.sql" with { type: "text" };
+import sql0018Roster from "./0018_roster.sql" with { type: "text" };
+import sql0019MigrationRuns from "./0019_migration_runs.sql" with { type: "text" };
+import sql0020ResidencyUnchecked from "./0020_residency_unchecked.sql" with { type: "text" };
+import sql0021MissingHere from "./0021_missing_here.sql" with { type: "text" };
+import sql0022CloudWitnessDefault from "./0022_cloud_witness_default.sql" with { type: "text" };
+import sql0023LanesHoldIt from "./0023_lanes_hold_it.sql" with { type: "text" };
+import sql0024ResidencyUnwitnessable from "./0024_residency_unwitnessable.sql" with { type: "text" };
+import sql0025WitnessChangeStamp from "./0025_witness_change_stamp.sql" with { type: "text" };
+import sql0026CopyUnchecked from "./0026_copy_unchecked.sql" with { type: "text" };
+import sql0027AuditSettingsSingleton from "./0027_audit_settings_singleton.sql" with { type: "text" };
+import sql0016AuditRefFile from "./0016_audit_ref_file.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -56,4 +78,35 @@ export const migrations: Migration[] = [
   // title-less and show a bare id. Fills only NULL titles (idempotent). NOT
   // gated. Going forward ingestCommit derives titles inline (src/ingest/ingest.ts).
   { name: "0014_backfill_session_titles", sql: sql0014BackfillTitles },
+  // Console/runtime plane: the command queue, the ingest pause, the admin audit
+  // and the two audit tables the SECURITY DEFINER routines write — TABLES ONLY,
+  // plus role-guarded REVOKEs. The routines, their NOLOGIN owner and every
+  // GRANT live in ensureAppRoles instead (see the file header for why). NOT
+  // gated. Never edit an applied file; always add the next number.
+  { name: "0015_console_plane", sql: sql0015ConsolePlane },
+  // One additive column on hx.admin_audit: the FILE half of an outcome's
+  // reference to its intent, so a pair split by a spool rotation still resolves.
+  // NOT gated.
+  { name: "0016_audit_ref_file", sql: sql0016AuditRefFile },
+  // The residency audit's own record: runs and findings. The acknowledgement
+  // and cloud-witness tables are NOT here (0015 owns them, with their fences) —
+  // a run is re-derivable by running the audit again, and an acknowledgement is
+  // not. NOT gated.
+  { name: "0017_audit_engine", sql: sql0017AuditEngine },
+  // The organization's people, as let.ai reports them: a full REPLACE per sync,
+  // a locally-derived `active` flag for members who stopped being sent, and a
+  // singleton whose ABSENCE means no sync has ever landed. NOT gated.
+  { name: "0018_roster", sql: sql0018Roster },
+  // The storage migration's own record: one row per run, one per copied session
+  // with the checksum it was verified against — which is what makes a resume
+  // able to re-copy exactly what is missing. NOT gated.
+  { name: "0019_migration_runs", sql: sql0019MigrationRuns },
+  { name: "0020_residency_unchecked", sql: sql0020ResidencyUnchecked },
+  { name: "0021_missing_here", sql: sql0021MissingHere },
+  { name: "0022_cloud_witness_default", sql: sql0022CloudWitnessDefault },
+  { name: "0023_lanes_hold_it", sql: sql0023LanesHoldIt },
+  { name: "0024_residency_unwitnessable", sql: sql0024ResidencyUnwitnessable },
+  { name: "0025_witness_change_stamp", sql: sql0025WitnessChangeStamp },
+  { name: "0026_copy_unchecked", sql: sql0026CopyUnchecked },
+  { name: "0027_audit_settings_singleton", sql: sql0027AuditSettingsSingleton },
 ];

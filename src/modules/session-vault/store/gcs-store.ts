@@ -12,8 +12,10 @@
 // bucket AND a customer's bucket inside a self-hosted vault.
 
 import { Storage, type StorageOptions, type Bucket } from "@google-cloud/storage";
+import { BUCKET_CONFIG_UNAVAILABLE } from "./types.js";
 import type {
   AppendOptions,
+  BucketConfigFact,
   ComposeResult,
   DeleteSessionOptions,
   DeleteSessionResult,
@@ -22,6 +24,7 @@ import type {
   SessionStore,
   SignedDownload,
   SignedUpload,
+  StagingUploadOptions,
 } from "./types.js";
 import {
   metadataFromCanonicalObjectName,
@@ -33,11 +36,12 @@ import {
   canonicalObject,
   listPrefix,
   parseCanonicalKey,
+  sessionArtifactNames,
   sessionDeletePrefixes,
   sessionPrefix,
   stagingObject,
 } from "./keys.js";
-import { maxCanonicalBytes } from "./limits.js";
+import { clampStagingTtl, maxCanonicalBytes } from "./limits.js";
 import { randomUUID } from "node:crypto";
 
 export interface GcsStoreConfig {
@@ -47,6 +51,14 @@ export interface GcsStoreConfig {
   keyFilename?: string;
   /** Inline service-account credentials (parsed JSON). */
   credentials?: StorageOptions["credentials"];
+  /**
+   * An alternate GCS API root — the emulator seam (fake-gcs-server).
+   *
+   * It is a CONFIG field rather than an env read so the emulator can never be
+   * reached by a deployed fortress that happens to inherit STORAGE_EMULATOR_HOST
+   * from its environment: something must pass it here, deliberately.
+   */
+  apiEndpoint?: string;
 }
 
 /** Rewrite-in-place once a composed object reaches this many components. */
@@ -79,6 +91,7 @@ export class GcsStore implements SessionStore {
     } else if (cfg.credentials) {
       opts.credentials = cfg.credentials;
     }
+    if (cfg.apiEndpoint) opts.apiEndpoint = cfg.apiEndpoint;
     this.storage = new Storage(opts);
     this.bucketName = cfg.bucketName;
   }
@@ -88,9 +101,15 @@ export class GcsStore implements SessionStore {
     return this._bucket;
   }
 
-  async signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
+  async signStagingUpload(
+    key: SessionKey,
+    chunkId: string,
+    opts?: StagingUploadOptions,
+  ): Promise<SignedUpload> {
     const objectName = stagingObject(key, chunkId);
-    const expiresMs = Date.now() + 15 * 60 * 1000;
+    // Shorter only — see the S3 store: the quiesce barrier before a storage
+    // swap has to wait out every signature that is still valid.
+    const expiresMs = Date.now() + clampStagingTtl(opts?.ttlSeconds) * 1000;
     const [url] = await this.bucket()
       .file(objectName)
       .getSignedUrl({
@@ -244,6 +263,15 @@ export class GcsStore implements SessionStore {
     return out;
   }
 
+  async listSessionArtifacts(key: SessionKey): Promise<string[]> {
+    const prefix = `${sessionPrefix(key)}/`;
+    const [files] = await this.bucket().getFiles({ prefix });
+    return sessionArtifactNames(
+      files.map((file) => file.name),
+      prefix,
+    );
+  }
+
   async listAllCanonicalKeys(): Promise<SessionKey[]> {
     const out: SessionKey[] = [];
     const bucket = this.bucket();
@@ -297,6 +325,32 @@ export class GcsStore implements SessionStore {
       }
     }
     return { complete: true, deleted };
+  }
+
+  /** storage.buckets.get. Refused for an object-scoped key, which is the
+   *  common case and an answer in itself. */
+  async getBucketVersioning(): Promise<BucketConfigFact> {
+    try {
+      const [metadata] = await this.bucket().getMetadata();
+      return metadata.versioning?.enabled ? "Enabled" : "Unversioned";
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
+  }
+
+  /** The bucket's lifecycle rules, as the provider reports them. An empty rule
+   *  set IS distinguishable here, unlike on S3, so it is reported as such. */
+  async getLifecycle(): Promise<BucketConfigFact> {
+    try {
+      const [metadata] = await this.bucket().getMetadata();
+      const rules = metadata.lifecycle?.rule ?? [];
+      if (rules.length === 0) return "no lifecycle rules";
+      return rules
+        .map((r) => `${r.action?.type ?? "unknown"} after ${r.condition?.age ?? "?"} days`)
+        .join("; ");
+    } catch {
+      return BUCKET_CONFIG_UNAVAILABLE;
+    }
   }
 
   async selfTest(): Promise<void> {

@@ -9,6 +9,7 @@ import {
   runFortressHost,
 } from "../src/host/main";
 import { FilePendingEnrollmentStore, type WsCloudConnectionDeps } from "../src/cloud";
+import type { FortressIdentity } from "../src/protocol";
 import type { ModuleRegistry } from "../src/host/module-registry";
 import type { CloudConnection } from "../src/host/types";
 import { fortressPaths } from "../src/host/paths";
@@ -64,9 +65,15 @@ describe("runFortressHost", () => {
       throw new Error("expected capturedDeps");
     }
     const dependencies = capturedDeps as WsCloudConnectionDeps;
-    expect(dependencies.identity).toMatchObject({
+    // Composed per connection attempt, so the console advertisement reflects
+    // ui.json as it stands at that moment rather than at boot.
+    expect(typeof dependencies.identity).toBe("function");
+    const identity = await (dependencies.identity as () => Promise<FortressIdentity>)();
+    expect(identity).toMatchObject({
       version: "0.0.0-test",
       protocolVersion: 1,
+      consoleUrl: null,
+      runtimeKind: "host",
     });
     const registry = dependencies.dispatcher as ModuleRegistry;
     expect(registry.snapshot()).toEqual([

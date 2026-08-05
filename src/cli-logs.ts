@@ -1,6 +1,4 @@
-import { readFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import { readLastLines, watchLines } from "./log-tail";
 import type { LogRecord } from "./host/types";
 
 export interface LogsDependencies {
@@ -19,6 +17,55 @@ export interface LogsOptions {
   follow: boolean;
   writeLine: (line: string) => void;
   signal?: AbortSignal;
+}
+
+export const DEFAULT_LINES_BACK = 50;
+
+export interface ParsedLogsArgs {
+  moduleFilter: string | undefined;
+  linesBack: number;
+  follow: boolean;
+}
+
+/**
+ * Parse `logs [module] [--lines N] [-f|--follow]`.
+ *
+ * `--lines` CONSUMES its value. Without that, `logs --lines 100` scanned for
+ * the first token that did not start with `--`, found `100`, and filtered the
+ * output to a module named "100" — an empty log that looked like a quiet
+ * fortress. Following stays the default, as it has always been for a bare
+ * `hx-fortress logs`; `-f` makes the intent explicit.
+ */
+export function parseLogsArgs(args: readonly string[]): ParsedLogsArgs {
+  let moduleFilter: string | undefined;
+  let linesBack = DEFAULT_LINES_BACK;
+  let follow = true;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    // `-n` too, because that is what `help` publishes and what the console's
+    // Command Line panel renders. Consuming only `--lines` left `-n` matched by
+    // the `startsWith("-")` skip below while its VALUE fell through to the
+    // module filter: `hx-fortress logs -n 100` filtered to a module named "100",
+    // printed nothing, and followed forever.
+    if (arg === "--lines" || arg === "-n") {
+      const value = Number(args[i + 1]);
+      if (Number.isFinite(value) && value >= 0) linesBack = Math.trunc(value);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--lines=") || arg.startsWith("-n=")) {
+      const value = Number(arg.slice(arg.indexOf("=") + 1));
+      if (Number.isFinite(value) && value >= 0) linesBack = Math.trunc(value);
+      continue;
+    }
+    if (arg === "-f" || arg === "--follow") {
+      follow = true;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    moduleFilter ??= arg;
+  }
+  return { moduleFilter, linesBack, follow };
 }
 
 export function formatRecord(record: LogRecord): string {
@@ -84,15 +131,10 @@ function parseRecord(line: string): LogRecord | undefined {
 export function createProductionLogsDeps(): LogsDependencies {
   return {
     async readLines(path: string, n: number): Promise<LogRecord[]> {
-      let content: string;
-      try {
-        content = await readFile(path, "utf8");
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-        throw err;
-      }
-      const lines = content.split("\n").filter(Boolean);
-      return lines.slice(-n).flatMap((line) => {
+      // Bounded reverse seek, spanning rotated segments — showing `--lines 500`
+      // must not read a multi-GB file, and must not stop short at a rotation.
+      const lines = await readLastLines(path, n);
+      return lines.flatMap((line) => {
         const record = parseRecord(line);
         return record ? [record] : [];
       });
@@ -104,30 +146,17 @@ export function createProductionLogsDeps(): LogsDependencies {
       signal: AbortSignal,
     ): Promise<void> {
       if (signal.aborted) return;
-
-      const proc = spawn("tail", ["-n", "0", "-f", path], {
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-
-      const rl = createInterface({ input: proc.stdout! });
-      rl.on("line", (line) => {
-        const record = parseRecord(line);
-        if (record) onLine(record);
-      });
-
-      await new Promise<void>((resolve) => {
-        const abort = () => {
-          proc.kill("SIGINT");
-          resolve();
-        };
-        signal.addEventListener("abort", abort, { once: true });
-        proc.once("exit", () => {
-          signal.removeEventListener("abort", abort);
-          resolve();
-        });
-      });
-
-      rl.close();
+      // In-process and inode-aware: `tail -f` would go silent at the next
+      // rotation, and spawning `tail` at all is a dependency on a binary the
+      // compiled single-file build cannot assume.
+      await watchLines(
+        path,
+        (line) => {
+          const record = parseRecord(line);
+          if (record) onLine(record);
+        },
+        signal,
+      );
     },
   };
 }

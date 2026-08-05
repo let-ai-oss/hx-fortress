@@ -25,3 +25,15 @@ export function maxTunnelResultBytes(env: Record<string, string | undefined> = p
   const frame = Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_FRAME_BYTES;
   return Math.floor(frame * 0.7); // reserve ~30% for base64 expansion + JSON envelope
 }
+
+// A staging PUT signature is honoured by the bucket directly, so the quiesce
+// barrier before a storage swap has to wait every outstanding one out. A caller
+// draining for a swap may therefore cut new signatures SHORT; it may never
+// lengthen them past the default, or the barrier would never converge.
+export const STAGING_PUT_TTL_S = 15 * 60;
+
+export function clampStagingTtl(requested: number | undefined): number {
+  return typeof requested === "number" && Number.isFinite(requested) && requested > 0
+    ? Math.min(Math.trunc(requested), STAGING_PUT_TTL_S)
+    : STAGING_PUT_TTL_S;
+}

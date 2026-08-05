@@ -65,6 +65,8 @@ function createMockStore(overrides: Partial<SessionStore> = {}): SessionStore {
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     }),
     readChunkText: async () => "chunk-text-content",
+    getBucketVersioning: async () => "Enabled",
+    getLifecycle: async () => "no lifecycle rules",
     appendChunkToCanonical: async () => ({ totalBytes: 128, componentCount: 2 }),
     signCanonicalDownload: async () => ({
       url: "https://mock-storage.test/canonical",
@@ -75,6 +77,7 @@ function createMockStore(overrides: Partial<SessionStore> = {}): SessionStore {
     writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => "artifact-text-content",
+    listSessionArtifacts: async () => ["plan.json"],
     listSessionMetadata: async () => [],
     selfTest: async () => {},
     deleteSession: async () => ({ complete: true, deleted: 0 }),

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { handleAppendUrl, handleCommit, handleListSessionMetadata } from "../../src/gateway/handlers";
 import { metadataFromCanonicalObjectName } from "../../src/modules/session-vault/store/session-metadata";
+import { BUCKET_CONFIG_UNAVAILABLE } from "../../src/modules/session-vault/store/types";
 import type { SessionMetadata, SessionStore } from "../../src/modules/session-vault/store/types";
 
 const SAMPLE_METADATA: SessionMetadata[] = [
@@ -42,8 +43,11 @@ function fakeStore(overrides: Partial<SessionStore> = {}): SessionStore {
     writeCanonicalText: async () => {},
     writeArtifact: async () => {},
     readArtifactText: async () => null,
+    listSessionArtifacts: async () => [],
     listSessionMetadata: async () => SAMPLE_METADATA,
     selfTest: async () => {},
+    getBucketVersioning: async () => BUCKET_CONFIG_UNAVAILABLE,
+    getLifecycle: async () => BUCKET_CONFIG_UNAVAILABLE,
     deleteSession: async () => ({ complete: true, deleted: 0 }),
     listAllCanonicalKeys: async () => [],
   };

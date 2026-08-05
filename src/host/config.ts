@@ -3,7 +3,13 @@ import path from "node:path";
 
 import { assertModuleId, type fortressPaths } from "./paths";
 import { HX_EMBEDDING_DIM } from "./postgres/schema/embeddings";
-import type { ConfigStore, FortressConfig, FortressPostgresConfig } from "./types";
+import { DEFAULT_ROSTER_INACTIVE_PURGE_DAYS } from "../console/roster";
+import type {
+  ConfigStore,
+  FortressConfig,
+  FortressPostgresConfig,
+  FortressRosterConfig,
+} from "./types";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -59,6 +65,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
     }
 
     const postgres = parsePostgresConfig(value.postgres);
+    const roster = parseRosterConfig(value.roster);
 
     return {
       schemaVersion: 1,
@@ -66,6 +73,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       gateway: { publicUrl: gatewayPublicUrl },
       modules: { enabled: [...enabled] },
       ...(postgres ? { postgres } : {}),
+      ...(roster ? { roster } : {}),
     };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
@@ -83,6 +91,26 @@ function parseGatewayPublicUrl(value: unknown): string {
   }
   assertGatewayPublicUrl(value.publicUrl);
   return value.publicUrl;
+}
+
+/** Absent means the default. A retention that parsed to something absurd is
+ *  refused rather than clamped: it decides when people's records disappear, and
+ *  silently substituting a number nobody asked for is the wrong kind of
+ *  forgiving. */
+function parseRosterConfig(value: unknown): FortressRosterConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("roster must be an object");
+  const days = value.inactivePurgeDays;
+  if (typeof days === "undefined") return undefined;
+  if (typeof days !== "number" || !Number.isInteger(days) || days < 0 || days > 3650) {
+    throw new Error("roster.inactivePurgeDays must be a whole number of days between 0 and 3650");
+  }
+  return { inactivePurgeDays: days };
+}
+
+/** What the sweep and the `roster purge-inactive` verb actually use. */
+export function rosterInactivePurgeDays(config: FortressConfig | null): number {
+  return config?.roster?.inactivePurgeDays ?? DEFAULT_ROSTER_INACTIVE_PURGE_DAYS;
 }
 
 function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined {
@@ -311,6 +339,22 @@ export function resolveEmbedConfig(
   };
 }
 
+/** The RAW on-disk object.
+ *
+ *  parseFortressConfig models only the keys the host reads, so writing its
+ *  result back is lossy: every `ensure*` migration below rebuilds config.json
+ *  from that model, and anything the parser does not know about — a block a
+ *  later version adds, a hand-edited key — disappears on the next boot. The
+ *  writers merge their result OVER this instead. */
+async function readRawConfig(paths: FortressPaths): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(paths.config, "utf8"));
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function ensureGatewayPublicUrlConfigured(
   paths: FortressPaths,
   gatewayPublicUrl = DEFAULT_GATEWAY_PUBLIC_URL,
@@ -334,11 +378,14 @@ export async function ensureGatewayPublicUrlConfigured(
   }
 
   assertGatewayPublicUrl(gatewayPublicUrl);
+  // parseFortressConfig has already validated `value` here, so preserving the
+  // rest of it cannot reintroduce something invalid.
   const normalized = parseFortressConfig(value);
-  await writeConfig(paths, {
-    ...normalized,
-    gateway: { publicUrl: gatewayPublicUrl },
-  });
+  await writeConfig(
+    paths,
+    { ...normalized, gateway: { publicUrl: gatewayPublicUrl } },
+    isRecord(value) ? value : null,
+  );
 }
 
 /** Migrate an existing config.json to include any core modules not yet listed
@@ -358,7 +405,7 @@ export async function ensureCoreModulesEnabled(paths: FortressPaths): Promise<vo
     ...config,
     modules: { enabled: [...config.modules.enabled, ...missing] },
   };
-  await writeConfig(paths, updated);
+  await writeConfig(paths, updated, await readRawConfig(paths));
 }
 
 /** Bundled modules that must always be enabled. Added to new configs by default
@@ -409,18 +456,34 @@ export async function ensureEnrollmentConfig(
     cloud: { url: cloudUrl },
     gateway: { publicUrl: gatewayPublicUrl ?? existing?.gateway.publicUrl ?? DEFAULT_GATEWAY_PUBLIC_URL },
     modules: existing?.modules ?? { enabled: [...CORE_MODULE_IDS] },
+    // Carried EXPLICITLY: re-enrolling used to drop the whole postgres block,
+    // which silently moved a fortress configured against an external database
+    // onto a fresh embedded cluster — its data still there, invisible.
+    ...(existing?.postgres ? { postgres: existing.postgres } : {}),
+    // Same reason: a retention the operator shortened must not spring back to
+    // the default because the fortress was re-enrolled.
+    ...(existing?.roster ? { roster: existing.roster } : {}),
   };
 
-  await writeConfig(paths, config);
+  // Only preserve the raw object when the config actually parsed: merging over
+  // an unparseable file would carry its invalid keys forward.
+  await writeConfig(paths, config, existing ? await readRawConfig(paths) : null);
 }
 
-async function writeConfig(paths: FortressPaths, config: FortressConfig): Promise<void> {
+async function writeConfig(
+  paths: FortressPaths,
+  config: FortressConfig,
+  preserve: Record<string, unknown> | null = null,
+): Promise<void> {
+  // The validated fields win; everything else the file already carried rides
+  // through untouched.
+  const merged = preserve ? { ...preserve, ...config } : config;
   // config.json holds the enrolled cloud origin; keep its directory owner-only
   // (0700) and the file owner-only (0600) — belt-and-suspenders chmod after write
   // because the writeFile mode is still masked by the process umask.
   await mkdir(path.dirname(paths.config), { recursive: true, mode: 0o700 });
   const tmp = `${paths.config}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 });
   await chmod(tmp, 0o600).catch(() => {});
   await rename(tmp, paths.config);
 }

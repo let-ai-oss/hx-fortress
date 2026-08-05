@@ -3,20 +3,38 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  apparatusStatements,
+  columnGrantStatements,
+  ownershipProbeQuery,
+  ownershipViolations,
+  preflightQuery,
+  quoteLiteral,
+  revokeStatements,
+  staleOverloadDrops,
+  uiRoleStatements,
+  type OwnershipProbe,
+  type Preflight,
+} from "./console-plane";
 import type { RoleSecrets } from "./roles";
 import type { Spawner } from "./spawn";
 
-export const PG_ROLE = "fortress";
-export const PG_DATABASE = "hx-db";
-export const PG_SCHEMA = "hx";
-/** SELECT-only login role for the MCP read tools — inherits the NOLOGIN
- *  `hx_readonly` role's grants (migration 0005). */
-export const PG_APP_RO_ROLE = "hx_app_ro";
-/** DML (no-DDL, no-superuser) login role for ingest + the embed worker. */
-export const PG_APP_RW_ROLE = "hx_app_rw";
-/** The NOLOGIN role migration 0005 grants schema-wide SELECT to; `hx_app_ro`
- *  is a member so its SELECT set tracks the read grants centrally. */
-export const PG_READONLY_ROLE = "hx_readonly";
+export {
+  PG_APP_RO_ROLE,
+  PG_APP_RW_ROLE,
+  PG_DATABASE,
+  PG_READONLY_ROLE,
+  PG_ROLE,
+  PG_SCHEMA,
+} from "./cluster-roles";
+import {
+  PG_APP_RO_ROLE,
+  PG_APP_RW_ROLE,
+  PG_DATABASE,
+  PG_READONLY_ROLE,
+  PG_ROLE,
+  PG_SCHEMA,
+} from "./cluster-roles";
 
 export interface ClusterDeps {
   spawner: Spawner;
@@ -24,13 +42,6 @@ export interface ClusterDeps {
   dataDir: string;
   /** Password for the `fortress` superuser, set at initdb time via --pwfile. */
   superPassword: string;
-}
-
-/** Escape a string literal for interpolation into a SQL statement (single-quote
- *  doubling). The role passwords are URL-safe hex, but escape defensively so a
- *  hand-edited roles.json can never break the ALTER ROLE. */
-function quoteLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 /**
@@ -66,11 +77,15 @@ export async function ensureCluster(deps: ClusterDeps): Promise<void> {
 }
 
 /** A minimal SQL surface against a running cluster. `run` executes a statement
- *  on `database`; `exists` reports whether a query returns at least one row.
- *  The zonky binaries ship no `psql`, so this is backed by Bun's SQL client. */
+ *  on `database`; `exists` reports whether a query returns at least one row;
+ *  `query` returns rows; `runMany` executes an ORDERED batch on ONE connection
+ *  as a single implicit transaction. The zonky binaries ship no `psql`, so this
+ *  is backed by Bun's SQL client. */
 export interface ClusterSql {
   run(database: string, statement: string): Promise<void>;
   exists(database: string, query: string): Promise<boolean>;
+  query<T = Record<string, unknown>>(database: string, sql: string): Promise<T[]>;
+  runMany(database: string, statements: readonly string[]): Promise<void>;
 }
 
 // The managed pg_hba.conf: loopback-only, scram-sha-256 for every role, and an
@@ -130,65 +145,115 @@ export async function ensureDatabaseAndSchema(sql: ClusterSql): Promise<void> {
 }
 
 /**
- * Idempotently provision the two least-privilege login roles, run AFTER
- * `migrate` (so the blanket schema grants cover every table this boot created):
+ * Build the ORDERED ensureAppRoles batch. Three phases, and the order between
+ * them is load-bearing:
  *
- *   • hx_app_ro — LOGIN, member of hx_readonly (inherits its schema-wide SELECT
- *     from migration 0005). No direct table grants of its own.
- *   • hx_app_rw — LOGIN with USAGE on schema hx + SELECT/INSERT/UPDATE/DELETE on
- *     all current tables + USAGE on all sequences, plus matching ALTER DEFAULT
- *     PRIVILEGES so future migration tables/sequences are covered too. No DDL,
- *     no superuser.
+ *   1. blanket GRANTs (roles, passwords, schema-wide DML, the command-plane
+ *      apparatus) — must come first so a table created by this boot's
+ *      migrations is covered;
+ *   2. table-level REVOKEs — must come after (1), because a REVOKE issued
+ *      before the blanket GRANT is simply re-granted a statement later;
+ *   3. COLUMN-level GRANTs — must come after (2), because a Postgres REVOKE on
+ *      a table AUTOMATICALLY revokes that table's column privileges, so a
+ *      column grant issued earlier is wiped and the daemon ends the boot unable
+ *      to arm, extend or clear an ingest pause at all.
  *
- * Passwords are (re)set every boot from the persisted secrets, and the blanket
- * grants re-run every boot, so a table added by a later migration is covered
- * the first time it boots under this code.
+ * Exported for tests: the phase order, and the absence of any statement that
+ * would be illegal here, are assertable without a live cluster.
+ */
+export function appRoleStatements(args: {
+  secrets: RoleSecrets;
+  staleDrops: readonly string[];
+  uiExtras: readonly string[];
+  views: readonly string[];
+}): string[] {
+  const { secrets } = args;
+  return [
+    // Phase 0 — retire any overload left behind by a widened signature before
+    // the CREATEs run, so the pinned set is the only one that survives.
+    ...args.staleDrops,
+
+    // ── Phase 1 · blanket GRANTs ──────────────────────────────────────────
+    `DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PG_APP_RO_ROLE}') THEN
+    CREATE ROLE ${PG_APP_RO_ROLE} LOGIN IN ROLE ${PG_READONLY_ROLE};
+  END IF;
+END $$`,
+    `ALTER ROLE ${PG_APP_RO_ROLE} WITH PASSWORD ${quoteLiteral(secrets.appRo)}`,
+    // Idempotent even if the role pre-existed without the membership.
+    `GRANT ${PG_READONLY_ROLE} TO ${PG_APP_RO_ROLE}`,
+    `DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PG_APP_RW_ROLE}') THEN
+    CREATE ROLE ${PG_APP_RW_ROLE} LOGIN;
+  END IF;
+END $$`,
+    `ALTER ROLE ${PG_APP_RW_ROLE} WITH PASSWORD ${quoteLiteral(secrets.appRw)}`,
+    `GRANT USAGE ON SCHEMA ${PG_SCHEMA} TO ${PG_APP_RW_ROLE}`,
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${PG_SCHEMA} TO ${PG_APP_RW_ROLE}`,
+    `GRANT USAGE ON ALL SEQUENCES IN SCHEMA ${PG_SCHEMA} TO ${PG_APP_RW_ROLE}`,
+    // Future tables/sequences created by later migrations (which run as fortress)
+    // inherit the same grants.
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA ${PG_SCHEMA} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${PG_APP_RW_ROLE}`,
+    `ALTER DEFAULT PRIVILEGES IN SCHEMA ${PG_SCHEMA} GRANT USAGE ON SEQUENCES TO ${PG_APP_RW_ROLE}`,
+    ...apparatusStatements(),
+    ...uiRoleStatements(secrets.ui),
+
+    // ── Phase 2 · table-level REVOKEs ─────────────────────────────────────
+    // The migration journal is the migration runner's ledger (written only by
+    // the superuser DSN), so the app DML role has no business writing it. The
+    // blanket ALL-TABLES grant above covers it, so take the writes back.
+    `REVOKE INSERT, UPDATE, DELETE ON ${PG_SCHEMA}.schema_migrations FROM ${PG_APP_RW_ROLE}`,
+    ...revokeStatements(args.uiExtras, args.views),
+
+    // ── Phase 3 · column-level GRANTs ─────────────────────────────────────
+    ...columnGrantStatements(),
+  ];
+}
+
+/**
+ * Idempotently provision the login roles and the command-plane apparatus, run
+ * AFTER `migrate` (so the blanket schema grants cover every table this boot
+ * created):
+ *
+ *   • hx_app_ro    — LOGIN, member of hx_readonly (schema-wide SELECT from 0005).
+ *   • hx_app_rw    — LOGIN, schema DML, no DDL, no superuser; the daemon's only
+ *                    write role and the one reachable from the cloud, so it is
+ *                    fenced out of the console tables.
+ *   • hx_cmd_owner — NOLOGIN owner of the transition routines.
+ *   • hx_ui        — LOGIN console role; the only minter of commands.
+ *
+ * The WHOLE ordered block runs on ONE connection as ONE simple-query batch, so
+ * it is one implicit transaction: statement-per-connection autocommit would let
+ * a crash between a CREATE FUNCTION and its `REVOKE EXECUTE … FROM PUBLIC`
+ * leave PUBLIC durably able to drive the machine, or a crash between the
+ * blanket GRANT and the console REVOKEs leave the cloud-reachable role able to
+ * mint command rows until the next boot. Bun.SQL rejects explicit BEGIN/COMMIT
+ * on a pooled connection, so the batch path is the only way to get atomicity.
  */
 export async function ensureAppRoles(sql: ClusterSql, secrets: RoleSecrets): Promise<void> {
-  // hx_app_ro — SELECT only, via membership of hx_readonly.
-  const roExists = await sql.exists(
-    "postgres",
-    `SELECT 1 FROM pg_roles WHERE rolname = '${PG_APP_RO_ROLE}'`,
+  // ONE catalog read, then ONE batch — the reads decide which statements the
+  // batch carries, and boot has a second for the whole of role provisioning.
+  const [preflight] = await sql.query<Preflight>(PG_DATABASE, preflightQuery());
+  await sql.runMany(
+    PG_DATABASE,
+    appRoleStatements({
+      secrets,
+      staleDrops: staleOverloadDrops(preflight?.routines ?? []),
+      uiExtras: (preflight?.extras ?? []).map((r) => r.name),
+      views: (preflight?.views ?? []).map((r) => r.name),
+    }),
   );
-  if (!roExists) {
-    await sql.run(PG_DATABASE, `CREATE ROLE ${PG_APP_RO_ROLE} LOGIN IN ROLE ${PG_READONLY_ROLE}`);
-  }
-  await sql.run(PG_DATABASE, `ALTER ROLE ${PG_APP_RO_ROLE} WITH PASSWORD ${quoteLiteral(secrets.appRo)}`);
-  // Ensure membership even if the role pre-existed without it (idempotent).
-  await sql.run(PG_DATABASE, `GRANT ${PG_READONLY_ROLE} TO ${PG_APP_RO_ROLE}`);
+}
 
-  // hx_app_rw — schema DML, no DDL.
-  const rwExists = await sql.exists(
-    "postgres",
-    `SELECT 1 FROM pg_roles WHERE rolname = '${PG_APP_RW_ROLE}'`,
-  );
-  if (!rwExists) {
-    await sql.run(PG_DATABASE, `CREATE ROLE ${PG_APP_RW_ROLE} LOGIN`);
-  }
-  await sql.run(PG_DATABASE, `ALTER ROLE ${PG_APP_RW_ROLE} WITH PASSWORD ${quoteLiteral(secrets.appRw)}`);
-  await sql.run(PG_DATABASE, `GRANT USAGE ON SCHEMA ${PG_SCHEMA} TO ${PG_APP_RW_ROLE}`);
-  await sql.run(
-    PG_DATABASE,
-    `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${PG_SCHEMA} TO ${PG_APP_RW_ROLE}`,
-  );
-  await sql.run(PG_DATABASE, `GRANT USAGE ON ALL SEQUENCES IN SCHEMA ${PG_SCHEMA} TO ${PG_APP_RW_ROLE}`);
-  // Future tables/sequences created by later migrations (which run as fortress)
-  // inherit the same grants.
-  await sql.run(
-    PG_DATABASE,
-    `ALTER DEFAULT PRIVILEGES IN SCHEMA ${PG_SCHEMA} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${PG_APP_RW_ROLE}`,
-  );
-  await sql.run(
-    PG_DATABASE,
-    `ALTER DEFAULT PRIVILEGES IN SCHEMA ${PG_SCHEMA} GRANT USAGE ON SEQUENCES TO ${PG_APP_RW_ROLE}`,
-  );
-  // The migration journal is the migration runner's ledger (written only by the
-  // superuser DSN — see buildPostgresProvider.migrate), so the app DML role has no
-  // business writing it. The blanket ALL-TABLES grant above covers it, so REVOKE
-  // its writes back (SELECT stays — reading the journal is harmless). Runs after
-  // the grant every boot, so the revoke always wins.
-  await sql.run(
-    PG_DATABASE,
-    `REVOKE INSERT, UPDATE, DELETE ON ${PG_SCHEMA}.schema_migrations FROM ${PG_APP_RW_ROLE}`,
-  );
+/** Verify the D14 ownership invariants after provisioning. Reported rather than
+ *  thrown: the apparatus has just been re-applied, so a violation here means
+ *  something is actively rewriting the catalog underneath us, and bricking the
+ *  boot would take ingest down with it. */
+export async function auditConsolePlane(sql: ClusterSql): Promise<string[]> {
+  const rows = await sql.query<OwnershipProbe>(PG_DATABASE, ownershipProbeQuery());
+  const probe = rows[0];
+  if (!probe) return ["ownership probe returned no rows"];
+  return ownershipViolations(probe);
 }

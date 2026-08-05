@@ -31,6 +31,9 @@ import { signalReconcile } from "../ingest/reconcile-signal";
 import { sanitizeDbError } from "../host/postgres/sanitize";
 import { retryOnceOnTransientDbError } from "../host/postgres/pg-errors";
 import type { HxDb } from "../host/postgres/db";
+import type { HxIngestChannel } from "../host/postgres/schema/sessions";
+import { isIngestPaused, type IngestPausedError, type IngestQuiesce } from "../console/pause-gate";
+import type { ParkedArtifact } from "../console/artifact-replay";
 import type { HxIngestNotification } from "../host/types";
 import type { Embedder } from "../modules/embed-worker/openai";
 import type { SessionStore } from "../modules/session-vault/store/types";
@@ -40,6 +43,10 @@ import {
 } from "../modules/session-vault/store/session-metadata";
 import { handleMcpRequest } from "../mcp/server";
 import packageJson from "../../package.json";
+
+/** A direct-gateway upload never passed through the cloud, so it is NOT
+ *  eligible for raw-id residency disclosure. */
+const GATEWAY_CHANNEL: HxIngestChannel = "gateway";
 
 export interface GatewayLogger {
   info(msg: string, fields?: Record<string, unknown>): void;
@@ -69,6 +76,13 @@ export interface GatewayDeps {
   /** Push a realtime invalidation to the cloud after a direct-gateway ingest the
    *  cloud never relayed (MC-2415). Best-effort; optional. */
   notify?: (evt: HxIngestNotification) => void;
+  /** Counts deferred post-commit work so the pre-swap quiesce barrier sees it.
+   *  Counted at ENQUEUE: a commit accepted a second before a pause has queued
+   *  work a barrier that only watched executing calls would miss. */
+  quiesce?: IngestQuiesce;
+  /** Park a deferred artifact write the pause gate refused, for replay after
+   *  resume. Without it such a write would be logged and dropped. */
+  parkArtifact?: (entry: ParkedArtifact) => Promise<void>;
   logger: GatewayLogger;
   port: number;
 }
@@ -82,6 +96,18 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
+  });
+}
+
+/** A paused fortress answers with the SHIPPED offline shape, byte for byte:
+ *  `{"error":"vault_offline"}` at 503. The pause detail rides a Retry-After
+ *  HEADER and never the body — the hx client parses this body, and a field it
+ *  has never seen is a field it may reject. */
+function pausedResponse(err: IngestPausedError, now: number = Date.now()): Response {
+  const seconds = Math.max(1, Math.ceil((err.pausedUntil.getTime() - now) / 1000));
+  return new Response(JSON.stringify({ error: "vault_offline" }), {
+    status: 503,
+    headers: { "content-type": "application/json", "retry-after": String(seconds) },
   });
 }
 
@@ -246,6 +272,7 @@ async function ingestCommitMetadata(
       await ingestCommit(db, {
         attribution: attributionFromClaims(claims),
         key,
+        ingestChannel: GATEWAY_CHANNEL,
         chunkId,
         replace,
         chunkText,
@@ -289,6 +316,7 @@ async function ingestAgentCommitMetadata(
       await ingestAgentCommit(db, {
         attribution: attributionFromClaims(claims),
         key,
+        ingestChannel: GATEWAY_CHANNEL,
         agentId,
         chunkId,
         replace,
@@ -322,17 +350,33 @@ function deferPostCommit(
   laneKey: string,
   logger: GatewayLogger,
   fn: () => Promise<void>,
+  quiesce?: IngestQuiesce,
 ): void {
+  // Counted here, at enqueue — see GatewayDeps.quiesce.
+  quiesce?.enter();
   const prev = postCommitChains.get(laneKey) ?? Promise.resolve();
-  const next = prev.then(fn).catch((err: unknown) => {
-    // The chain must survive a failure. Log it here rather than assume fn did —
-    // the parent closure's artifact read-modify-write half has no internal
-    // try/log, so without this its errors would vanish.
-    logger.error("post-commit work failed", {
-      laneKey,
-      error: sanitizeDbError(err),
-    });
-  });
+  const next = prev
+    .then(fn)
+    .catch((err: unknown) => {
+      // The chain must survive a failure. Log it here rather than assume fn did —
+      // the parent closure's artifact read-modify-write half has no internal
+      // try/log, so without this its errors would vanish.
+      if (isIngestPaused(err)) {
+        // The work has been parked for replay by the closure itself; the chain
+        // RESOLVES so the barrier can reach zero. Re-enqueueing here would make
+        // the chain drain non-monotonic and the barrier never converge.
+        logger.info("post-commit work parked: ingest paused", {
+          laneKey,
+          pausedUntil: err.pausedUntil.toISOString(),
+        });
+        return;
+      }
+      logger.error("post-commit work failed", {
+        laneKey,
+        error: sanitizeDbError(err),
+      });
+    })
+    .finally(() => quiesce?.leave());
   postCommitChains.set(laneKey, next);
   void next.finally(() => {
     if (postCommitChains.get(laneKey) === next) postCommitChains.delete(laneKey);
@@ -480,39 +524,56 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                     JSON.parse((await store.readArtifactText(key, SESSION_METADATA_ARTIFACT).catch(() => null)) ?? "null"),
                   );
                   const now = new Date().toISOString();
-                  await store.writeArtifact(
-                    key,
-                    SESSION_METADATA_ARTIFACT,
-                    JSON.stringify({
-                      family: key.family,
-                      sessionId: key.sessionId,
-                      title: optionalString(meta?.title) ?? existing?.title ?? null,
-                      titleSource:
-                        meta?.titleSource === "user" ||
-                        meta?.titleSource === "ai" ||
-                        meta?.titleSource === "fallback"
-                          ? meta.titleSource
-                          : (existing?.titleSource ?? null),
-                      bytesUploaded: commit.totalBytes,
-                      eventCount: num(meta?.eventCount, existing?.eventCount ?? 0),
-                      userTextCount: num(meta?.userTextCount, existing?.userTextCount ?? 0),
-                      assistantCount: num(meta?.assistantCount, existing?.assistantCount ?? 0),
-                      // Same monotonic-on-append / authoritative-on-replace
-                      // rule as the Postgres row (ingestCommit) — an out-of-order /
-                      // backfill chunk must not regress the artifact either.
-                      lastActivityAt: replace
-                        ? (optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now)
-                        : (maxIso(existing?.lastActivityAt, optionalString(meta?.lastActivityAt)) ?? now),
-                      firstSeenAt: existing?.firstSeenAt ?? now,
-                      updatedAt: now,
-                      cwd: optionalString(meta?.cwd) ?? existing?.cwd ?? null,
-                      gitBranch: optionalString(meta?.gitBranch) ?? existing?.gitBranch ?? null,
-                      sourcePath: optionalString(meta?.sourcePath) ?? existing?.sourcePath ?? null,
-                      repoSlug: optionalString(meta?.repoSlug) ?? existing?.repoSlug ?? null,
-                      deviceName: existing?.deviceName ?? null,
-                    }),
-                  );
+                  const artifactText = JSON.stringify({
+                    family: key.family,
+                    sessionId: key.sessionId,
+                    title: optionalString(meta?.title) ?? existing?.title ?? null,
+                    titleSource:
+                      meta?.titleSource === "user" ||
+                      meta?.titleSource === "ai" ||
+                      meta?.titleSource === "fallback"
+                        ? meta.titleSource
+                        : (existing?.titleSource ?? null),
+                    bytesUploaded: commit.totalBytes,
+                    eventCount: num(meta?.eventCount, existing?.eventCount ?? 0),
+                    userTextCount: num(meta?.userTextCount, existing?.userTextCount ?? 0),
+                    assistantCount: num(meta?.assistantCount, existing?.assistantCount ?? 0),
+                    // Same monotonic-on-append / authoritative-on-replace
+                    // rule as the Postgres row (ingestCommit) — an out-of-order /
+                    // backfill chunk must not regress the artifact either.
+                    lastActivityAt: replace
+                      ? (optionalString(meta?.lastActivityAt) ?? existing?.lastActivityAt ?? now)
+                      : (maxIso(existing?.lastActivityAt, optionalString(meta?.lastActivityAt)) ?? now),
+                    firstSeenAt: existing?.firstSeenAt ?? now,
+                    updatedAt: now,
+                    cwd: optionalString(meta?.cwd) ?? existing?.cwd ?? null,
+                    gitBranch: optionalString(meta?.gitBranch) ?? existing?.gitBranch ?? null,
+                    sourcePath: optionalString(meta?.sourcePath) ?? existing?.sourcePath ?? null,
+                    repoSlug: optionalString(meta?.repoSlug) ?? existing?.repoSlug ?? null,
+                    deviceName: existing?.deviceName ?? null,
                   });
+                  try {
+                    await store.writeArtifact(key, SESSION_METADATA_ARTIFACT, artifactText);
+                  } catch (err) {
+                    // The commit is already acknowledged and the bytes are
+                    // durable; only this sidecar is left. Park it so resume
+                    // replays it — dropping it would silently lose the metadata
+                    // the commit promised.
+                    if (isIngestPaused(err) && deps.parkArtifact) {
+                      await deps.parkArtifact({
+                        key,
+                        name: SESSION_METADATA_ARTIFACT,
+                        text: artifactText,
+                        parkedAt: new Date().toISOString(),
+                        // Carried so the replay can apply the same rule this
+                        // composition did: a replace is authoritative and its
+                        // totals may legitimately be smaller.
+                        replace,
+                      });
+                    }
+                    throw err;
+                  }
+                  }, deps.quiesce);
                 return json(commit);
               }
             case "/sessions/agent-append-url":
@@ -540,18 +601,22 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                 const chunkText = await store.readChunkText(storeKey, chunkId).catch(() => "");
                 const commit = await handleAgentCommit(store, { ...key, agentId, chunkId, replace });
                 const agentMeta = metaRecord(body.meta);
-                deferPostCommit(`${userId}:${key.family}:${key.sessionId}:a:${agentId}`, deps.logger, () =>
-                  ingestAgentCommitMetadata(
-                    deps,
-                    claims,
-                    key,
-                    agentId,
-                    chunkId,
-                    replace,
-                    chunkText,
-                    commit,
-                    agentMeta,
-                  ),
+                deferPostCommit(
+                  `${userId}:${key.family}:${key.sessionId}:a:${agentId}`,
+                  deps.logger,
+                  () =>
+                    ingestAgentCommitMetadata(
+                      deps,
+                      claims,
+                      key,
+                      agentId,
+                      chunkId,
+                      replace,
+                      chunkText,
+                      commit,
+                      agentMeta,
+                    ),
+                  deps.quiesce,
                 );
                 return json(commit);
               }
@@ -578,6 +643,10 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
           return json(await handleListSessionMetadata(store, { userId }));
         }
       } catch (err) {
+        // A paused fortress is not a failed one: no error-level line, and the
+        // shipped offline shape rather than internal_error, so an hx client
+        // that predates the pause retries instead of surfacing a fault.
+        if (isIngestPaused(err)) return pausedResponse(err);
         deps.logger.error("gateway handler failed", {
           path: url.pathname,
           error: sanitizeDbError(err),

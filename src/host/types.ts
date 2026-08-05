@@ -1,4 +1,9 @@
-import type { MsgData, MsgReply } from "../protocol";
+import type {
+  FortressQueryPayload,
+  FortressQueryResultPayload,
+  MsgData,
+  MsgReply,
+} from "../protocol";
 
 export interface MessageDispatcher {
   dispatch(data: MsgData): Promise<MsgReply | undefined>;
@@ -14,6 +19,12 @@ export interface FortressPostgresConfig {
   pgvectorUrl?: string;
 }
 
+export interface FortressRosterConfig {
+  /** How long a departed member's roster row is kept before the daily sweep
+   *  removes it. The workbench tells members the same number. */
+  inactivePurgeDays: number;
+}
+
 export interface FortressConfig {
   schemaVersion: 1;
   cloud: {
@@ -26,6 +37,7 @@ export interface FortressConfig {
     enabled: string[];
   };
   postgres?: FortressPostgresConfig;
+  roster?: FortressRosterConfig;
 }
 
 export interface ConfigStore {
@@ -58,6 +70,16 @@ export interface HostStatusSnapshot {
     startedAt: string | null;
     updatedAt: string;
     error: string | null;
+    /** When this snapshot was WRITTEN — refreshed by the heartbeat as well as by
+     *  every transition, so a reader can tell "nothing has changed" from "the
+     *  daemon stopped writing". Absent on a file written by a pre-heartbeat
+     *  binary; readers must treat that as age-unknown, never as stale. */
+    writtenAt?: string;
+    /** The daemon's RESOLVED fortress root. The console compares it against its
+     *  own by file identity, so a second daemon on a different root is visible
+     *  as a mismatch instead of silently serving the wrong install. Absent on a
+     *  pre-console file. */
+    root?: string;
   };
   connection: {
     state: ConnectionState;
@@ -105,6 +127,14 @@ export interface CloudConnection {
   /** Best-effort push of an hx ingest notification to the cloud. No-op when the
    *  tunnel isn't currently open. */
   notifyIngest(evt: HxIngestNotification): void;
+  /** Ask the hub a bounded question. OPTIONAL because a transport that cannot
+   *  ask is a real state (a test double, a fortress with no tunnel) and the
+   *  callers must degrade to "unavailable" rather than assume an answer. Rejects
+   *  with FortressQueryUnavailable; never hangs, never invents a value. */
+  request?(
+    query: FortressQueryPayload,
+    timeoutMs?: number,
+  ): Promise<FortressQueryResultPayload>;
 }
 
 export interface ModuleSupervisor {

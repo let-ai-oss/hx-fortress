@@ -178,9 +178,9 @@ function defineSemanticSuite({ label, enabled, base }: SuiteOptions): void {
       await drain.stop();
 
       const baseInput = { attribution: ATTR, totalBytes: 256, componentCount: 1, replace: false as const, chunkId: "c1" };
-      await ingestCommit(db, { ...baseInput, key: { userId: USER, family: FAMILY, sessionId: SID_DB }, chunkText: CHUNK_DB, meta: { title: "DB" } });
-      await ingestCommit(db, { ...baseInput, key: { userId: USER, family: FAMILY, sessionId: SID_COOK }, chunkText: CHUNK_COOK, meta: { title: "Cook" } });
-      await ingestCommit(db, { ...baseInput, key: { userId: USER, family: FAMILY, sessionId: SID_ASTRO }, chunkText: CHUNK_ASTRO, meta: { title: "Astro" } });
+      await ingestCommit(db, { ingestChannel: "tunnel", ...baseInput, key: { userId: USER, family: FAMILY, sessionId: SID_DB }, chunkText: CHUNK_DB, meta: { title: "DB" } });
+      await ingestCommit(db, { ingestChannel: "tunnel", ...baseInput, key: { userId: USER, family: FAMILY, sessionId: SID_COOK }, chunkText: CHUNK_COOK, meta: { title: "Cook" } });
+      await ingestCommit(db, { ingestChannel: "tunnel", ...baseInput, key: { userId: USER, family: FAMILY, sessionId: SID_ASTRO }, chunkText: CHUNK_ASTRO, meta: { title: "Astro" } });
       pass1 = await worker.runOnce(); // run the embed worker exactly once
     }, 120_000);
 
@@ -240,6 +240,7 @@ function defineSemanticSuite({ label, enabled, base }: SuiteOptions): void {
 
     test("(d) a replace re-ingest leaves no orphaned embeddings (A7 in-txn delete)", async () => {
       await ingestCommit(db, {
+        ingestChannel: "tunnel",
         attribution: ATTR,
         key: { userId: USER, family: FAMILY, sessionId: SID_DB },
         chunkId: "c2",

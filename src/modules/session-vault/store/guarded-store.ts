@@ -17,6 +17,7 @@
 
 import type {
   AppendOptions,
+  BucketConfigFact,
   ComposeResult,
   DeleteSessionOptions,
   DeleteSessionResult,
@@ -25,6 +26,7 @@ import type {
   SessionStore,
   SignedDownload,
   SignedUpload,
+  StagingUploadOptions,
 } from "./types.js";
 import type { ScopedLogger } from "../../../host/types.js";
 
@@ -182,8 +184,8 @@ export class GuardedStore implements SessionStore {
     }
   }
 
-  signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload> {
-    return this.guard("signStagingUpload", this.opTimeoutMs, (s) => s.signStagingUpload(key, chunkId));
+  signStagingUpload(key: SessionKey, chunkId: string, opts?: StagingUploadOptions): Promise<SignedUpload> {
+    return this.guard("signStagingUpload", this.opTimeoutMs, (s) => s.signStagingUpload(key, chunkId, opts));
   }
   readChunkText(key: SessionKey, chunkId: string): Promise<string> {
     return this.guard("readChunkText", this.heavyOpTimeoutMs, (s) => s.readChunkText(key, chunkId));
@@ -214,6 +216,9 @@ export class GuardedStore implements SessionStore {
   readArtifactText(key: SessionKey, name: string): Promise<string | null> {
     return this.guard("readArtifactText", this.opTimeoutMs, (s) => s.readArtifactText(key, name));
   }
+  listSessionArtifacts(key: SessionKey): Promise<string[]> {
+    return this.guard("listSessionArtifacts", this.opTimeoutMs, (s) => s.listSessionArtifacts(key));
+  }
   listSessionMetadata(userId: string): Promise<SessionMetadata[]> {
     // Scan class: one sequential metadata read per session — a few thousand
     // sessions on a direct-gateway list legitimately exceeds the heavy budget.
@@ -221,6 +226,12 @@ export class GuardedStore implements SessionStore {
   }
   listAllCanonicalKeys(): Promise<SessionKey[]> {
     return this.guard("listAllCanonicalKeys", this.scanTimeoutMs, (s) => s.listAllCanonicalKeys());
+  }
+  getBucketVersioning(): Promise<BucketConfigFact> {
+    return this.guard("getBucketVersioning", this.opTimeoutMs, (s) => s.getBucketVersioning());
+  }
+  getLifecycle(): Promise<BucketConfigFact> {
+    return this.guard("getLifecycle", this.opTimeoutMs, (s) => s.getLifecycle());
   }
   selfTest(): Promise<void> {
     return this.guard("selfTest", this.opTimeoutMs, (s) => s.selfTest());

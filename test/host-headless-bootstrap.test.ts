@@ -134,6 +134,48 @@ describe("applyHeadlessBootstrap", () => {
     });
   });
 
+  test("REFUSES to rebuild over credentials it could not read", async () => {
+    // The refusal in readVaultCredentials exists so a torn credentials.json is
+    // never silently overwritten. Swallowing it here reinstated the loss on the
+    // container path — every boot rewrote the file from the environment, so
+    // openaiApiKey was destroyed and the CAS version rewound — with the raw,
+    // lock-free writer and no operator in the loop.
+    await expect(
+      applyHeadlessBootstrap({
+        env: {
+          FORTRESS_STORAGE_BUCKET: "letai-sessions",
+          FORTRESS_GCS_PROJECT_ID: "letai-cloud",
+          FORTRESS_GCS_SA_KEY: JSON.stringify(SA_KEY),
+        },
+        credentialStore,
+        pendingEnrollmentStore: pendingStore,
+        writeVaultCredentials,
+        readVaultCredentials: () =>
+          Promise.reject(new Error("credentials.json exists but is not valid JSON")),
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow("will not rebuild");
+    // Nothing was written over it.
+    expect(written).toHaveLength(0);
+  });
+
+  test("an ABSENT credentials file is still a fresh boot, not a refusal", async () => {
+    const result = await applyHeadlessBootstrap({
+      env: {
+        FORTRESS_STORAGE_BUCKET: "letai-sessions",
+        FORTRESS_GCS_PROJECT_ID: "letai-cloud",
+        FORTRESS_GCS_SA_KEY: JSON.stringify(SA_KEY),
+      },
+      credentialStore,
+      pendingEnrollmentStore: pendingStore,
+      writeVaultCredentials,
+      readVaultCredentials: () => Promise.resolve(null),
+      logger: silentLogger,
+    });
+    expect(result.wroteVaultCredentials).toBe(true);
+    expect(written).toHaveLength(1);
+  });
+
   test("does not write a pending enrollment when a credential already exists", async () => {
     const cred: CloudCredential = {
       orgId: "org-1",
