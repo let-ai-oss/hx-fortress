@@ -129,6 +129,64 @@ or with its own `entrypoint:` override will come up refusing on the first boot
 after the upgrade. Drop the wrapper, or run `hx-fortress host` directly as the
 entrypoint and supervise the console yourself.
 
+## The hosted default fortress
+
+let.ai runs one fortress of its own on Railway — the destination for every
+organization that has not enrolled one. It is a container like any customer's,
+with four differences that are otherwise rediscovered the hard way.
+
+**Its console takes two variables and no shell.**
+
+```sh
+FORTRESS_UI_ENABLE=1
+FORTRESS_UI_PUBLIC_URL=https://<service>.up.railway.app
+```
+
+Railway is docker-class (`RAILWAY_*` is one of the detection signals), so the
+first bind rule applies: the console binds dual-stack with no further gesture,
+because the platform publishes through host indirection and terminates TLS in
+front of it. `container-run` re-reads the enablement before every respawn, so
+the variable IS the switch — `ui disable` refuses while it is set.
+
+**Route the platform's one port at the CONSOLE, not the gateway.** The image
+exposes 8787 (ingest gateway) and 8788 (console); Railway routes one port per
+service. This fortress needs no inbound gateway at all — it dials OUT to the hub
+and every call arrives on that connection. Set `FORTRESS_UI_PORT` and point the
+service's target port at it. Nothing reads Railway's own `$PORT`.
+
+**Leave SSO off.** One-click entry exists for a fortress a customer org owns;
+this one belongs to `DEFAULT_FORTRESS_ORG_ID`, so there is no owner to show a
+button to. The only consequence is that the fleet view's Console column stays
+empty for it — and the console URL is then never advertised to the hub, which is
+one disclosure fewer. Password sign-in is unaffected: SSO only ever gated the
+hand-off.
+
+**Console accounts are created by shell, once per person — never per release.**
+
+```sh
+railway ssh
+hx-fortress ui user create <login> --role operator   # prints a one-time setup link
+```
+
+There is no other way to make one. `sso/exchange` mints an ENTRY token that
+annotates a sign-in, never an account, which is why the console says on every
+screen that logins are created on this host by whoever has a shell on it. Hand
+over the printed link and the person sets their own password; `ui user reset
+<login>` re-issues it.
+
+Accounts persist across releases — `users.json` lives at `/data/ui/users.json`
+and is PG-independent by design, so it survives an image replacement and a lost
+database alike. Sign-in SESSIONS do not: that table is in memory, so a redeploy
+asks everyone for their password again. Lockouts DO persist and are restored at
+boot, so redeploying is not a way to clear one.
+
+**All of that rests on `/data` being a real volume.** Without one it is the
+container's writable layer, and a redeploy discards the accounts, the enrollment
+credential, `pg.json` and the embedded cluster together — the symptom being
+operators and enrollment that have to be recreated on every deploy. Mount it
+writable by the image's uid 10001, or use a named volume, which inherits the
+image's ownership.
+
 ## The untrusted window
 
 An older binary re-grants the daemon's write role full DML on its first boot,
