@@ -19,6 +19,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 
 import { validateCommandParams } from "../src/console/command-params";
+import { createCommandGateway } from "../src/console/command-gateway";
 import { consumeCredentialRef } from "../src/console/cmd-creds";
 import {
   addInFlight,
@@ -488,5 +489,61 @@ describe("the credential a rotation carries", () => {
       target: "openai",
       apiKey: "sk-the-new-embedding-key",
     });
+  });
+});
+
+describe("the command gateway decodes what the driver actually hands back", () => {
+  /** A db that answers `listOpen` with what Bun.SQL returns for a jsonb column
+   *  on the embedded Postgres this appliance ships: the raw JSON TEXT. The same
+   *  driver returns a parsed object against other servers, so this cannot be
+   *  pinned by an e2e against one of them — it has to be asserted here. */
+  const dbReturning = (params: unknown): HxDb =>
+    ({
+      execute: () =>
+        Promise.resolve({
+          rows: [
+            {
+              id: "6f1d0e6a-0000-4000-8000-000000000001",
+              kind: "run_audit",
+              params,
+              status: "requested",
+              requested_at: "2026-08-05T06:56:46.312Z",
+              deadline_at: null,
+              credential_ref: null,
+            },
+          ],
+        }),
+    }) as unknown as HxDb;
+
+  test("a jsonb column delivered as TEXT still reaches the validator as an object", async () => {
+    // The whole console write surface ran through this. `validateCommandParams`
+    // opens with `typeof params !== "object"`, so a string meant EVERY minted
+    // command was rejected with `rejected_invalid_params: params must be an
+    // object` — about a value that was an object. Observed live: Run audit
+    // confirmed in the console, one rejected row in console_commands, audit_runs
+    // empty, and nothing on screen, because the panel reports the daemon's
+    // answer rather than the request's success.
+    const [row] = await createCommandGateway(dbReturning('{"scope":"console"}')).listOpen();
+    expect(typeof row?.params).toBe("object");
+    expect(row?.params).toEqual({ scope: "console" });
+    expect(validateCommandParams(row?.kind, row?.params).ok).toBe(true);
+  });
+
+  test("an already-parsed object passes through untouched", async () => {
+    const [row] = await createCommandGateway(dbReturning({ scope: "console" })).listOpen();
+    expect(row?.params).toEqual({ scope: "console" });
+  });
+
+  test("text that is not JSON is left alone for the validator to refuse", async () => {
+    // Never a throw: one malformed row must not take down the poll for the rest.
+    const [row] = await createCommandGateway(dbReturning("{ not json")).listOpen();
+    expect(row?.params).toBe("{ not json");
+    expect(validateCommandParams(row?.kind, row?.params).ok).toBe(false);
+  });
+
+  test("a JSON scalar is still refused — parsing is not permission", () => {
+    expect(validateCommandParams("run_audit", 7).ok).toBe(false);
+    expect(validateCommandParams("run_audit", ["scope"]).ok).toBe(false);
+    expect(validateCommandParams("run_audit", null).ok).toBe(false);
   });
 });

@@ -65,6 +65,30 @@ describe("the daemon-state predicate", () => {
     ).toBe("stale");
   });
 
+  test("with NO supervisor to ask, the heartbeat decides", () => {
+    // The container image runs `host` and `ui` under its own supervisor and
+    // carries no systemd; an undrivable platform has no manager at all. Both
+    // answer "no pid" to a question they cannot answer, and taking that as an
+    // answer reported a healthy, heartbeating daemon as `stopped` — which
+    // disabled Run audit, the witness toggles, Acknowledge, checkup and
+    // rotation, since the console gates every one of them on this value.
+    expect(daemonState({ service: null, snapshot: snapshot(), now: NOW })).toBe("running");
+    // Nothing published yet is a start in progress, not a stopped daemon.
+    expect(daemonState({ service: null, snapshot: null, now: NOW })).toBe("starting");
+    // A daemon that died stops writing, so the age leg still catches it —
+    // absence of a supervisor removes evidence, it does not invent any.
+    expect(
+      daemonState({
+        service: null,
+        snapshot: snapshot({ writtenAt: new Date(NOW.getTime() - STATUS_STALE_MS - 1000).toISOString() }),
+        now: NOW,
+      }),
+    ).toBe("stale");
+    // …and its own clean shutdown is still honoured.
+    expect(daemonState({ service: null, snapshot: snapshot({ state: "stopped" }), now: NOW })).toBe("stopped");
+    expect(daemonState({ service: null, snapshot: snapshot({ state: "failed" }), now: NOW })).toBe("failed");
+  });
+
   test("a pre-heartbeat file is age-UNKNOWN, not stale", () => {
     const state = daemonState({
       service: { loaded: true, pid: 42 },

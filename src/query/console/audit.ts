@@ -302,6 +302,26 @@ export const FAILING_VERDICTS: readonly ResidencyVerdict[] = RESIDENCY_VERDICTS.
  * the page. `not_delivered_here` is never downgraded by an acknowledgement, and
  * this join is where that has to be true.
  */
+/**
+ * The latest completed run ITSELF — not its findings.
+ *
+ * `auditFindingsQuery` joins the run to its failing rows, so a run that found
+ * nothing returns zero rows and carries no `runStartedAt` with it. The panel
+ * then rendered nothing at all, and "the audit ran at 10:10 and everything is
+ * clean" — the single answer a compliance reader came for — was the one state
+ * the console could not say. It also made a broken command plane invisible:
+ * a run that never happened and a run that found nothing looked identical.
+ */
+export function auditLastRunQuery(): SQL {
+  return sql`
+    SELECT started_at AS "startedAt", finished_at AS "finishedAt",
+           sessions_checked AS "sessionsChecked", confirmed AS "confirmed",
+           qualification AS "qualification", trigger AS "trigger"
+      FROM hx.audit_runs
+     WHERE error IS NULL AND finished_at IS NOT NULL
+     ORDER BY started_at DESC LIMIT 1`;
+}
+
 export function auditFindingsQuery(limit = FINDINGS_PAGE_MAX): SQL {
   return sql`
     WITH latest AS (

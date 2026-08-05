@@ -170,6 +170,19 @@ export interface PostureView {
     shown: number;
     rows: ResidencyFindingRow[];
   } | null;
+  /** The latest completed run, whatever it found. Carried separately from
+   *  `findings` because a CLEAN run has no findings to hang a timestamp on, and
+   *  a compliance surface that cannot say "checked, and clean, at 10:10" is not
+   *  reporting the result of the action the operator just took. `null` means no
+   *  run has ever completed here — which is not the same as a clean one. */
+  lastRun: {
+    startedAt: string | null;
+    finishedAt: string | null;
+    sessionsChecked: number;
+    confirmed: number;
+    qualification: string | null;
+    trigger: string | null;
+  } | null;
 }
 
 export interface ResidencyFindingRow {

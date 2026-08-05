@@ -113,6 +113,10 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
   });
   const status = new FileStatusReader(paths.status);
   const service = getServiceManager();
+  /** Is there a unit to ask about at all? `container` is the image's own
+   *  supervisor; `unsupported` is a platform with no manager to drive. */
+  const askSupervisor =
+    options.serviceManager !== "container" && options.serviceManager !== "unsupported";
   const credentialStore = new FileCredentialStore(paths.credentials);
 
   let handle: { db: HxDb; dsn: string } | null = null;
@@ -301,9 +305,23 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       void refresh();
       return handle?.db ?? null;
     },
-    database: () => databaseState,
+    // Same lazy re-read `db()` does, for the same reason. This memo is the only
+    // thing the Overview's database tile reads, and it was resolved once at
+    // mount: a console started BEFORE Postgres came ready then reported
+    // "not configured" until the operator happened to open some other view that
+    // touched the database. `refresh()` de-dupes and short-circuits on an
+    // unchanged DSN, so a 10s poll costs two file reads.
+    database: () => {
+      void refresh();
+      return databaseState;
+    },
     status: () => status.read().catch(() => null),
-    service: () => service.state().catch(() => ({ loaded: false, pid: null })),
+    // Ask the supervisor only where there IS one. Under an orchestrator, or on
+    // a platform this build cannot drive, its "no pid" is the absence of an
+    // answer rather than an answer — and taken as one it reported a healthy
+    // daemon as stopped and disabled every operational action on this console.
+    // The write port already refuses for the same reason (below).
+    service: () => (askSupervisor ? service.state().catch(() => ({ loaded: false, pid: null })) : Promise.resolve(null)),
     credentials: () => credentialStore.load().catch(() => null),
     egress,
     // The console process does not build a store: it would need the same

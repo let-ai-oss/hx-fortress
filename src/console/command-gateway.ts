@@ -63,6 +63,27 @@ export function createUnavailableCommandGateway(): CommandGateway {
   };
 }
 
+/** `params` is a jsonb column, and Bun.SQL — the driver under this handle —
+ *  hands jsonb back as the raw JSON TEXT rather than a parsed value. The
+ *  validator's first test is `typeof params === "object"`, so every command the
+ *  console minted was rejected with `rejected_invalid_params: params must be an
+ *  object` about a value that WAS an object, and the panel that shows "the
+ *  daemon's answer, not this request's success" showed nothing at all. Parse at
+ *  this boundary — the one place that knows it is talking to a database — and
+ *  leave the validator's contract strict.
+ *
+ *  A row whose text does not parse is passed through UNCHANGED so the validator
+ *  rejects it by its own rules, rather than being turned into a throw that would
+ *  take down the whole poll for one bad row. */
+function decodeParams(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
 export function createCommandGateway(db: HxDb): CommandGateway {
   return {
     async listOpen(): Promise<CommandRow[]> {
@@ -75,7 +96,7 @@ export function createCommandGateway(db: HxDb): CommandGateway {
       return rows<RawCommand>(result).map((row) => ({
         id: String(row.id),
         kind: row.kind,
-        params: row.params,
+        params: decodeParams(row.params),
         status: row.status,
         requestedAt: asDate(row.requested_at),
         deadlineAt: row.deadline_at === null ? null : asDate(row.deadline_at),

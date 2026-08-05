@@ -427,6 +427,17 @@ export interface PostureView {
     shown: number;
     rows: ResidencyFindingRow[];
   } | null;
+  /** The latest completed run, whatever it found — carried apart from
+   *  `findings` because a CLEAN run has no finding row to hang a timestamp on.
+   *  `null` means no run has ever completed here, which is not the same thing. */
+  lastRun: {
+    startedAt: string | null;
+    finishedAt: string | null;
+    sessionsChecked: number;
+    confirmed: number;
+    qualification: string | null;
+    trigger: string | null;
+  } | null;
 }
 
 export interface ResidencyFindingRow {

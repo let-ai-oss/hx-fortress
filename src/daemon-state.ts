@@ -33,7 +33,16 @@ export type DaemonState =
   | "failed";
 
 export interface DaemonStateInput {
-  service: { loaded: boolean; pid: number | null };
+  /** What the supervisor says — or NULL when there is no supervisor to ask.
+   *
+   *  Under an orchestrator the daemon is a SIBLING PROCESS, not a unit: the
+   *  container image runs `host` and `ui` under its own supervisor and carries
+   *  no systemd, and an undrivable platform has no manager at all. Both answer
+   *  "no pid" to a question they cannot answer, and believing it reported a
+   *  healthy, heartbeating daemon as `stopped` — which is not cosmetic, because
+   *  the console disables Run audit, the witness toggles, Acknowledge, checkup
+   *  and rotation on exactly that value. */
+  service: { loaded: boolean; pid: number | null } | null;
   snapshot: HostStatusSnapshot | null;
   now?: Date;
 }
@@ -41,8 +50,15 @@ export interface DaemonStateInput {
 export function daemonState(input: DaemonStateInput): DaemonState {
   const { service, snapshot } = input;
   const now = input.now ?? new Date();
-  if (service.pid === null) return service.loaded ? "loaded" : "stopped";
-  if (!snapshot || snapshot.host.pid !== service.pid) return "starting";
+  if (service === null) {
+    // The daemon's own heartbeat is the only evidence here, and it is enough:
+    // a daemon that died stops writing and falls to `stale` below, which is the
+    // same conclusion by a different route.
+    if (!snapshot) return "starting";
+  } else {
+    if (service.pid === null) return service.loaded ? "loaded" : "stopped";
+    if (!snapshot || snapshot.host.pid !== service.pid) return "starting";
+  }
   // A daemon that shut down cleanly says so in its own last write; reporting
   // that as "stale" would send an operator hunting a crash that never happened.
   if (snapshot.host.state === "stopped") return "stopped";

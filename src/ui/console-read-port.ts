@@ -24,6 +24,16 @@ import {
 } from "../console/adoption";
 import { readSpool } from "../console/audit-spool";
 
+/** One row of `auditLastRunQuery`. */
+interface LastRunRow {
+  startedAt: unknown;
+  finishedAt: unknown;
+  sessionsChecked: unknown;
+  confirmed: unknown;
+  qualification: string | null;
+  trigger: string | null;
+}
+
 /** One row of `auditFindingsQuery`, as the driver hands it back. */
 interface FindingRow {
   org: string;
@@ -63,6 +73,7 @@ import { BUCKET_CONFIG_UNAVAILABLE, type SessionStore } from "../modules/session
 import {
   auditExportQuery,
   auditFindingsQuery,
+  auditLastRunQuery,
   auditPageQuery,
   auditPageLimit,
   AUDIT_EXPORT_MAX,
@@ -144,7 +155,7 @@ export interface ConsoleReadPortDeps {
   database: () => ConsoleDbState;
   /** The daemon's published snapshot, or null. */
   status: () => Promise<HostStatusSnapshot | null>;
-  service: () => Promise<{ loaded: boolean; pid: number | null }>;
+  service: () => Promise<{ loaded: boolean; pid: number | null } | null>;
   /** The name of the lifecycle owner, as the CLI resolved it. */
   serviceManager: () => string;
   credentials: () => Promise<CloudCredential | null>;
@@ -264,6 +275,9 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     const findingRows = db
       ? await query<FindingRow>(() => auditFindingsQuery()).catch(() => null)
       : null;
+    // Read separately, for the same reason it is carried separately: a clean run
+    // has no finding row to hang its timestamp on.
+    const runRows = db ? await query<LastRunRow>(() => auditLastRunQuery()).catch(() => null) : null;
 
     const view: PostureView = {
       state,
@@ -272,6 +286,16 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
       routedHere: data?.routedHere ?? null,
       qualification: postureQualification(snapshot, data?.cloudOnlySessions ?? 0, at),
       witness,
+      lastRun: runRows?.[0]
+        ? {
+            startedAt: isoOrNull(runRows[0].startedAt),
+            finishedAt: isoOrNull(runRows[0].finishedAt),
+            sessionsChecked: Number(runRows[0].sessionsChecked ?? 0),
+            confirmed: Number(runRows[0].confirmed ?? 0),
+            qualification: runRows[0].qualification ?? null,
+            trigger: runRows[0].trigger ?? null,
+          }
+        : null,
       findings: findingRows
         ? {
             runStartedAt: isoOrNull(findingRows[0]?.runStartedAt),
@@ -326,7 +350,7 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     async status(): Promise<ConsoleStatusView> {
       const [snapshot, service] = await Promise.all([
         deps.status().catch(() => null),
-        deps.service().catch(() => ({ loaded: false, pid: null })),
+        deps.service().catch(() => ({ loaded: false, pid: null }) as { loaded: boolean; pid: number | null } | null),
       ]);
       const state = daemonState({ service, snapshot, now: now() });
       const database = deps.database();

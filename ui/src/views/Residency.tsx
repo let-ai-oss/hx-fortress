@@ -383,7 +383,42 @@ function FindingsPanel(props: {
       </Panel>
     );
   }
-  if (!data || data.rows.length === 0) return null;
+  // A run that found nothing is a RESULT, and it was the one result this panel
+  // could not state: it returned null, so the page after a clean audit was
+  // byte-identical to the page before it. On a compliance surface "checked, and
+  // clean, at 10:10" is the answer the reader came for — and rendering nothing
+  // also made a command plane that rejected every request indistinguishable from
+  // one that worked perfectly.
+  if (!data || data.rows.length === 0) {
+    const run = posture?.lastRun ?? null;
+    if (!run) {
+      return (
+        <Panel
+          title="What the last run found"
+          sub="No audit has completed on this host yet. That is not the same as a run with nothing to report."
+        >
+          <div className="banner">
+            <span className="badge">–</span>
+            <span className="btxt">Run the audit above to record one.</span>
+          </div>
+        </Panel>
+      );
+    }
+    return (
+      <Panel
+        title="What the last run found"
+        sub={`From the run of ${fmt.when(run.startedAt)}${run.trigger ? ` (${run.trigger})` : ""}.`}
+      >
+        <div className="banner ok">
+          <span className="badge">✓</span>
+          <span className="btxt">
+            Nothing to report — {run.qualification ?? "every checked session is held here"}.{" "}
+            {run.sessionsChecked} session(s) checked, {run.confirmed} confirmed.
+          </span>
+        </div>
+      </Panel>
+    );
+  }
 
   const acknowledge = async (row: ResidencyFindingRow): Promise<void> => {
     const ok = await ask({

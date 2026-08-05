@@ -28,6 +28,9 @@ import { runMigrations } from "../../src/host/postgres/migrate";
 import type { RoleSecrets } from "../../src/host/postgres/roles";
 import { createHxDb } from "../../src/host/postgres/db";
 import { createCommandGateway } from "../../src/console/command-gateway";
+import { validateCommandParams } from "../../src/console/command-params";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { auditLastRunQuery } from "../../src/query/console/audit";
 import { runBootFence, REJECT_BOOT_FENCE } from "../../src/console/commands";
 import { readCurrentEpisode } from "../../src/console/ingest-control-db";
 import { effectivePause, PAUSE_CAP_MS } from "../../src/console/ingest-control";
@@ -305,6 +308,32 @@ END $$`);
       return row.id;
     }
 
+    test("params survive the driver as an OBJECT, so the validator can accept them", async () => {
+      // The regression this exists for: `params` is jsonb and Bun.SQL — the
+      // driver under HxDb — returns jsonb as raw JSON TEXT. The daemon's poll
+      // fed that string straight to validateCommandParams, whose first test is
+      // `typeof params === "object"`, so EVERY console-minted command was
+      // rejected with `rejected_invalid_params: params must be an object` about
+      // a value that was an object. Observed live: Run audit confirmed in the
+      // console, `console_commands` holding one rejected row, `audit_runs`
+      // empty, and nothing on screen — the panel reports the daemon's answer,
+      // so the rejection was invisible.
+      //
+      // A fake gateway returning objects cannot fail this. It has to be the
+      // real driver, which is why it lives in the e2e suite.
+      const [row] = await query<{ id: string }>(
+        uiDsn,
+        `INSERT INTO hx.console_commands (kind, params)
+         VALUES ('run_audit', '{"scope":"console"}'::jsonb) RETURNING id`,
+      );
+      const open = await createCommandGateway(createHxDb(rwDsn)).listOpen();
+      const mine = open.find((c) => c.id === row.id);
+      expect(mine).toBeDefined();
+      expect(typeof mine?.params).toBe("object");
+      expect(mine?.params).toEqual({ scope: "console" });
+      expect(validateCommandParams(mine?.kind, mine?.params).ok).toBe(true);
+    });
+
     test("a terminal row cannot be reopened under any argument shape", async () => {
       const id = await mint();
       await query(rwDsn, `SELECT hx.claim_command('${id}'::uuid, 'pid:1', false)`);
@@ -356,6 +385,33 @@ END $$`);
       expect(
         await refused(rwDsn, `SELECT hx.complete_command('${id}'::uuid, 'requested', NULL, NULL)`),
       ).toMatch(/done or failed/);
+    });
+
+    test("a CLEAN run is still reportable — the run is readable without a finding", async () => {
+      // auditFindingsQuery JOINs the run to its failing rows, so a run that
+      // found nothing yields zero rows and carries no timestamp with it. The
+      // panel returned null on that, which made the page after a clean audit
+      // byte-identical to the page before it — and made a command plane that
+      // rejected every request indistinguishable from one that worked. The run
+      // has to be readable on its own.
+      await query(
+        rwDsn,
+        `INSERT INTO hx.audit_runs (id, trigger, finished_at, sessions_checked, confirmed, qualification)
+           VALUES ('22222222-2222-2222-2222-222222222222', 'console', now(), 4, 4,
+                   'every checked session is held here and nowhere else')`,
+      );
+      // No finding rows exist for it, so the findings query — which JOINs the
+      // run to them — can carry neither the run nor its timestamp.
+      const [run] = await query<Record<string, unknown>>(
+        uiDsn,
+        new PgDialect().sqlToQuery(auditLastRunQuery()).sql,
+      );
+      expect(run).toBeDefined();
+      expect(Number(run.sessionsChecked)).toBe(4);
+      expect(Number(run.confirmed)).toBe(4);
+      expect(run.qualification).toBe("every checked session is held here and nowhere else");
+      expect(run.startedAt).not.toBeNull();
+      await query(rwDsn, "DELETE FROM hx.audit_runs WHERE id = '22222222-2222-2222-2222-222222222222'");
     });
 
     test("acknowledge_finding and set_cloud_witness run through the owner's grants", async () => {

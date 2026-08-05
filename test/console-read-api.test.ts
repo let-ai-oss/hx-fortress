@@ -2,7 +2,7 @@
 // it cannot.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -303,6 +303,7 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
       asOf: null,
       cloudOnlySessions: null,
       routedHere: null,
+      lastRun: null,
       qualification: "unqualified - posture unavailable, cloud-only sessions not checked",
       witness: null,
       findings: null,
@@ -1226,6 +1227,46 @@ describe("the console follows credentials.json", () => {
       env: {},
     });
   }
+
+  test("the database tile follows a pg.json that appears AFTER the mount", async () => {
+    // The console and the daemon start together, and the daemon writes pg.json
+    // on its way up — so a console that resolved this once at mount reported
+    // "not configured" for the whole life of the process. It healed only when
+    // the operator happened to open a view that touched the database, because
+    // that path had its own lazy re-read and this one did not. Observed live:
+    // the Overview said "Metadata database: not configured · Sessions on this
+    // fortress: 0" while the Sessions view, against the same fortress, listed
+    // four.
+    const console_ = mount();
+    await console_.ready;
+    expect((await console_.port.status()).database.kind).toBe("not-configured");
+
+    // The daemon comes up and writes its coordinates. Unreachable on purpose:
+    // what is under test is that the console RE-READS, not what it finds.
+    await mkdir(path.join(root, "ui"), { recursive: true });
+    await writeFile(
+      path.join(root, "ui", "pg.json"),
+      JSON.stringify({
+        mode: "embedded",
+        host: "127.0.0.1",
+        port: 1,
+        database: "hx",
+        user: "hx_ui",
+        password: "unreachable-on-purpose",
+      }),
+      "utf8",
+    );
+
+    // The re-read is fire-and-forget on purpose — awaiting it would put a
+    // connect timeout inside the polled status path — so the tile corrects on
+    // the NEXT poll rather than this one. The Overview polls every 10s.
+    let after = "not-configured";
+    for (let i = 0; i < 40 && after === "not-configured"; i += 1) {
+      after = (await console_.port.status()).database.kind;
+      if (after === "not-configured") await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(after).not.toBe("not-configured");
+  });
 
   test("a migration swap moves the bucket the compliance surface names, with no restart", async () => {
     const console_ = mount();
