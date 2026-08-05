@@ -854,7 +854,12 @@ describe("credentials never leave", () => {
     // The two halves of the file had disagreed: the string rule called a number
     // under one of these names a value somebody chose, and the object rule
     // called it a configuration fact.
-    expect(redactValue({ password: 1234567890, dsn: 1234567890, hasPassword: false })).toEqual({
+    // Typed through Record, because `redactValue<T>(v: T): T` returns the input
+    // type and a number-valued property cannot be compared against the string
+    // it redacts to. `bun test` does not typecheck, so this only ever fails in
+    // `bun run typecheck` — which is what CI runs.
+    const body: Record<string, unknown> = { password: 1234567890, dsn: 1234567890, hasPassword: false };
+    expect(redactValue(body)).toEqual({
       password: REDACTED,
       dsn: REDACTED,
       hasPassword: false,

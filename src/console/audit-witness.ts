@@ -94,7 +94,11 @@ export function createWitnessClient(
   // — and two repositories that release separately, each holding its own copy of
   // the number, are one release apart from a question the asking side believes
   // is whole and the answering side silently truncates.
-  const batchSize = deps.batchSize ?? WITNESS_MAX_IDS;
+  // CLAMPED to the protocol's cap, not merely defaulted to it. The contract says
+  // a question carrying more than this MUST be answered with an error and MUST
+  // NOT be truncated, so a caller that asked for a larger batch would be asking
+  // the hub to break its own rule — and the seam that decides it is here.
+  const batchSize = Math.max(1, Math.min(deps.batchSize ?? WITNESS_MAX_IDS, WITNESS_MAX_IDS));
   return async (ids) => {
     const ask = deps.request;
     if (!ask) {

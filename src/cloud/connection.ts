@@ -109,6 +109,11 @@ export interface WsCloudConnectionDeps {
  *  that never completes. */
 const IDENTITY_DEADLINE_MS = 2_000;
 
+/** How many distinct unknown frame kinds are worth naming once each. The set
+ *  exists so a frame on every heartbeat cannot become the log; the cap exists so
+ *  a peer choosing a fresh discriminator per frame cannot become the heap. */
+const UNKNOWN_FRAME_KINDS_LOGGED = 32;
+
 // MC-2517 fortress dispatch ceiling — withDeadline now lives in
 // ../host/with-deadline (shared with the vault RPC PG-phase races).
 
@@ -627,12 +632,18 @@ export class WsCloudConnection implements CloudConnection {
         // SILENTLY is how a frame that was supposed to be handled goes unnoticed
         // for a release. Logged once per kind, so a frame on every heartbeat
         // cannot become the log.
-        const kind = String((frame as { t?: unknown }).t ?? "unnamed");
+        // TRUNCATED and CAPPED. The discriminator is peer-chosen text bounded
+        // only by the frame size, and a compromised hub is explicitly in this
+        // appliance's threat model — an unbounded set keyed on it is memory the
+        // peer decides, and a log line the peer writes.
+        const kind = String((frame as { t?: unknown }).t ?? "unnamed").slice(0, 64);
         if (!this.unknownFrames.has(kind)) {
-          this.unknownFrames.add(kind);
-          this.deps.logger.error(
-            `ignoring a hub frame this build does not understand: ${kind} (the hub is newer than this fortress)`,
-          );
+          if (this.unknownFrames.size < UNKNOWN_FRAME_KINDS_LOGGED) {
+            this.unknownFrames.add(kind);
+            this.deps.logger.error(
+              `ignoring a hub frame this build does not understand: ${kind} (the hub is newer than this fortress)`,
+            );
+          }
         }
         break;
       }

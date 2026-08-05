@@ -1005,9 +1005,25 @@ export async function runFortressHost(
       // Through the fenced routine, never a direct INSERT: an acknowledgement is
       // not re-derivable, and one INSERT ... SELECT would acknowledge every
       // residency finding this organization has, permanently.
-      await db.execute(
-        sqlTag`SELECT hx.acknowledge_finding(${org}, ${sessionId}, ${"console operator"}, ${reason})`,
-      );
+      // Same plane split as `applyCloudWitness`: the fenced routine does not
+      // exist on an external database, where the fence would be guarding the
+      // operator against themselves anyway. The fence's own rule — only an
+      // existing `also_at_letai` finding may be acknowledged — is kept.
+      if (await commandPlaneIsInstalled()) {
+        await db.execute(
+          sqlTag`SELECT hx.acknowledge_finding(${org}, ${sessionId}, ${"console operator"}, ${reason})`,
+        );
+      } else {
+        await db.execute(
+          sqlTag`INSERT INTO hx.audit_acks (org, session_id, acknowledged_by, reason)
+                 SELECT ${org}, ${sessionId}, ${"console operator"}, ${reason}
+                  WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
+                                 WHERE f.org = ${org} AND f.session_id = ${sessionId}
+                                   AND f.verdict = 'also_at_letai')
+                     ON CONFLICT (org, session_id)
+                     DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason`,
+        );
+      }
       await publishAcksFromDb();
     },
     downloadBaseUrl: async () => {
@@ -1121,7 +1137,25 @@ export async function runFortressHost(
   async function applyCloudWitness(enabled: boolean): Promise<void> {
     const db = postgres.isReady() ? resolveHxDb() : null;
     if (!db) throw new Error("the fortress database is not available");
-    await db.execute(sqlTag`SELECT hx.set_cloud_witness(${enabled})`);
+    // THE ROUTINE ONLY EXISTS ON THE EMBEDDED PLANE. `ensureAppRoles` creates
+    // the five SECURITY DEFINER routines and is wired into the embedded branch
+    // alone, so on an operator's own Postgres this raised 42883 — and 0022 seeds
+    // the witness ON, so an external-DSN fortress came up with outbound
+    // session-id disclosure enabled and NO WAY TO TURN IT OFF. There is no role
+    // split on an external database (the operator's single DSN owns the tables),
+    // so the fence buys nothing there and plain DML is the honest equivalent.
+    if (await commandPlaneIsInstalled()) {
+      await db.execute(sqlTag`SELECT hx.set_cloud_witness(${enabled})`);
+    } else {
+      await db.execute(
+        sqlTag`UPDATE hx.audit_settings SET cloud_witness = ${enabled}, changed_at = now(), changed_by = session_user`,
+      );
+      await db.execute(
+        sqlTag`INSERT INTO hx.audit_settings (cloud_witness, changed_at, changed_by)
+               SELECT ${enabled}, now(), session_user
+                WHERE NOT EXISTS (SELECT 1 FROM hx.audit_settings)`,
+      );
+    }
     await publishAuditSettings(paths.runtimeRoot, enabled);
   }
 
@@ -1154,9 +1188,22 @@ export async function runFortressHost(
           for (const row of intent.reconfirm ?? []) {
             const db = postgres.isReady() ? resolveHxDb() : null;
             if (!db) break;
-            await db.execute(
-              sqlTag`SELECT hx.acknowledge_finding(${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason})`,
-            );
+            // Same plane split as the console's own acknowledgement path.
+            if (await commandPlaneIsInstalled()) {
+              await db.execute(
+                sqlTag`SELECT hx.acknowledge_finding(${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason})`,
+              );
+            } else {
+              await db.execute(
+                sqlTag`INSERT INTO hx.audit_acks (org, session_id, acknowledged_by, reason)
+                       SELECT ${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason}
+                        WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
+                                       WHERE f.org = ${row.org} AND f.session_id = ${row.sessionId}
+                                         AND f.verdict = 'also_at_letai')
+                           ON CONFLICT (org, session_id)
+                           DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason`,
+              );
+            }
           }
           await publishAcksFromDb();
           return { enabled: intent.enabled };
@@ -1166,6 +1213,13 @@ export async function runFortressHost(
       consoleLog.error("could not apply the audit witness intent", {
         error: err instanceof Error ? err.message : String(err),
       });
+      // The intent is CLEARED even on failure. Leaving it made the failure
+      // sticky in the worst way: `audit witness show` reads the published
+      // mirror, which is only rewritten on success, so an operator who asked to
+      // turn the witness OFF and could not kept being told it was still on,
+      // every poll, with no way to retry into a different answer. A failed
+      // intent is a failed intent; the error above is the record of it.
+      await clearWitnessIntent(paths.runtimeRoot).catch(() => {});
       return;
     }
     await clearWitnessIntent(paths.runtimeRoot).catch(() => {});

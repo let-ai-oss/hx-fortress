@@ -175,6 +175,33 @@ describe("the artifact replay park", () => {
     expect((await readParkedArtifacts(file)).length).toBe(1);
   });
 
+  test("an orphan survives a crash DURING the drain that recovered it", async () => {
+    // Recovering the orphan into memory and then renaming over it left those
+    // entries alive nowhere on disk: the replay walks the object store, so the
+    // window is real wall-clock time, and a crash inside it lost commits already
+    // acknowledged to a device. They are written back to the park file first.
+    await parkArtifact(`${file}.draining`, {
+      key: KEY,
+      name: "orphan.json",
+      text: "{}",
+      parkedAt: NOW.toISOString(),
+    });
+    await parkArtifact(file, { key: KEY, name: "fresh.json", text: "{}", parkedAt: NOW.toISOString() });
+
+    // The drain dies partway through, exactly as a hard exit would.
+    await expect(
+      drainParkedArtifacts(file, async (entry) => {
+        if (entry.name === "orphan.json") throw new Error("the host died here");
+      }),
+    ).resolves.toMatchObject({ failed: 1 });
+
+    // Both entries are still accounted for: the orphan is back in the park file,
+    // and nothing was left behind in `.draining`.
+    const parked = (await readParkedArtifacts(file)).map((e) => e.name).sort();
+    expect(parked).toEqual(["orphan.json"]);
+    expect(await readParkedArtifacts(`${file}.draining`)).toEqual([]);
+  });
+
   test("two drains that overlap replay each entry once, not twice", async () => {
     // The rename used to provide this for free: the second drain found no file
     // and returned. Reading the orphaned `.draining` first — which is what

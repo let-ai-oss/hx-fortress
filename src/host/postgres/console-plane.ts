@@ -331,25 +331,23 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $set_cloud_witness$
-DECLARE
-  v_rows integer;
 BEGIN
-  -- hx.audit_settings is a keyless singleton, so an unqualified UPDATE is the
-  -- whole table; a zero-row result means the singleton has not been seeded yet.
   -- Stamped, so a flip is visible. This routine cannot tell the daemon from
   -- anything else holding the same DSN — both are hx_app_rw — so prevention is
   -- not available here; what is available is that turning outbound disclosure
   -- back on for an operator who switched it off can no longer happen without a
   -- trace the console reads.
-  UPDATE hx.audit_settings
-     SET cloud_witness = p_enabled,
-         changed_at = pg_catalog.now(),
-         changed_by = session_user;
-  GET DIAGNOSTICS v_rows = ROW_COUNT;
-  IF v_rows = 0 THEN
-    INSERT INTO hx.audit_settings (cloud_witness, changed_at, changed_by)
-    VALUES (p_enabled, pg_catalog.now(), session_user);
-  END IF;
+  -- ONE statement, on the singleton key 0027 added. The read-modify-write this
+  -- replaces (UPDATE, then INSERT if it matched nothing) had no uniqueness
+  -- underneath it, so two concurrent flips left two rows with different stamps
+  -- and the reader picks one at random with its unordered LIMIT 1 — destroying
+  -- the very accountability the paragraph above says is the whole control.
+  INSERT INTO hx.audit_settings (singleton, cloud_witness, changed_at, changed_by)
+  VALUES (true, p_enabled, pg_catalog.now(), session_user)
+      ON CONFLICT (singleton) DO UPDATE
+     SET cloud_witness = EXCLUDED.cloud_witness,
+         changed_at = EXCLUDED.changed_at,
+         changed_by = EXCLUDED.changed_by;
   RETURN p_enabled;
 END;
 $set_cloud_witness$;`;

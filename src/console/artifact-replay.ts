@@ -88,10 +88,20 @@ async function drainOnce(
 
   // Anything already sitting in `.draining` is a previous drain that died between
   // the rename and the finish — its entries are commits already acknowledged to a
-  // device, and nothing else in the process ever looks at this path. Read it
-  // BEFORE the rename below, because rename overwrites its destination: without
-  // this the next drain is what destroys the orphan it should have recovered.
+  // device, and nothing else in the process ever looks at this path.
+  //
+  // It is RETURNED TO THE PARK FILE, not merely read into memory. `rename`
+  // overwrites its destination, so reading the orphan and then renaming over it
+  // left those entries alive only in this function's local array: a crash during
+  // the replay — which walks the object store, so it is real wall-clock time —
+  // and they existed nowhere on disk at all. Written back first, the worst case
+  // is that an entry appears in both files and is replayed twice, and a replay
+  // is the same bytes to the same key.
   const orphaned = await readParkedArtifacts(drainingPath);
+  if (orphaned.length > 0) {
+    for (const entry of orphaned) await parkArtifact(filePath, entry);
+    await unlink(drainingPath).catch(() => {});
+  }
 
   let renamed = true;
   try {
@@ -99,7 +109,7 @@ async function drainOnce(
   } catch {
     renamed = false;
   }
-  const entries = [...orphaned, ...(renamed ? await readParkedArtifacts(drainingPath) : [])];
+  const entries = renamed ? await readParkedArtifacts(drainingPath) : orphaned;
   if (entries.length === 0) {
     await unlink(drainingPath).catch(() => {});
     return { replayed: 0, failed: 0, rewrote: [] };

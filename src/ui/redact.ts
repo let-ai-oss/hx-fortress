@@ -139,7 +139,12 @@ function redactEnvField(...args: unknown[]): string {
 // quotes raw SDK errors. Kept in step with `command-params.ts`, which has had
 // the same list all along on the parameter path and did not share it — including
 // its high-entropy catch-all, ported below.
-const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+// BOUNDED BODY. A lazy unbounded `[\s\S]*?` restarts from every `BEGIN` marker
+// and rescans to the end of the input, which is quadratic in the marker count —
+// measured through the real chain: 291 ms at 128 KB, 4.0 s at 512 KB, 16.3 s at
+// 1 MB, on the console's event loop, and `logsExport` hands this rule the WHOLE
+// blob. 16 KiB is four times the largest real PEM this appliance holds.
+const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,16384}?-----END [A-Z ]*PRIVATE KEY-----/g;
 const SERVICE_ACCOUNT = /("private_key"\s*:\s*")((?:[^"\\]|\\.)*)(")/g;
 const AWS_ACCESS_KEY = /\bA(?:KIA|SIA|ROA|IDA)[0-9A-Z]{12,}\b/g;
 const PRESIGNED_SIGNATURE = /\b(X-(?:Goog|Amz)-Signature=)([A-Fa-f0-9]{16,})/gi;
