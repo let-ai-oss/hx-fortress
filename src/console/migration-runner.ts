@@ -177,14 +177,16 @@ export async function migrationTombstones(db: HxDb, runId: string): Promise<Sess
   // (run_id, user_id, family, session_id) and this reads a FUNCTION of the
   // trailing column — so past ~50k copied objects the planner abandons the
   // hashed subplan and probes once per tombstone, each non-match paying a full
-  // (run_id, user_id) prefix walk before it can answer "no". Measured on PG 16
-  // at 500k objects / 10k tombstones: 35.4 SECONDS as a correlated subplan,
-  // 66.8 ms as this union, which hash-joins the two sides once. That matters
-  // here and nowhere else: this runs inside the armed pause, whose whole episode
-  // is 60s, and a query that outlasts it fails the cut at the fence — after the
-  // copy, the drain and the barrier have all been paid for. Which is the exact
-  // failure the first arm's bound was added to prevent, on the same class of
-  // install.
+  // (run_id, user_id) prefix walk before it can answer "no". Measured on the
+  // engine this appliance ships (PG 18.4) at 500k objects / 10k tombstones:
+  // 11-16 SECONDS as a correlated subplan against 65-124 ms as this union,
+  // which hash-joins the two sides once. The wider figure of each pair is the
+  // real condition — stats still stale from the copy records this run inserted
+  // moments earlier. It matters here and nowhere else: this runs inside the
+  // armed pause, whose whole episode is 60s, so a query that outlasts it fails
+  // the cut at the fence, after the copy, the drain and the barrier have all
+  // been paid for. Which is the exact failure the first arm's bound was added
+  // to prevent, on the same class of install.
   const result = await db.execute(
     sql`SELECT d.user_external_id AS "userId", d.family, d.session_id AS "sessionId"
           FROM hx.deleted_sessions d
