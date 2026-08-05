@@ -92,7 +92,12 @@ describe("mergeReplayedMetadata", () => {
     // destination bookkeeping says the same: "a canonical really can shrink".
     // Merging them forward pinned the sidecar to the pre-replace numbers.
     const bucket = meta({ bytesUploaded: 4096, eventCount: 42, title: "old" });
-    const replaced = meta({ bytesUploaded: 120, eventCount: 2, title: "new" });
+    const replaced = meta({
+      bytesUploaded: 120,
+      eventCount: 2,
+      title: "new",
+      updatedAt: "2026-08-05T04:05:00.000Z",
+    });
     const merged = mergeReplayedMetadata(bucket, replaced, true);
     expect(merged.bytesUploaded).toBe(120);
     expect(merged.eventCount).toBe(2);
@@ -155,6 +160,96 @@ describe("mergeReplayedMetadata", () => {
     );
     expect(merged.title).toBe("Q3 payroll");
     expect(merged.titleSource).toBe("ai");
+
+    // …and the direction the `??` pair could not fail on, because it
+    // short-circuits on its first operand: the bucket holds the WINNING title
+    // with no provenance, and the stale replay carries a different title that
+    // an operator really did type. Crossed, the sidecar asserts that somebody
+    // named a title they never typed — and `titleSource` is what the corrective
+    // pass keys on, so the false `user` is self-pinning.
+    const crossed = mergeReplayedMetadata(
+      meta({
+        title: "Kubernetes upgrade plan",
+        titleSource: null,
+        updatedAt: "2026-08-05T12:00:00.000Z",
+      }),
+      meta({ title: "My private notes", titleSource: "user", updatedAt: "2026-08-05T09:00:00.000Z" }),
+    );
+    expect(crossed.title).toBe("Kubernetes upgrade plan");
+    expect(crossed.titleSource).toBeNull();
+  });
+
+  test("a TIE on updatedAt falls to the bucket", () => {
+    // A replay is never the newer statement on a tie: the parked composition was
+    // made before the pause, so anything the bucket holds carrying the same
+    // stamp landed at least as late. Resolving a tie toward the replay let a
+    // parked replace discard a newer append's totals outright.
+    const stamp = "2026-08-05T12:00:00.000Z";
+    const bucket = meta({ bytesUploaded: 5000, eventCount: 500, title: "Appended title", updatedAt: stamp });
+    const parked = meta({ bytesUploaded: 40, eventCount: 4, title: null, updatedAt: stamp });
+    const merged = mergeReplayedMetadata(bucket, parked, true);
+    expect(merged.bytesUploaded).toBe(5000);
+    expect(merged.eventCount).toBe(500);
+    expect(merged.title).toBe("Appended title");
+  });
+
+  test("a stale replay does not walk back the working directory, branch or device", () => {
+    // The five descriptive fields took `incoming` unconditionally, so the exact
+    // rewind the title and the replace arm are guarded against still landed on
+    // them — and on a session list they are just as visible.
+    const bucket = meta({
+      updatedAt: "2026-08-05T12:00:00.000Z",
+      cwd: "/home/dev/current-repo",
+      gitBranch: "release/2.0",
+      repoSlug: "acme/current",
+      sourcePath: "/new/path.jsonl",
+      deviceName: "workstation",
+    });
+    const stale = meta({
+      updatedAt: "2026-08-05T09:00:00.000Z",
+      cwd: "/home/dev/old-repo",
+      gitBranch: "main",
+      repoSlug: "acme/old",
+      sourcePath: "/old/path.jsonl",
+      deviceName: "laptop-1",
+    });
+    const merged = mergeReplayedMetadata(bucket, stale);
+    expect(merged.cwd).toBe("/home/dev/current-repo");
+    expect(merged.gitBranch).toBe("release/2.0");
+    expect(merged.repoSlug).toBe("acme/current");
+    expect(merged.sourcePath).toBe("/new/path.jsonl");
+    expect(merged.deviceName).toBe("workstation");
+
+    // The loser still fills a genuine absence, in both directions.
+    expect(mergeReplayedMetadata(meta({ ...bucket, cwd: null }), stale).cwd).toBe("/home/dev/old-repo");
+    expect(mergeReplayedMetadata(stale, meta({ ...bucket, cwd: null })).cwd).toBe("/home/dev/old-repo");
+  });
+
+  test("an unorderable stamp in the bucket is healed, not propagated", () => {
+    // Every ordering test here is a Date.parse, and every comparison against NaN
+    // is false — so a bucket row whose stamp cannot be read would pin itself
+    // forever AND lock out the replace that could correct it. This merge is the
+    // one writer that reads what it finds rather than composing fresh, so it is
+    // the one place positioned to fix it.
+    const torn = meta({ updatedAt: "not-a-date", firstSeenAt: "also-not-a-date", title: "Stuck" });
+    const good = meta({
+      updatedAt: "2026-08-05T12:00:00.000Z",
+      firstSeenAt: "2026-08-05T11:00:00.000Z",
+      title: "Real title",
+      titleSource: "ai",
+    });
+    const merged = mergeReplayedMetadata(torn, good);
+    expect(merged.updatedAt).toBe("2026-08-05T12:00:00.000Z");
+    expect(merged.firstSeenAt).toBe("2026-08-05T11:00:00.000Z");
+    expect(merged.title).toBe("Real title");
+    expect(merged.titleSource).toBe("ai");
+    // …and a replace can now correct it outright.
+    expect(mergeReplayedMetadata(torn, good, true).updatedAt).toBe("2026-08-05T12:00:00.000Z");
+    // The reverse still holds: a readable bucket is not overwritten by a torn
+    // replay's stamps.
+    const back = mergeReplayedMetadata(good, torn);
+    expect(back.updatedAt).toBe("2026-08-05T12:00:00.000Z");
+    expect(back.firstSeenAt).toBe("2026-08-05T11:00:00.000Z");
   });
 
   test("the merge is over PARSED metadata, so a torn sidecar is not merged into", () => {

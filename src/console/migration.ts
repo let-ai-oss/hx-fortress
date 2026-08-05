@@ -674,7 +674,13 @@ async function replayTombstones(
   emit: (event: MigrationEvent) => void,
   heartbeat: () => Promise<void> = async (): Promise<void> => undefined,
 ): Promise<number> {
+  // Beat around the read itself. It joins this run's copy records — tens of
+  // milliseconds on a large run, more on a loaded box — and it runs inside the
+  // armed pause BEFORE the loop's first beat, so a window that lapsed under it
+  // would only be discovered at the fence.
+  await heartbeat();
   const tombstones = await deps.tombstones();
+  await heartbeat();
   let removed = 0;
   for (const key of tombstones) {
     // One beat per session, and one per delete pass below: a single permanently

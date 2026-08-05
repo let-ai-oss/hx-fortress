@@ -172,17 +172,31 @@ export async function migrationTombstones(db: HxDb, runId: string): Promise<Sess
   // are the right anchors for both arms. `migration_objects.session_id` can be
   // the `sid:a:agent` composite while a tombstone is always the base id, so the
   // join is on the base.
+  //
+  // UNION, not `OR EXISTS`. The copy-record side is not indexable — the PK is
+  // (run_id, user_id, family, session_id) and this reads a FUNCTION of the
+  // trailing column — so past ~50k copied objects the planner abandons the
+  // hashed subplan and probes once per tombstone, each non-match paying a full
+  // (run_id, user_id) prefix walk before it can answer "no". Measured on PG 16
+  // at 500k objects / 10k tombstones: 35.4 SECONDS as a correlated subplan,
+  // 66.8 ms as this union, which hash-joins the two sides once. That matters
+  // here and nowhere else: this runs inside the armed pause, whose whole episode
+  // is 60s, and a query that outlasts it fails the cut at the fence — after the
+  // copy, the drain and the barrier have all been paid for. Which is the exact
+  // failure the first arm's bound was added to prevent, on the same class of
+  // install.
   const result = await db.execute(
     sql`SELECT d.user_external_id AS "userId", d.family, d.session_id AS "sessionId"
           FROM hx.deleted_sessions d
           JOIN hx.migration_runs r ON r.id = ${runId}::uuid
          WHERE d.deleted_at >= r.started_at
-            OR EXISTS (
-                 SELECT 1 FROM hx.migration_objects o
-                  WHERE o.run_id = r.id
-                    AND o.user_id = d.user_external_id
-                    AND split_part(o.session_id, ':', 1) = d.session_id
-               )`,
+        UNION
+        SELECT d.user_external_id AS "userId", d.family, d.session_id AS "sessionId"
+          FROM hx.deleted_sessions d
+          JOIN hx.migration_objects o
+            ON o.user_id = d.user_external_id
+           AND split_part(o.session_id, ':', 1) = d.session_id
+         WHERE o.run_id = ${runId}::uuid`,
   );
   const raw: unknown = Array.isArray(result) ? result : (result as { rows?: unknown[] })?.rows;
   const list = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
