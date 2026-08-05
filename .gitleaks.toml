@@ -29,3 +29,10 @@ regexes = [
   '''^0123456789abcdef0123456789abcdef$''',
   '''^fedcba9876543210fedcba9876543210$''',
 ]
+
+[[allowlists]]
+description = "The crafted secret_access_key the console redaction tests feed to redactCredentials to prove it is redacted (test/console-read-api.test.ts). Never a live credential — its whole purpose is to appear in an assertion that it does NOT survive. Scoped to the exact VALUE, not the path, so that file stays fully scanned: it is a broad suite, unlike test/embed-scrub.test.ts. The allowlist is required rather than fixable by editing the fixture, because the scan walks FULL history and the commit that introduced it stays reachable."
+regexTarget = "secret"
+regexes = [
+  '''^wJalrXUtnFEMI/K7MDENG/bPx$''',
+]
