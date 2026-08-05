@@ -44,13 +44,22 @@ export const BUCKETS = {
    *  is a flood shed, not a lockout, and the real per-principal metering is
    *  `signIn` above plus the process-wide ceiling and the argon gate. */
   publicSignIn: { limit: 240, windowMs: 60_000 },
-  /** Keyed remote-key. Separate from sign-in so a burst of one cannot exhaust
-   *  the other's budget. */
-  ssoEntry: { limit: 10, windowMs: 60_000 },
-  /** Shared by setup-status GET and setup completion POST, keyed remote-key. */
-  setup: { limit: 20, windowMs: 60_000 },
-  /** Keyed remote-key. */
-  asset: { limit: 300, windowMs: 60_000 },
+  // EVERY gate-level bucket below is keyed on the remote key, and behind a
+  // proxy — the shape this console ships for, `publicUrl` set with the default
+  // `trustedProxies: []` — every caller presents the same one. So each of these
+  // is the ORGANIZATION'S budget, not a person's, and a limit sized for one
+  // person is an org-wide lockout anybody can trigger: ten unauthenticated
+  // requests denying the whole company its one-click entry, twenty denying every
+  // new operator their setup link, three hundred making the SPA unloadable for
+  // everyone. They are FLOOD SHEDS and are sized as such; the real per-principal
+  // metering happens inside each handler, where the principal is known.
+  /** Separate from sign-in so a burst of one cannot exhaust the other's budget. */
+  ssoEntry: { limit: 240, windowMs: 60_000 },
+  /** Shared by setup-status GET and setup completion POST. */
+  setup: { limit: 240, windowMs: 60_000 },
+  /** A full cold SPA load is dozens of requests, times everyone behind the
+   *  proxy who opens the console at the start of a shift. */
+  asset: { limit: 3_000, windowMs: 60_000 },
   /** Keyed remote-key (loopback peers only ever reach it). */
   instanceProbe: { limit: 30, windowMs: 60_000 },
   /** Every write the console makes: service control and every command it asks
@@ -170,7 +179,7 @@ export class LockoutTable {
    *  the moment any one attempt fails — and the reservation that exists to let a
    *  real operator through a flood stopped applying to anybody. The login is the
    *  discriminator that survives a shared address. */
-  private readonly recentByLogin = new Map<string, number>();
+  private readonly recentByLogin = new Map<string, { at: number; epoch: number }>();
 
   private static key(login: string, remoteKey: string): string {
     return `${login} ${remoteKey}`;
@@ -204,12 +213,29 @@ export class LockoutTable {
     const delay = over <= 0 ? 0 : Math.min(LOCKOUT_BASE_MS * 2 ** (over - 1), LOCKOUT_MAX_MS);
     this.records.set(key, { failures, lastAt: now, lockedUntil: now + delay, epoch: lockoutEpoch });
     this.recentByRemote.set(remoteKey, now);
-    this.recentByLogin.set(login, now);
+    this.recentByLogin.set(login, { at: now, epoch: lockoutEpoch });
     return delay > 0 ? { locked: true, failures, retryAfterMs: delay } : { locked: false, failures };
   }
 
   recordSuccess(login: string, remoteKey: string): void {
     this.records.delete(LockoutTable.key(login, remoteKey));
+    // A proven password is POSITIVE evidence about this principal, so the
+    // failure memory that decides `isCleanPrincipal` goes with the record. It
+    // used to survive a successful sign-in for the full FAILURE_MEMORY_MS, and
+    // nothing else cleared it either — `ui user reset` bumps `lockoutEpoch`,
+    // which only `state()` reads — so the console's documented remedy could not
+    // reach the counters at all.
+    this.recentByLogin.delete(login);
+  }
+
+  /** Forget a login's failure memory outright — what `ui user reset` means when
+   *  the delay is not enough. The account's records go too, so a reset really is
+   *  the clean slate the copy promises. */
+  forget(login: string): void {
+    this.recentByLogin.delete(login);
+    for (const digest of [...this.records.keys()]) {
+      if (digest.startsWith(`${login} `)) this.records.delete(digest);
+    }
   }
 
   /** A remote with no failure in living memory. The argon gate keeps a slot for
@@ -229,10 +255,21 @@ export class LockoutTable {
    *  the login as well restores the reservation for exactly the person it was
    *  written for, and takes nothing from the attacker case: a stranger's first
    *  attempt was already clean under the remote-only rule. */
-  isCleanPrincipal(login: string, remoteKey: string, now = Date.now()): boolean {
+  isCleanPrincipal(
+    login: string,
+    remoteKey: string,
+    now = Date.now(),
+    /** The account's current lockout epoch. `ui user reset` bumps it, and that
+     *  is the ONLY signal that crosses the process boundary — the CLI cannot
+     *  reach this in-memory table, so a memory recorded under an older epoch is
+     *  one the operator has already cleared. */
+    lockoutEpoch = 0,
+  ): boolean {
     if (this.isClean(remoteKey, now)) return true;
     const last = this.recentByLogin.get(login);
-    return last === undefined || now - last > FAILURE_MEMORY_MS;
+    if (last === undefined) return true;
+    if (last.epoch < lockoutEpoch) return true;
+    return now - last.at > FAILURE_MEMORY_MS;
   }
 
   sweep(now = Date.now()): number {
@@ -246,8 +283,8 @@ export class LockoutTable {
     for (const [key, at] of this.recentByRemote) {
       if (now - at > FAILURE_MEMORY_MS) this.recentByRemote.delete(key);
     }
-    for (const [key, at] of this.recentByLogin) {
-      if (now - at > FAILURE_MEMORY_MS) this.recentByLogin.delete(key);
+    for (const [key, held] of this.recentByLogin) {
+      if (now - held.at > FAILURE_MEMORY_MS) this.recentByLogin.delete(key);
     }
     return dropped;
   }
@@ -264,7 +301,7 @@ export class LockoutTable {
       this.records.set(key, record);
       const [login, remoteKey] = key.split(" ");
       if (remoteKey) this.recentByRemote.set(remoteKey, record.lastAt);
-      if (login) this.recentByLogin.set(login, record.lastAt);
+      if (login) this.recentByLogin.set(login, { at: record.lastAt, epoch: record.epoch });
     }
   }
 

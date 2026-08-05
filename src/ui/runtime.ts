@@ -266,41 +266,34 @@ export class UiRuntime {
     workbenchSub?: string | null;
   }): Promise<SignInVerdict> {
     const now = this.now();
-    // The RESERVATION first. The argon gate advertises that "during a flood from
-    // unknown logins, the operator who knows their password still gets in" — but
-    // the process-wide ceiling ran ahead of it, so 24 source addresses saturated
-    // it and every subsequent sign-in got 429, the real operator included. A
-    // principal with no recent failures is not REFUSED by the ceiling; it exists
-    // to bound strangers, and a clean principal is not one.
+    // The argon gate advertises that "during a flood from unknown logins, the
+    // operator who knows their password still gets in", and the process-wide
+    // ceiling used to run ahead of it — so a couple of dozen source addresses
+    // saturated the ceiling and every subsequent sign-in got 429, the real
+    // operator included.
     //
-    // The token is ALWAYS spent. Skipping the take for a clean principal meant
-    // one address rotating a fresh login per attempt was clean every time and
-    // the process-wide bound was never consulted at all — the ceiling stopped
-    // bounding the flood it exists to bound.
+    // The token is ALWAYS SPENT and the ceiling NEVER REFUSES. That is not an
+    // oversight: a process-wide counter cannot tell one principal from another,
+    // so refusing on it is by construction an org-wide lockout — the thing RULE
+    // ONE in rate-limit.ts forbids. Behind a proxy (this console's shipped
+    // shape: `publicUrl` set, `trustedProxies: []`) every caller shares one
+    // remote key, so any exemption keyed on the address is false for everybody
+    // the moment one attacker fails, and an exemption keyed on the login is
+    // false for an operator who mistyped once in the last half hour — leaving
+    // exactly one renewable move: fail against a named operator every thirty
+    // minutes, hold the ceiling down, and they cannot get in with the correct
+    // password. Measured, and it is why this branch is gone.
     //
-    // The exemption asks about the PRINCIPAL, not the address, because this
-    // console ships for a `publicUrl` behind a proxy where the default
-    // `trustedProxies: []` makes every caller share one remote key — so an
-    // address-only question answered "dirty" for everybody after a single
-    // attacker failure.
-    //
-    // It does NOT ask whether the login exists. Requiring that made the refusal
-    // itself an existence oracle — with the ceiling saturated, an unknown login
-    // got 429 and a known one got the uniform 401 — which is precisely what the
-    // paragraph above forbids. Bounding the flood is the ceiling's job through
-    // the token it always spends, and the argon gate's queue is what actually
-    // sheds the work.
+    // What actually bounds the work is layered and per-principal: the
+    // (login, remote) bucket below at five a minute, the exponential per-account
+    // lockout after it, and the argon gate — which bounds concurrency, caps each
+    // remote key at one in-flight hash, sheds a full queue as a fast 503 rather
+    // than a lockout, and reserves a slot for a clean principal. The counter is
+    // still spent so `takeGlobalSignIn` remains a true aggregate bound for
+    // anything that reads it.
     const file = await this.readUsers();
     const known = liveUser(file, args.login) !== null;
-    const ceiling = this.limiter.takeGlobalSignIn(now);
-    if (!ceiling.ok && !this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now)) {
-      return {
-        ok: false,
-        status: 429,
-        reason: "too many sign-in attempts right now",
-        retryAfterMs: ceiling.retryAfterMs,
-      };
-    }
+    this.limiter.takeGlobalSignIn(now);
     const bucket = this.limiter.take("signIn", `${args.login} ${args.remoteKey}`, now);
     if (!bucket.ok) {
       return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: bucket.retryAfterMs };
@@ -320,7 +313,7 @@ export class UiRuntime {
     // is exactly what the gate's own header says it must not do. The residual is
     // a timing difference under saturation, which is weaker than the status-code
     // oracle it replaces.
-    const clean = known && this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now);
+    const clean = known && this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now, lockoutEpoch);
     let matched: boolean;
     try {
       matched = await this.argon.run(args.remoteKey, clean, () =>

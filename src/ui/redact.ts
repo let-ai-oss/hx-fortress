@@ -27,13 +27,29 @@ const FIELD_SEP = String.raw`(?:\s*[=:]\s*|"\s*:\s*)`;
 // The quotes are their OWN groups so a redacted JSON line is still JSON. Eating
 // them produced `{"secretAccessKey": [redacted]}`, which no reader can parse —
 // on the Logs tab, whose whole value is that a machine can read it back.
-const FIELD_VALUE = String.raw`(?:'[^']*'|(")([^"]*)(")|\S+)`;
+//
+// The double-quoted arm honours ESCAPES (`"ab\"cd"` is one value, not two), and
+// the unquoted arm stops at a value DELIMITER rather than running to the next
+// space. `\S+` swallowed everything after the field — so a line carrying the
+// routine `"password":null` lost its host, its bucket and its error, and the
+// audited logs EXPORT rendered as complete while most of it had been deleted.
+const FIELD_VALUE = String.raw`(?:'[^']*'|(")(?:[^"\\]|\\.)*(")|[^\s,;}\])]+)`;
 const PG_PASSWORD_FIELD = new RegExp(String.raw`\b(password)(${FIELD_SEP})(${FIELD_VALUE})`, "gi");
 
 /** Re-emit `label`, its separator and a redaction that keeps whatever quoting
  *  the value had. `open`/`close` are the quote groups from FIELD_VALUE; they are
  *  undefined for the unquoted and single-quoted forms. */
-function redactField(label: string, sep: string, open?: string, close?: string): string {
+function redactField(
+  label: string,
+  sep: string,
+  raw: string,
+  open?: string,
+  close?: string,
+): string {
+  // `null`, `true`, `false` and a bare number are STATES, not secrets: they say
+  // whether something is configured, and `"password":[redacted]` is not JSON
+  // where `"password":null` was. Same rule `redactValue` applies to a leaf.
+  if (/^(?:null|true|false|-?\d+(?:\.\d+)?)$/i.test(raw)) return `${label}${sep}${raw}`;
   return `${label}${sep}${open ?? ""}${REDACTED}${close ?? ""}`;
 }
 
@@ -90,16 +106,16 @@ export function redactCredentials(value: string): string {
     .replace(BEARER, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
     .replace(
       PG_PASSWORD_FIELD,
-      (_m, label: string, sep: string, _v: string, open?: string, _inner?: string, close?: string) =>
-        redactField(label, sep, open, close),
+      (_m, label: string, sep: string, raw: string, open?: string, close?: string) =>
+        redactField(label, sep, raw, open, close),
     )
     .replace(PRIVATE_KEY_BLOCK, REDACTED)
     .replace(SERVICE_ACCOUNT, (_m, open: string, _key: string, close: string) => `${open}${REDACTED}${close}`)
     .replace(AWS_ACCESS_KEY, REDACTED)
     .replace(
       AWS_SECRET_FIELD,
-      (_m, label: string, sep: string, _v: string, open?: string, _inner?: string, close?: string) =>
-        redactField(label, sep, open, close),
+      (_m, label: string, sep: string, raw: string, open?: string, close?: string) =>
+        redactField(label, sep, raw, open, close),
     )
     .replace(PRESIGNED_SIGNATURE, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(PG_PASSWORD_ENV, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
@@ -109,7 +125,7 @@ export function redactCredentials(value: string): string {
     );
 }
 
-/** A property NAME that makes its value a secret whatever the value looks like.
+/** A property NAME that makes its value a secret whatever SHAPE the value takes.
  *
  *  Every rule above needs name, separator and value inside ONE string, which is
  *  how a log line or an error message is shaped. A structured body is not: the
@@ -151,14 +167,18 @@ export function redactValue<T>(value: T): T {
       // A named secret goes whatever its shape: the name is the whole evidence,
       // and null/absent stays as it is so "not configured" and "withheld" do not
       // read alike.
-      // STRINGS only. A `hasPassword: false` or a `passwordSet: true` is a fact
-      // about configuration, not a secret, and turning it into "[redacted]"
-      // changes its type as well as its meaning — the same reason `null` is left
-      // alone, so "not configured" and "withheld" never read alike.
-      out[key] =
-        typeof inner === "string" && SECRET_KEY_NAME.test(camelToSnake(key))
-          ? REDACTED
-          : redactValue(inner);
+      // A named secret goes whatever its shape — a string, and an object or an
+      // array too, because this is the LAST belt on a response body and the
+      // shape rules cannot reach a bare leaf nested under it.
+      //
+      // Except the primitives that are facts about configuration rather than
+      // secrets: a `hasPassword: false` or a `passwordSet: true` says whether
+      // something is set, and replacing it with a string changes its type as
+      // well as its meaning — the same reason `null` is left alone, so "not
+      // configured" and "withheld" never read alike.
+      const named = SECRET_KEY_NAME.test(camelToSnake(key));
+      const primitive = inner === null || inner === undefined || typeof inner === "boolean" || typeof inner === "number";
+      out[key] = named && !primitive ? REDACTED : redactValue(inner);
     }
     return out as unknown as T;
   }

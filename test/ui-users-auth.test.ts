@@ -302,18 +302,33 @@ describe("the argon gate", () => {
     expect(peak).toBe(1);
   });
 
-  test("the ceiling reservation survives a SHARED remote key — the proxy deployment", async () => {
+  test("a success and a reset both clear the failure memory the argon slot reads", async () => {
+    // Two ways the memory has to end, and neither worked: it survived a
+    // successful sign-in for the full half hour, and `ui user reset` — the
+    // remedy the console's own copy names — runs in the CLI process and can only
+    // bump `lockoutEpoch` in users.json, which nothing here consulted.
+    const table = new LockoutTable();
+    table.recordFailure("ada", "proxy", 0);
+    expect(table.isCleanPrincipal("ada", "proxy")).toBe(false);
+    table.recordSuccess("ada", "proxy");
+    expect(table.isCleanPrincipal("ada", "proxy")).toBe(true);
+
+    table.recordFailure("ada", "proxy", 0);
+    expect(table.isCleanPrincipal("ada", "proxy")).toBe(false);
+    // A reset bumps the epoch; the memory recorded under the old one is spent.
+    expect(table.isCleanPrincipal("ada", "proxy", Date.now(), 1)).toBe(true);
+  });
+
+  test("a SHARED remote key does not make everybody dirty — the proxy deployment", async () => {
     // The console ships for a `publicUrl` behind a reverse proxy, and the
     // default `trustedProxies: []` makes every caller present the same peer
-    // address. Keyed on that address alone, one attacker failure marked the
-    // shared key dirty for half an hour, so the real operator no longer counted
-    // as clean, paid the process-wide ceiling the attacker was saturating, and
-    // got a 429 — the exact outcome the reservation exists to prevent.
+    // address. Anything keyed on that address alone speaks for the whole
+    // organization, so one stranger's failure must not change what an operator
+    // who has failed at nothing is entitled to.
     const runtime = runtimeOn(root);
     const created = await runtime.users.create("ada", "operator");
     await runtime.users.completeSetup(created.token, PASSWORD);
 
-    // One stranger fails, from the shared address.
     const attacker = await runtime.signIn({
       login: "eve",
       password: "wrong-password-here",
@@ -321,14 +336,10 @@ describe("the argon gate", () => {
       remoteAddr: "proxy",
     });
     expect(attacker.ok).toBe(false);
+    // The shared address is dirty…
     expect(runtime.lockouts.isClean("proxy")).toBe(false);
-    // …and the operator, who has failed at nothing, is still a clean principal.
+    // …and the operator, whose own login has failed at nothing, is not.
     expect(runtime.lockouts.isCleanPrincipal("ada", "proxy")).toBe(true);
-
-    // Now saturate the process-wide ceiling, which is what a flood does.
-    for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
-    expect(runtime.limiter.takeGlobalSignIn().ok).toBe(false);
-
     const genuine = await runtime.signIn({
       login: "ada",
       password: PASSWORD,
@@ -336,15 +347,6 @@ describe("the argon gate", () => {
       remoteAddr: "proxy",
     });
     expect(genuine.ok).toBe(true);
-
-    // The stranger, whose own login HAS failed, still pays it.
-    const again = await runtime.signIn({
-      login: "eve",
-      password: "wrong-password-here",
-      remoteKey: "proxy",
-      remoteAddr: "proxy",
-    });
-    expect(again.ok === false && again.status).toBe(429);
   });
 
   test("a flood that ROTATES the login still SPENDS the ceiling", async () => {
@@ -375,40 +377,56 @@ describe("the argon gate", () => {
     expect(spent).toBe(GLOBAL_SIGN_IN_CEILING.limit - 5);
   });
 
-  test("a SATURATED ceiling refuses identically whether or not the login exists", async () => {
-    // The refusal must not be an existence oracle: an unknown login answering
-    // 429 while a known one answers the uniform 401 tells an attacker which
-    // names are real, which is exactly what the sign-in path's own uniformity
-    // rule forbids. Both are dirty principals here, so both are refused.
+  test("a SATURATED ceiling never refuses — a counter cannot tell principals apart", async () => {
+    // A process-wide ceiling that refuses is an org-wide lockout by
+    // construction, and behind a proxy it is a renewable one: fail against a
+    // named operator every half hour to keep them out of the exemption, hold the
+    // ceiling down, and they cannot get in with the CORRECT password. The bounds
+    // that survive are per-principal — the (login, remote) bucket, the
+    // exponential account lockout, and the argon gate's own shed.
     const runtime = runtimeOn(root);
     const created = await runtime.users.create("ada", "operator");
     await runtime.users.completeSetup(created.token, PASSWORD);
-    // Dirty them both, from the same address.
-    for (const login of ["ada", "ghost"]) {
-      await runtime.signIn({
-        login,
-        password: "wrong-password-here",
-        remoteKey: "shared",
-        remoteAddr: "shared",
-      });
-    }
+    // Ada has failed once, from the address everybody shares, so she is dirty by
+    // login AND by remote — the exact state the old refusal caught her in.
+    await runtime.signIn({
+      login: "ada",
+      password: "wrong-password-here",
+      remoteKey: "proxy",
+      remoteAddr: "proxy",
+    });
     for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
+    expect(runtime.limiter.takeGlobalSignIn().ok).toBe(false);
 
-    const known = await runtime.signIn({
+    const genuine = await runtime.signIn({
       login: "ada",
       password: PASSWORD,
-      remoteKey: "shared",
-      remoteAddr: "shared",
+      remoteKey: "proxy",
+      remoteAddr: "proxy",
     });
-    const unknown = await runtime.signIn({
-      login: "ghost",
+    expect(genuine.ok).toBe(true);
+  });
+
+  test("the per-principal bucket is what refuses, and only the principal who spent it", async () => {
+    const runtime = runtimeOn(root);
+    const created = await runtime.users.create("ada", "operator");
+    await runtime.users.completeSetup(created.token, PASSWORD);
+    // Six attempts from one (login, remote) exhausts that pair's five.
+    let last = await runtime.signIn({ login: "ada", password: "nope-nope-nope", remoteKey: "proxy", remoteAddr: "proxy" });
+    for (let i = 0; i < 5; i += 1) {
+      last = await runtime.signIn({ login: "ada", password: "nope-nope-nope", remoteKey: "proxy", remoteAddr: "proxy" });
+    }
+    expect(last.ok === false && last.status).toBe(429);
+    // …and a COLLEAGUE on the same shared address is untouched.
+    const raj = await runtime.users.create("raj", "operator");
+    await runtime.users.completeSetup(raj.token, PASSWORD);
+    const colleague = await runtime.signIn({
+      login: "raj",
       password: PASSWORD,
-      remoteKey: "shared",
-      remoteAddr: "shared",
+      remoteKey: "proxy",
+      remoteAddr: "proxy",
     });
-    expect(known.ok === false && known.status).toBe(429);
-    expect(unknown.ok === false && unknown.status).toBe(429);
-    expect(known.ok === false && known.reason).toBe(unknown.ok === false ? unknown.reason : "");
+    expect(colleague.ok).toBe(true);
   });
 
   test("a principal with no recent failures still gets in during a flood", async () => {
