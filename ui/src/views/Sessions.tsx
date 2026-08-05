@@ -212,7 +212,13 @@ export function SessionDetail(): React.ReactElement {
                 <FactRow
                   k="Person"
                   v={row.userDisplayName ?? row.userExternalId}
-                  vs={<span className="mono">{row.userExternalId}</span>}
+                  // The id underneath only when the value above is a NAME.
+                  // Without a name the fallback is the id itself, and the row
+                  // printed the same opaque string twice, which reads as a
+                  // rendering fault rather than as "this person has no name here".
+                  vs={
+                    row.userDisplayName ? <span className="mono">{row.userExternalId}</span> : undefined
+                  }
                 />
                 <FactRow k="Device" v={row.deviceName ?? "—"} />
                 <FactRow
