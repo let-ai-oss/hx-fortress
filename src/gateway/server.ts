@@ -565,6 +565,10 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
                         name: SESSION_METADATA_ARTIFACT,
                         text: artifactText,
                         parkedAt: new Date().toISOString(),
+                        // Carried so the replay can apply the same rule this
+                        // composition did: a replace is authoritative and its
+                        // totals may legitimately be smaller.
+                        replace,
                       });
                     }
                     throw err;

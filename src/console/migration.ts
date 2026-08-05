@@ -664,8 +664,10 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
  *
  * A session deleted after its copy was made is present in the target and absent
  * from the source, which is a resurrection: the delete happened, and the cut
- * would undo it. Run before the final delta AND inside the pause, because a
- * delete can land between the two.
+ * would undo it. Run AFTER the final delta and inside the pause — the delta is
+ * what can re-copy a session, so replaying the deletes after it is what makes
+ * the target agree; running first would let the delta put back what this had
+ * just removed.
  */
 async function replayTombstones(
   deps: MigrationDeps,

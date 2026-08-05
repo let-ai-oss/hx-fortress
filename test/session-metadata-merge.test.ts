@@ -87,8 +87,48 @@ describe("mergeReplayedMetadata", () => {
     expect(mergeReplayedMetadata(null, only)).toEqual(only);
   });
 
+  test("a REPLACE is authoritative — its totals may legitimately be smaller", () => {
+    // The gateway composes a replace's totals verbatim, and the hub's
+    // destination bookkeeping says the same: "a canonical really can shrink".
+    // Merging them forward pinned the sidecar to the pre-replace numbers.
+    const bucket = meta({ bytesUploaded: 4096, eventCount: 42, title: "old" });
+    const replaced = meta({ bytesUploaded: 120, eventCount: 2, title: "new" });
+    const merged = mergeReplayedMetadata(bucket, replaced, true);
+    expect(merged.bytesUploaded).toBe(120);
+    expect(merged.eventCount).toBe(2);
+    expect(merged.title).toBe("new");
+    // …and an APPEND still moves forward only.
+    expect(mergeReplayedMetadata(bucket, replaced, false).eventCount).toBe(42);
+  });
+
+  test("title and its PROVENANCE move together", () => {
+    // Resolved from different sides, an AI-derived title ended up labelled
+    // operator-set: the source is a claim about the value, not a value of its
+    // own.
+    const merged = mergeReplayedMetadata(
+      meta({ title: "Q3 payroll", titleSource: "ai" }),
+      meta({ title: null, titleSource: "user" }),
+    );
+    expect(merged.title).toBe("Q3 payroll");
+    expect(merged.titleSource).toBe("ai");
+  });
+
   test("the merge is over PARSED metadata, so a torn sidecar is not merged into", () => {
     expect(parseSessionMetadata(JSON.parse("null"))).toBeNull();
     expect(parseSessionMetadata({ family: "claude" })).toBeNull();
+    // The shape this test's title actually claims: unparseable TEXT, which is
+    // what a torn object in the bucket is. It must not throw — the replay
+    // callback treats an unreadable current as absent rather than re-parking the
+    // entry forever.
+    expect(() => JSON.parse("{ not json")).toThrow();
+    const readTorn = (raw: string | null): ReturnType<typeof parseSessionMetadata> => {
+      try {
+        return parseSessionMetadata(JSON.parse(raw ?? "null") as unknown);
+      } catch {
+        return null;
+      }
+    };
+    expect(readTorn("{ not json")).toBeNull();
+    expect(readTorn(null)).toBeNull();
   });
 });

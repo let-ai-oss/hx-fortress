@@ -102,8 +102,15 @@ export function metadataFromCanonicalObjectName(
 export function mergeReplayedMetadata(
   current: SessionMetadata | null,
   incoming: SessionMetadata,
+  /** The commit this sidecar belongs to was a REPLACE — authoritative, and its
+   *  totals may legitimately be SMALLER than what the bucket holds. Merging them
+   *  forward would pin the sidecar to the pre-replace numbers permanently, which
+   *  is the same "authoritative on replace" rule the gateway and the hub's
+   *  destination bookkeeping both apply. */
+  replace = false,
 ): SessionMetadata {
   if (!current) return incoming;
+  if (replace) return incoming;
   const laterIso = (a: string | null, b: string | null): string | null => {
     if (!a) return b;
     if (!b) return a;
@@ -113,8 +120,11 @@ export function mergeReplayedMetadata(
   return {
     family: incoming.family,
     sessionId: incoming.sessionId,
+    // TOGETHER. Resolving them from different sides labelled an AI-derived
+    // title as operator-set: the title is the value and the source is a claim
+    // ABOUT that value, so they move as one.
     title: incoming.title ?? current.title,
-    titleSource: incoming.titleSource ?? current.titleSource,
+    titleSource: incoming.title !== null ? incoming.titleSource : current.titleSource,
     // Monotonic: a replay carries a snapshot of the totals as they were, and a
     // later chunk's totals are the larger ones.
     bytesUploaded: Math.max(incoming.bytesUploaded, current.bytesUploaded),

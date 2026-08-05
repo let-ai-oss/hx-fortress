@@ -148,10 +148,23 @@ export interface MigrationCommandArgs {
  *  because a copy taken before a delete would otherwise resurrect it: the
  *  tombstone refuses a re-UPLOAD and says nothing about an object a migration
  *  put there. */
-export async function migrationTombstones(db: HxDb): Promise<SessionKey[]> {
+export async function migrationTombstones(db: HxDb, runId: string): Promise<SessionKey[]> {
+  // BOUNDED BY THE RUN. Every tombstone this fortress has ever recorded is not
+  // the question: a session deleted BEFORE this run started was already gone
+  // from the source listing the copy walks, so nothing of it can be in the
+  // target and the delete has nothing to undo. Replaying the whole history cost
+  // two bucket listings per tombstone, all of it inside the ≤5-minute armed
+  // window — so an install with a few thousand historical deletes could never
+  // finish a migration, aborting late every time with the barrier and the final
+  // delta already paid for.
+  //
+  // A RESUMED run keeps its original `started_at`, which is the right anchor:
+  // the objects at risk are the ones that run copied.
   const result = await db.execute(
-    sql`SELECT user_external_id AS "userId", family, session_id AS "sessionId"
-          FROM hx.deleted_sessions`,
+    sql`SELECT d.user_external_id AS "userId", d.family, d.session_id AS "sessionId"
+          FROM hx.deleted_sessions d
+          JOIN hx.migration_runs r ON r.id = ${runId}::uuid
+         WHERE d.deleted_at >= r.started_at`,
   );
   const raw: unknown = Array.isArray(result) ? result : (result as { rows?: unknown[] })?.rows;
   const list = Array.isArray(raw) ? (raw as Array<Record<string, unknown>>) : [];
@@ -268,7 +281,7 @@ async function driveMigrationCommand(
     mode: args.command === "arm" ? "copy" : "switch",
     source: live,
     target: deps.buildTarget(target),
-    tombstones: () => migrationTombstones(db),
+    tombstones: () => migrationTombstones(db, runId),
     quiesce: deps.quiesce,
     // Raise-only: see the latch note at the top of this file.
     armDrain: (on) => {

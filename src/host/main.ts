@@ -58,6 +58,7 @@ import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
 import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
+import { isSessionDeleted } from "../ingest/delete";
 import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
 import { forgetCopiedSessions } from "../console/migration-store";
 import { addForgetPending, readForgetPending, removeForgetPending } from "../console/runtime-files";
@@ -755,6 +756,29 @@ export async function runFortressHost(
         await writeFile(markerPath, "", { mode: 0o600, flag: "wx" });
         raised = true;
       }
+      // NOT INTO A DELETED SESSION. A sidecar can sit parked for hours — the
+      // drain waits out both the pause and any migration — and writes are open
+      // for most of that window, so a member can permanently delete the session
+      // in between. Replaying it then RE-CREATES `session.json` in the bucket,
+      // and that object is what both backends scan to build the direct-connect
+      // client's session list: the deleted session reappears, titled, with no
+      // further delete to remove it. Every other writer here already consults
+      // the tombstone; this one did not.
+      //
+      // A database we cannot ask is not a licence to write: the entry is thrown
+      // back to the park, which is durable, and the next drain is five seconds
+      // away.
+      const tombstoneDb = postgres.isReady() ? resolveHxDb() : null;
+      if (!tombstoneDb) {
+        throw new Error("cannot check the tombstone for a parked artifact — re-parking it");
+      }
+      if (await isSessionDeleted(tombstoneDb, entry.key.userId, entry.key.sessionId)) {
+        consoleLog.info("dropping a parked artifact for a permanently deleted session", {
+          sessionId: entry.key.sessionId,
+          name: entry.name,
+        });
+        return;
+      }
       // MERGED, not overwritten. The parked text is a whole composition made
       // from the sidecar as it stood before the pause, and reads stay open
       // through a pause — so every commit in one episode composed from the same
@@ -770,13 +794,18 @@ export async function runFortressHost(
         await store.writeArtifact(entry.key, entry.name, entry.text);
         return;
       }
-      const current = parseSessionMetadata(
-        JSON.parse((await store.readArtifactText(entry.key, entry.name).catch(() => null)) ?? "null") as unknown,
-      );
+      // The PARSE is guarded too, not only the read. A torn `session.json` in
+      // the bucket made this throw out of the callback, so the entry was
+      // re-parked and retried every five seconds forever — the guard read as
+      // covering it and covered only the fetch.
+      const current = await store
+        .readArtifactText(entry.key, entry.name)
+        .then((raw) => parseSessionMetadata(JSON.parse(raw ?? "null") as unknown))
+        .catch(() => null);
       await store.writeArtifact(
         entry.key,
         entry.name,
-        JSON.stringify(mergeReplayedMetadata(current, incoming)),
+        JSON.stringify(mergeReplayedMetadata(current, incoming, entry.replace === true)),
       );
     });
     // The pending append FIRST, and the latch settled only after it. The append

@@ -17,6 +17,11 @@ export interface ParkedArtifact {
   name: string;
   text: string;
   parkedAt: string;
+  /** Whether the commit this sidecar belongs to was a REPLACE. A replace is
+   *  authoritative — its totals may legitimately be smaller than what is in the
+   *  bucket — so the replay must take them verbatim rather than merging them
+   *  forward. Absent on entries parked by an older build, which are appends. */
+  replace?: boolean;
 }
 
 export async function parkArtifact(filePath: string, entry: ParkedArtifact): Promise<void> {
