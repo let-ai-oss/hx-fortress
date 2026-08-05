@@ -32,7 +32,14 @@ import type { RosterPersonRow } from "../query/console/roster";
 
 export type StageSource = "roster" | "roster device inventory" | "local session rows";
 export type StageAttestation = "cloud-attested" | "fortress-observed";
-export type StageId = "rostered" | "installed" | "sync" | "sending" | "active";
+// NO `sync` STAGE. Backfill progress is written by the device's own sync-status
+// report, which carries no organization — a person's whole backlog across every
+// employer — so the hub deliberately stops reporting it. Rendering the stage
+// anyway put a permanent `0` and `0%` in the middle of the funnel, labelled
+// "Backfill reported complete" and pilled "cloud-attested", while the per-member
+// cell on the same page correctly reads "not reported". A stage that can only
+// ever be zero is worse than one that is not there.
+export type StageId = "rostered" | "installed" | "sending" | "active";
 
 export interface AdoptionStage {
   id: StageId;
@@ -66,13 +73,6 @@ export const ADOPTION_STAGES: readonly AdoptionStage[] = [
     detail: "members with at least one machine that has produced a session for this organization",
   },
   {
-    id: "sync",
-    label: "Backfill reported complete",
-    source: "roster device inventory",
-    attestation: "cloud-attested",
-    detail: "members whose most recent backfill report has nothing outstanding",
-  },
-  {
     id: "sending",
     label: "Sending to this fortress",
     source: "local session rows",
@@ -99,6 +99,8 @@ export const QUIET_AFTER_DAYS = 14;
 export interface AdoptionCounts {
   rostered: number;
   installed: number;
+  /** Retained because `hx.roster` still holds the column and older rosters may
+   *  carry a value — but no stage renders it; see StageId. */
   syncComplete: number;
   sending: number;
   active: number;
@@ -121,7 +123,6 @@ export function adoptionStages(counts: AdoptionCounts): AdoptionStageView[] {
   const value: Record<StageId, number> = {
     rostered: counts.rostered,
     installed: counts.installed,
-    sync: counts.syncComplete,
     sending: counts.sending,
     active: counts.active,
   };

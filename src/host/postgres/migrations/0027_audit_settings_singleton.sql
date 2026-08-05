@@ -14,11 +14,18 @@
 -- the one this should have had. De-duplicate first, keeping the newest stamp,
 -- then constrain — so an install that already has two rows converges rather than
 -- failing to migrate.
+-- KEEP-ONE, chosen deterministically. A pairwise `a.ctid < b.ctid AND
+-- a.changed_at <= b.changed_at` deletes only the rows dominated on BOTH axes, so
+-- whenever physical order disagrees with stamp order it deletes nothing and the
+-- primary key below then fails — permanently, because `runMigrations` records a
+-- migration only after its batch succeeds, so every later boot re-runs this one
+-- and no corrective migration can ever be reached.
 DELETE FROM "hx"."audit_settings" a
- USING "hx"."audit_settings" b
- WHERE a.ctid < b.ctid
-   AND coalesce(a.changed_at, '-infinity'::timestamptz)
-     <= coalesce(b.changed_at, '-infinity'::timestamptz);
+ WHERE a.ctid <> (
+   SELECT b.ctid FROM "hx"."audit_settings" b
+    ORDER BY b.changed_at DESC NULLS LAST, b.ctid DESC
+    LIMIT 1
+ );
 --> statement-breakpoint
 ALTER TABLE "hx"."audit_settings"
   ADD COLUMN IF NOT EXISTS "singleton" boolean DEFAULT true NOT NULL;

@@ -41,6 +41,16 @@ async function query<T = Record<string, unknown>>(dsn: string, statement: string
   }
 }
 
+/** The error a statement raises, or null when it succeeded. */
+async function refused(dsn: string, statement: string): Promise<string | null> {
+  try {
+    await query(dsn, statement);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 /** Run a whole script the way an operator would paste it into psql — one
  *  simple-query batch, so a DO $$ … $$ block survives intact. */
 async function execBatch(dsn: string, script: string): Promise<void> {
@@ -196,6 +206,78 @@ END $$`);
       refused = err instanceof Error ? err.message : String(err);
     }
     expect(refused).toMatch(/permission denied/i);
+  });
+
+  test("the five SECURITY DEFINER routines do NOT exist here — which is the whole point", async () => {
+    // `ensureAppRoles` installs them and is wired into the embedded branch
+    // alone. Everything the daemon does through them has to have a path that
+    // works without them, or it silently fails on this plane.
+    const [{ n }] = await query<{ n: number }>(
+      externalDsn,
+      `SELECT count(*)::int AS n FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+        WHERE ns.nspname = 'hx' AND p.proname IN (${CONSOLE_ROUTINES.map((r) => `'${r.name}'`).join(", ")})`,
+    );
+    expect(n).toBe(0);
+  });
+
+  test("the cloud witness can be turned OFF here — 0022 seeds it ON", async () => {
+    // The failure this covers: 0022 seeds `cloud_witness = true`, its only
+    // writer is `hx.set_cloud_witness`, and that routine does not exist on this
+    // plane — so an external-DSN fortress came up with outbound session-id
+    // disclosure enabled and every attempt to disable it raised 42883.
+    const [seeded] = await query<{ cloud_witness: boolean }>(
+      externalDsn,
+      "SELECT cloud_witness FROM hx.audit_settings",
+    );
+    expect(seeded.cloud_witness).toBe(true);
+
+    // The daemon's external-plane path, verbatim.
+    await query(
+      externalDsn,
+      "UPDATE hx.audit_settings SET cloud_witness = false, changed_at = now(), changed_by = session_user",
+    );
+    const [off] = await query<{ cloud_witness: boolean; changed_by: string | null }>(
+      externalDsn,
+      "SELECT cloud_witness, changed_by FROM hx.audit_settings",
+    );
+    expect(off.cloud_witness).toBe(false);
+    // The stamp is the compensating control, and it survives on this plane too.
+    expect(off.changed_by).not.toBeNull();
+
+    // …and 0027's singleton is what keeps a second flip from forking the row.
+    const [{ n }] = await query<{ n: number }>(
+      externalDsn,
+      "SELECT count(*)::int AS n FROM hx.audit_settings",
+    );
+    expect(n).toBe(1);
+    await query(
+      externalDsn,
+      "UPDATE hx.audit_settings SET cloud_witness = true, changed_at = now(), changed_by = session_user",
+    );
+  });
+
+  test("0027 constrained the singleton, and a second row cannot be inserted", async () => {
+    expect(
+      await refused(externalDsn, "INSERT INTO hx.audit_settings (cloud_witness) VALUES (false)"),
+    ).toMatch(/duplicate key|unique/i);
+  });
+
+  test("acknowledging with no finding is REFUSED on this plane too", async () => {
+    // The fallback DML keeps the fence's rule; without RETURNING it kept the
+    // rule and lost the refusal, so a command that acknowledged nothing
+    // completed reporting success on a compliance surface.
+    const acked = await query<{ org: string }>(
+      externalDsn,
+      `INSERT INTO hx.audit_acks (org, session_id, acknowledged_by, reason)
+       SELECT 'org-x', 'sess-x', 'terminal operator', 'no finding exists'
+        WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
+                       WHERE f.org = 'org-x' AND f.session_id = 'sess-x'
+                         AND f.verdict = 'also_at_letai')
+           ON CONFLICT (org, session_id)
+           DO UPDATE SET acknowledged_at = now()
+        RETURNING org`,
+    );
+    expect(acked.length).toBe(0);
   });
 
   test("pg.json carries the effective DSN and an external marker", async () => {

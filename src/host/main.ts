@@ -1014,15 +1014,25 @@ export async function runFortressHost(
           sqlTag`SELECT hx.acknowledge_finding(${org}, ${sessionId}, ${"console operator"}, ${reason})`,
         );
       } else {
-        await db.execute(
+        // RETURNING, so the fence's REFUSAL survives too. The DML keeps the
+        // routine's rule — only an existing `also_at_letai` may be acknowledged
+        // — but a WHERE that matches nothing is a silent no-op, and the command
+        // would have completed `done` reporting "acknowledged; later runs
+        // inherit it". On a compliance surface that is worse than the refusal it
+        // replaced.
+        const acked = await db.execute(
           sqlTag`INSERT INTO hx.audit_acks (org, session_id, acknowledged_by, reason)
                  SELECT ${org}, ${sessionId}, ${"console operator"}, ${reason}
                   WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
                                  WHERE f.org = ${org} AND f.session_id = ${sessionId}
                                    AND f.verdict = 'also_at_letai')
                      ON CONFLICT (org, session_id)
-                     DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason`,
+                     DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason
+                  RETURNING org`,
         );
+        if (rowCountOf(acked) === 0) {
+          throw new Error(`no acknowledgeable finding for ${org} / ${sessionId}`);
+        }
       }
       await publishAcksFromDb();
     },
@@ -1077,6 +1087,15 @@ export async function runFortressHost(
    *  swallowed it, and commands sat at `requested` until their deadline — the
    *  exact silent failure this predicate was written to remove. Unknown means
    *  unavailable for this pass, and the next pass asks again. */
+  /** How many rows a statement returned, across both shapes the driver hands
+   *  back (a bare array, or `{ rows }`). Used where a RETURNING clause is the
+   *  only thing that distinguishes a refusal from a silent no-op. */
+  const rowCountOf = (result: unknown): number => {
+    if (Array.isArray(result)) return result.length;
+    const wrapped = (result as { rows?: unknown[] } | null)?.rows;
+    return Array.isArray(wrapped) ? wrapped.length : 0;
+  };
+
   let commandPlaneInstalledCache: boolean | null = null;
   async function commandPlaneIsInstalled(): Promise<boolean> {
     if (commandPlaneInstalledCache !== null) return commandPlaneInstalledCache;
@@ -1187,22 +1206,31 @@ export async function runFortressHost(
           if (intent.enabled !== undefined) await applyCloudWitness(intent.enabled);
           for (const row of intent.reconfirm ?? []) {
             const db = postgres.isReady() ? resolveHxDb() : null;
-            if (!db) break;
+            // THROW, never break. Breaking fell through to the success return,
+            // so a database lost midway recorded the run as done and the intent
+            // file was destroyed — half-applying the one rung that exists
+            // because acknowledgements went missing, with no error and no way to
+            // re-run it.
+            if (!db) throw new Error("the fortress database went away mid-reconfirm");
             // Same plane split as the console's own acknowledgement path.
             if (await commandPlaneIsInstalled()) {
               await db.execute(
                 sqlTag`SELECT hx.acknowledge_finding(${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason})`,
               );
             } else {
-              await db.execute(
+              const acked = await db.execute(
                 sqlTag`INSERT INTO hx.audit_acks (org, session_id, acknowledged_by, reason)
                        SELECT ${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason}
                         WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
                                        WHERE f.org = ${row.org} AND f.session_id = ${row.sessionId}
                                          AND f.verdict = 'also_at_letai')
                            ON CONFLICT (org, session_id)
-                           DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason`,
+                           DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason
+                        RETURNING org`,
               );
+              if (rowCountOf(acked) === 0) {
+                throw new Error(`no acknowledgeable finding for ${row.org} / ${row.sessionId}`);
+              }
             }
           }
           await publishAcksFromDb();

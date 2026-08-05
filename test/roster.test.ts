@@ -70,7 +70,10 @@ describe("the stage-source table", () => {
   test("every stage names exactly one source, and the posture is not one of them", () => {
     const inventory = ADOPTION_STAGES.filter((s) => s.source === "roster device inventory").map((s) => s.id);
     const local = ADOPTION_STAGES.filter((s) => s.source === "local session rows").map((s) => s.id);
-    expect(inventory).toEqual(["installed", "sync"]);
+    // No `sync` stage: backfill progress carries no organization, so the hub
+    // stopped reporting it and a stage that can only ever read zero is worse
+    // than one that is not there.
+    expect(inventory).toEqual(["installed"]);
     expect(local).toEqual(["sending", "active"]);
     for (const stage of ADOPTION_STAGES) {
       expect(stage.source).not.toContain("posture");
@@ -104,7 +107,7 @@ describe("the stage-source table", () => {
       formerMembers: 3,
       unrostered: 1,
     });
-    expect(real.map((s) => s.count)).toEqual([10, 8, 6, 5, 4]);
+    expect(real.map((s) => s.count)).toEqual([10, 8, 5, 4]);
     expect(real.find((s) => s.id === "sending")?.share).toBe(0.5);
   });
 });

@@ -109,7 +109,22 @@ async function drainOnce(
   } catch {
     renamed = false;
   }
-  const entries = renamed ? await readParkedArtifacts(drainingPath) : orphaned;
+  // ORDERED BY WHEN THEY WERE PARKED. The write-back above appends the recovered
+  // orphans to the END of the park file, so replaying in file order would have
+  // an OLDER sidecar land after a newer one — and the replay writes the parked
+  // text verbatim, bypassing the monotonic-on-append rule the gateway applies
+  // when it builds these. `lastActivityAt`, the counts and the title would
+  // regress in the customer's only copy. `parkedAt` is written by every producer
+  // and was read by nothing.
+  const entries = (renamed ? await readParkedArtifacts(drainingPath) : orphaned)
+    .map((entry, at) => ({ entry, at }))
+    .sort((a, b) => {
+      const byTime = Date.parse(a.entry.parkedAt) - Date.parse(b.entry.parkedAt);
+      // A missing or equal stamp keeps file order, which is arrival order within
+      // one file — never an arbitrary shuffle.
+      return Number.isFinite(byTime) && byTime !== 0 ? byTime : a.at - b.at;
+    })
+    .map((held) => held.entry);
   if (entries.length === 0) {
     await unlink(drainingPath).catch(() => {});
     return { replayed: 0, failed: 0, rewrote: [] };

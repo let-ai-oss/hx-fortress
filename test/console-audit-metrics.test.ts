@@ -202,6 +202,35 @@ describe("the artifact replay park", () => {
     expect(await readParkedArtifacts(`${file}.draining`)).toEqual([]);
   });
 
+  test("a recovered orphan replays in PARKED order, never after a newer commit", async () => {
+    // The write-back appends the orphan to the end of the park file, so file
+    // order would replay it LAST — and the replay writes the parked text
+    // verbatim, bypassing the monotonic-on-append rule the gateway applies when
+    // it builds this sidecar. An older `session.json` landing after a newer one
+    // regresses the counts, the title and lastActivityAt in the customer's only
+    // copy.
+    await parkArtifact(`${file}.draining`, {
+      key: KEY,
+      name: "session.json",
+      text: "v1-OLD",
+      parkedAt: new Date(NOW.getTime() - 60_000).toISOString(),
+    });
+    await parkArtifact(file, {
+      key: KEY,
+      name: "session.json",
+      text: "v2-NEW",
+      parkedAt: NOW.toISOString(),
+    });
+
+    const written: string[] = [];
+    const result = await drainParkedArtifacts(file, async (entry) => {
+      written.push(entry.text);
+    });
+    expect(result.replayed).toBe(2);
+    // Oldest first, so the last write wins and it is the newest one.
+    expect(written).toEqual(["v1-OLD", "v2-NEW"]);
+  });
+
   test("two drains that overlap replay each entry once, not twice", async () => {
     // The rename used to provide this for free: the second drain found no file
     // and returned. Reading the orphaned `.draining` first — which is what
