@@ -83,3 +83,51 @@ export function metadataFromCanonicalObjectName(
     deviceName: null,
   };
 }
+
+/**
+ * Merge a sidecar being REPLAYED against whatever the store holds now.
+ *
+ * A parked sidecar is not a delta — it is a whole composition the gateway made
+ * from the sidecar as it stood before the pause. Reads stay open through a
+ * pause, so every deferred commit inside one episode composed from the SAME
+ * pre-pause text, and replaying those compositions verbatim meant the last one
+ * won outright: a title set by the first chunk, and every count and stamp only
+ * the earlier chunks carried, reverted to their pre-pause values in the
+ * customer's only copy.
+ *
+ * So a replay merges instead of overwriting, with the same rules the gateway
+ * applies when it composes: a value present wins over an absent one, counts and
+ * activity move forward only, and `firstSeenAt` moves backward only.
+ */
+export function mergeReplayedMetadata(
+  current: SessionMetadata | null,
+  incoming: SessionMetadata,
+): SessionMetadata {
+  if (!current) return incoming;
+  const laterIso = (a: string | null, b: string | null): string | null => {
+    if (!a) return b;
+    if (!b) return a;
+    return Date.parse(a) >= Date.parse(b) ? a : b;
+  };
+  const earlierIso = (a: string, b: string): string => (Date.parse(a) <= Date.parse(b) ? a : b);
+  return {
+    family: incoming.family,
+    sessionId: incoming.sessionId,
+    title: incoming.title ?? current.title,
+    titleSource: incoming.titleSource ?? current.titleSource,
+    // Monotonic: a replay carries a snapshot of the totals as they were, and a
+    // later chunk's totals are the larger ones.
+    bytesUploaded: Math.max(incoming.bytesUploaded, current.bytesUploaded),
+    eventCount: Math.max(incoming.eventCount, current.eventCount),
+    userTextCount: Math.max(incoming.userTextCount, current.userTextCount),
+    assistantCount: Math.max(incoming.assistantCount, current.assistantCount),
+    lastActivityAt: laterIso(incoming.lastActivityAt, current.lastActivityAt),
+    firstSeenAt: earlierIso(incoming.firstSeenAt, current.firstSeenAt),
+    updatedAt: laterIso(incoming.updatedAt, current.updatedAt) ?? incoming.updatedAt,
+    cwd: incoming.cwd ?? current.cwd,
+    gitBranch: incoming.gitBranch ?? current.gitBranch,
+    sourcePath: incoming.sourcePath ?? current.sourcePath,
+    repoSlug: incoming.repoSlug ?? current.repoSlug,
+    deviceName: incoming.deviceName ?? current.deviceName,
+  };
+}

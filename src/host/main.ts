@@ -73,6 +73,11 @@ import { runAuditForFortress } from "../console/audit-runner";
 import { holdMigration, runMigrationCommand } from "../console/migration-runner";
 import { readPgJson } from "./postgres/pg-json";
 import { buildDirectStore } from "../modules/session-vault/store";
+import {
+  mergeReplayedMetadata,
+  parseSessionMetadata,
+  SESSION_METADATA_ARTIFACT,
+} from "../modules/session-vault/store/session-metadata";
 import { purgeInactiveRoster, replaceRoster } from "../console/roster";
 import {
   clearRosterPurgeIntent,
@@ -750,7 +755,29 @@ export async function runFortressHost(
         await writeFile(markerPath, "", { mode: 0o600, flag: "wx" });
         raised = true;
       }
-      await store.writeArtifact(entry.key, entry.name, entry.text);
+      // MERGED, not overwritten. The parked text is a whole composition made
+      // from the sidecar as it stood before the pause, and reads stay open
+      // through a pause — so every commit in one episode composed from the same
+      // pre-pause text and a verbatim replay let the last one erase the rest.
+      // Only the session sidecar has that shape; anything else is replayed as
+      // parked.
+      if (entry.name !== SESSION_METADATA_ARTIFACT) {
+        await store.writeArtifact(entry.key, entry.name, entry.text);
+        return;
+      }
+      const incoming = parseSessionMetadata(JSON.parse(entry.text) as unknown);
+      if (!incoming) {
+        await store.writeArtifact(entry.key, entry.name, entry.text);
+        return;
+      }
+      const current = parseSessionMetadata(
+        JSON.parse((await store.readArtifactText(entry.key, entry.name).catch(() => null)) ?? "null") as unknown,
+      );
+      await store.writeArtifact(
+        entry.key,
+        entry.name,
+        JSON.stringify(mergeReplayedMetadata(current, incoming)),
+      );
     });
     // The pending append FIRST, and the latch settled only after it. The append
     // is what tells a resumed run to re-carry these sessions; settling first

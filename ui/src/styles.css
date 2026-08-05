@@ -471,7 +471,10 @@
   }
 
   /* ── Funnel (Adoption) ───────────────────────────────── */
-  .funnel { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 6px 0 4px; }
+  /* auto-fit, so the layout tracks ADOPTION_STAGES rather than a number written
+     here: the fixed five outlived the stage it was counting and left a permanent
+     empty column when the backfill stage was retired. */
+  .funnel { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 10px; margin: 6px 0 4px; }
   .fstage { position: relative; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 16px 12px; background: var(--surface); cursor: pointer; }
   .fstage:hover { border-color: var(--accent-border); background: var(--accent-subtle); }
   .fstage .fnum { font-family: var(--display); font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
