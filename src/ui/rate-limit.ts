@@ -1,10 +1,17 @@
 // Rate buckets and lockout, and the two rules that shape both.
 //
-// RULE ONE — a lockout is never org-wide. Every counter is keyed on
-// (login, remote-key), so an attacker who guesses at one account from one network
-// cannot lock that account out for everybody else, and cannot lock out a
-// colleague at all. The global term that does exist is a process-wide sign-in
-// CEILING, which sheds load rather than denying a principal.
+// RULE ONE — a lockout is never org-wide. Every counter that can REFUSE a named
+// principal is keyed on (login, remote-key), so an attacker who guesses at one
+// account from one network cannot lock that account out for everybody else, and
+// cannot lock out a colleague at all.
+//
+// The gate-level buckets below are the exception that proves it: they are spent
+// before the body is read, so they can only be keyed on the address — which
+// behind a proxy every caller shares. They are therefore FLOOD SHEDS, sized for
+// an organization rather than a person, and nothing that refuses a principal is
+// decided by them. A process-wide sign-in ceiling used to sit above all of this
+// and was removed for the same reason: a counter that cannot tell principals
+// apart can only refuse them all.
 //
 // RULE TWO — a remote is never hard-locked. Repeated failures buy an
 // exponentially growing delay with a ceiling, not a permanent refusal: a
@@ -42,7 +49,7 @@ export const BUCKETS = {
   /** The GATE's shed for the sign-in route, keyed remote-key because that is all
    *  a pre-body check has. Sized for a shared address rather than one person: it
    *  is a flood shed, not a lockout, and the real per-principal metering is
-   *  `signIn` above plus the process-wide ceiling and the argon gate. */
+   *  `signIn` above, the exponential account lockout, and the argon gate. */
   publicSignIn: { limit: 240, windowMs: 60_000 },
   // EVERY gate-level bucket below is keyed on the remote key, and behind a
   // proxy — the shape this console ships for, `publicUrl` set with the default
@@ -81,17 +88,6 @@ export const BUCKETS = {
 
 export type BucketName = keyof typeof BUCKETS;
 
-/** Process-wide sign-in ceiling: load shedding above every per-principal budget,
- *  so a distributed flood cannot convert "one attempt per source" into unbounded
- *  work for the box. */
-/** RETIRED. A process-wide sign-in counter cannot tell one principal from
- *  another, so refusing on it is an org-wide lockout — RULE ONE above — and
- *  behind a proxy it was a renewable, targeted one. `signIn` no longer consults
- *  it and nothing else ever did. The window is kept only so the sweep's
- *  "longest window" still covers a key written by an older build in this
- *  process's lifetime; the limit is unused. */
-export const GLOBAL_SIGN_IN_CEILING: BucketPolicy = { limit: 120, windowMs: 60_000 };
-
 export type BucketVerdict = { ok: true } | { ok: false; retryAfterMs: number };
 
 interface CountingWindow {
@@ -126,10 +122,7 @@ export class RateLimiter {
    *  it a wide flood leaves one entry per source forever. */
   sweep(now = Date.now()): number {
     let dropped = 0;
-    const longest = Math.max(
-      ...Object.values(BUCKETS).map((b) => b.windowMs),
-      GLOBAL_SIGN_IN_CEILING.windowMs,
-    );
+    const longest = Math.max(...Object.values(BUCKETS).map((b) => b.windowMs));
     for (const [key, window] of this.windows) {
       if (now - window.start >= longest) {
         this.windows.delete(key);

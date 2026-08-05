@@ -14,78 +14,110 @@
 /** What a redacted value reads as. One string, so a reader learns to see it. */
 export const REDACTED = "[redacted]";
 
-const DSN = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s:/@]+):([^\s@]*)@/gi;
+// A DSN's SCHEME is bounded. `[a-z0-9+.-]*` after a `\b` rescans from every
+// word boundary inside a dotted or hyphenated run, which is quadratic — one
+// 128 KB token in a log line blocked the event loop for 8.8 s, and every later
+// open of the Logs tab paid it again. No scheme is thirty characters long.
+const DSN = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)([^\s:/@]+):([^\s@]*)@/gi;
 const BEARER = /\b(bearer|token|authorization)(\s*[=:]\s*|\s+)([A-Za-z0-9._~+/=-]{8,})/gi;
 const QUERY_SECRET = /([?&](?:password|passwd|pwd|token|secret|credential|key)=)([^&\s]+)/gi;
-// The separator covers BOTH written forms. `field = value` is how a DSN and an
-// env line read; `"field": "value"` is how credentials.json is actually written
-// (pretty-printed JSON), and the field rules used to require the separator to
-// follow the bare name — in JSON the next character is a quote, so every one of
-// them missed the file they were added for. The JSON arm keeps the closing quote
-// out of the captured value by matching the quoted form explicitly.
-// Three written forms: `field = value`, `"field": value`, and the ESCAPED
-// `\"field\": value` that `JSON.stringify` produces when a driver or SDK error
-// is embedded as a string inside a log record — the shape the file-log sink
-// writes, and the one every rule here used to miss entirely.
-const FIELD_SEP = String.raw`(?:\s*[=:]\s*|\\?"\s*:\s*)`;
-// The quotes are their OWN groups so a redacted JSON line is still JSON. Eating
-// them produced `{"secretAccessKey": [redacted]}`, which no reader can parse —
-// on the Logs tab, whose whole value is that a machine can read it back.
+
+// ── the secret-named field, in the two grammars it is written in ────────────
 //
-// The double-quoted arm honours ESCAPES (`"ab\"cd"` is one value, not two), and
-// the unquoted arm stops at a value DELIMITER rather than running to the next
-// space. `\S+` swallowed everything after the field — so a line carrying the
-// routine `"password":null` lost its host, its bucket and its error, and the
-// audited logs EXPORT rendered as complete while most of it had been deleted.
-// The STRUCTURED arms come first, so an object or an array under a secret name
-// is consumed WHOLE. The bare arm stops at a value delimiter, so matching only
-// its head left the rest of the structure in the clear and broke the line's JSON
-// — on the Logs tab, whose whole value is that a machine can read it back.
-// One level deep is enough for every shape this appliance writes; anything
-// deeper falls to the bare arm, which is bounded rather than greedy.
-const FIELD_VALUE = [
-  String.raw`'[^']*'`,
-  // Quoted, whether the quotes are literal or escaped (`\"…\"` is what
-  // JSON.stringify produces for a nested error embedded as a string).
-  String.raw`(\\?")(?:[^"\\]|\\.)*(\\?")`,
-  String.raw`\{[^{}]*\}`,
-  String.raw`\[[^\[\]]*\]`,
-  // The literals, BEFORE the bare arm — otherwise `null` is swallowed together
-  // with the rest of the line and the state it records is lost.
-  String.raw`null|true|false`,
+// A field's value ENDS DIFFERENTLY in each, and one rule cannot serve both:
+// a delimiter set wide enough for an env line (`password=a,b host=c`) runs off
+// the end of a compact JSON line and deletes everything after the secret, while
+// one narrow enough for JSON leaves the tail of a comma-bearing env value in the
+// clear. Both of those shipped, in successive attempts at a single rule. So
+// there are two rules, each with its own value grammar, and neither has to guess
+// which grammar it is in.
+//
+// The names cover the `<prefix>_password` spellings too (`dsn_password`,
+// `POSTGRES_PASSWORD`), which the bare `\b(password)` could never match — a `_`
+// is a word character, so there is no boundary before the name.
+const SECRET_FIELD = String.raw`(?:[a-z0-9]+[_-])?(?:password|passwd|pwd)|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key[_-]?id`;
+
+/** A JSON value, in the order the arms must be tried. */
+const JSON_VALUE = [
+  // Escaped-quoted FIRST, and it stops at the first `\"` — the shape
+  // `JSON.stringify` produces for a driver error embedded as a string. Treating
+  // that closing `\"` as an ordinary escape ran the match to the last plain
+  // quote on the line and deleted every field of the embedded error after the
+  // secret.
+  String.raw`(?<esc>\\")(?:(?!\\")[\s\S])*\\"`,
+  String.raw`(?<q>")(?:[^"\\]|\\.)*"`,
+  // Structures, consumed whole to three levels; deeper falls to the bare arm,
+  // which is bounded by the JSON delimiters below rather than by whitespace.
+  String.raw`\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}`,
+  String.raw`\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\[\]]*\])*\])*\]`,
+  // ANCHORED. Unanchored, `null` matched the head of `nullS3cretValue` and the
+  // passthrough below then emitted the whole credential untouched.
+  String.raw`(?:null|true|false)(?![^\s,;}\])])`,
   String.raw`-?\d+(?:\.\d+)?`,
-  // Anything else, to a real separator: whitespace, `;` or `&`, which is what
-  // actually ends a value in a DSN or an env line.
+  String.raw`[^\s,;}\])]+`,
+].join("|");
+
+/** An env / DSN value: ended by whitespace, `;` or `&`, never by a comma —
+ *  a comma is a legal character in one, and stopping at it left the tail. */
+const ENV_VALUE = [
+  String.raw`'[^']*'`,
+  String.raw`(?<q>")(?:[^"\\]|\\.)*"`,
+  String.raw`(?:null|true|false)(?![^\s;&])`,
   String.raw`[^\s;&]+`,
 ].join("|");
-const PG_PASSWORD_FIELD = new RegExp(String.raw`\b(password)(${FIELD_SEP})((?:${FIELD_VALUE}))`, "gi");
 
-/** Re-emit `label`, its separator and a redaction that keeps whatever quoting
- *  the value had. `open`/`close` are the quote groups from FIELD_VALUE; they are
- *  undefined for the unquoted and single-quoted forms. */
-function redactField(
-  label: string,
-  sep: string,
-  raw: string,
-  open?: string,
-  close?: string,
-): string {
-  // Emitted QUOTED wherever the field was written in JSON — an object, an array
-  // or a number replaced by a bare `[redacted]` leaves a line no parser accepts,
-  // which is the property this whole arm exists to preserve. The separator says
-  // which grammar we are in: only the JSON forms carry a quote.
-  const json = sep.includes('"');
-  // `null`, `true` and `false` are STATES, not secrets: they say whether
-  // something is configured, and `"password":[redacted]` is not JSON where
-  // `"password":null` was. Same rule `redactValue` applies to a leaf.
-  //
-  // A NUMBER is not on that list. None of these fields carries a numeric state,
-  // so a number under one of them is a value somebody chose — a numeric
-  // passphrase, a key id — and passing it through to keep the line parseable
-  // would be printing it.
+const JSON_FIELD = new RegExp(
+  String.raw`(?<label>\\?"(?:${SECRET_FIELD})\\?")(?<sep>\s*:\s*)(?<value>${JSON_VALUE})`,
+  "gi",
+);
+const ENV_FIELD = new RegExp(
+  String.raw`\b(?<label>${SECRET_FIELD})(?<sep>\s*[=:]\s*)(?<value>${ENV_VALUE})`,
+  "gi",
+);
+
+/** The groups a field rule binds. Read by NAME: the arms carry a different
+ *  number of positional groups depending on which one matched, and binding those
+ *  by index is how a replacement ends up emitting the wrong text. */
+interface FieldGroups {
+  label?: string;
+  sep?: string;
+  value?: string;
+  q?: string;
+  esc?: string;
+}
+
+function groupsOf(args: unknown[]): FieldGroups {
+  const last = args[args.length - 1];
+  return (typeof last === "object" && last !== null ? last : {}) as FieldGroups;
+}
+
+/** Replace a JSON field's value, keeping the line parseable. A structure, a
+ *  number or a bare token becomes a QUOTED redaction — a bare `[redacted]` where
+ *  a value was is a line no reader accepts, and the Logs tab's whole value is
+ *  that a machine can read it back. */
+function redactJsonField(...args: unknown[]): string {
+  const g = groupsOf(args);
+  const label = g.label ?? "";
+  const sep = g.sep ?? "";
+  const raw = g.value ?? "";
+  // `null`, `true` and `false` are STATES — whether something is configured —
+  // and they carry nothing. A NUMBER is not on that list: none of these fields
+  // has a numeric state, so a number under one is a value somebody chose.
   if (/^(?:null|true|false)$/i.test(raw)) return `${label}${sep}${raw}`;
-  const quote = open ?? (json ? '"' : "");
-  return `${label}${sep}${quote}${REDACTED}${close ?? quote}`;
+  const quote = g.esc ? String.raw`\"` : '"';
+  return `${label}${sep}${quote}${REDACTED}${quote}`;
+}
+
+/** Replace an env / DSN field's value. No quoting is added: the grammar has
+ *  none, and inventing a quote would change what the line says. */
+function redactEnvField(...args: unknown[]): string {
+  const g = groupsOf(args);
+  const label = g.label ?? "";
+  const sep = g.sep ?? "";
+  const raw = g.value ?? "";
+  if (/^(?:null|true|false)$/i.test(raw)) return `${label}${sep}${raw}`;
+  const quote = g.q ?? "";
+  return `${label}${sep}${quote}${REDACTED}${quote}`;
 }
 
 // The shapes THIS appliance holds, which the four above do not recognise at all:
@@ -97,10 +129,6 @@ function redactField(
 const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
 const SERVICE_ACCOUNT = /("private_key"\s*:\s*")((?:[^"\\]|\\.)*)(")/g;
 const AWS_ACCESS_KEY = /\bA(?:KIA|SIA|ROA|IDA)[0-9A-Z]{12,}\b/g;
-const AWS_SECRET_FIELD = new RegExp(
-  String.raw`\b(secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key[_-]?id)(${FIELD_SEP})((?:${FIELD_VALUE}))`,
-  "gi",
-);
 const PRESIGNED_SIGNATURE = /\b(X-(?:Goog|Amz)-Signature=)([A-Fa-f0-9]{16,})/gi;
 const PG_PASSWORD_ENV = /\b(PGPASSWORD)(\s*=\s*)(\S+)/g;
 const API_KEY_FIELD = /\b(sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[0-9A-Za-z-]{10,})/g;
@@ -139,19 +167,14 @@ export function redactCredentials(value: string): string {
     .replace(DSN, (_m, scheme: string, user: string) => `${scheme}${user}:${REDACTED}@`)
     .replace(QUERY_SECRET, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(BEARER, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
-    .replace(
-      PG_PASSWORD_FIELD,
-      (_m, label: string, sep: string, raw: string, open?: string, close?: string) =>
-        redactField(label, sep, raw, open, close),
-    )
+    // ONE pass per grammar, covering every secret-named field. JSON first: an
+    // escaped `\"password\":` inside a stringified record is JSON too, and the
+    // env rule would otherwise take its head.
+    .replace(JSON_FIELD, redactJsonField)
+    .replace(ENV_FIELD, redactEnvField)
     .replace(PRIVATE_KEY_BLOCK, REDACTED)
     .replace(SERVICE_ACCOUNT, (_m, open: string, _key: string, close: string) => `${open}${REDACTED}${close}`)
     .replace(AWS_ACCESS_KEY, REDACTED)
-    .replace(
-      AWS_SECRET_FIELD,
-      (_m, label: string, sep: string, raw: string, open?: string, close?: string) =>
-        redactField(label, sep, raw, open, close),
-    )
     .replace(PRESIGNED_SIGNATURE, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(PG_PASSWORD_ENV, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
     .replace(API_KEY_FIELD, REDACTED)

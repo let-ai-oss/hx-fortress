@@ -790,19 +790,74 @@ describe("credentials never leave", () => {
     const shapes = [
       '{"ts":"x","password":["s3cr3tA","s3cr3tB"],"host":"db"}',
       '{"ts":"x","password":{"v":"s3cr3tHunter2"},"host":"db"}',
+      // NESTED two deep, with a field after it — the shape that proves the
+      // structured arm consumed the whole value rather than its head.
+      '{"ts":"x","password":{"a":{"b":"s3cr3tHunter2"}},"host":"db"}',
+      '{"ts":"x","secretAccessKey":[["s3cr3tA"]],"host":"db"}',
       '{"password":1234567890,"host":"db"}',
-      // The escaped form JSON.stringify produces for a nested error.
-      '{"err":"{\\"password\\":\\"s3cr3tHunter2\\"}"}',
     ];
     for (const line of shapes) {
       const out = redactCredentials(line);
       expect(out).not.toContain("s3cr3t");
       expect(out).not.toContain("1234567890");
       expect(() => JSON.parse(out)).not.toThrow();
+      // BY VALUE, not merely parseable. Every earlier version of this rule
+      // deleted the fields AFTER the secret and still produced valid JSON, so
+      // "it parses" could not see the defect at all.
+      expect((JSON.parse(out) as { host?: string }).host).toBe("db");
     }
     // …and a state stays a state: `null` is "not configured", not a secret.
     const withNull = '{"level":"error","password":null,"host":"10.0.0.4"}';
     expect(redactCredentials(withNull)).toBe(withNull);
+  });
+
+  test("an EMBEDDED error keeps every field after the secret", () => {
+    // `JSON.stringify` writes a nested driver error as an escaped string. The
+    // escaped-quote arm has to stop at the first `\\"`; treating it as an
+    // ordinary escape ran the match to the last plain quote on the line and
+    // deleted the host, the port and the TLS flag — while the outer JSON still
+    // parsed, so nothing downstream noticed.
+    const line =
+      '{"ts":"t","msg":"connect failed: {\\"password\\":\\"hunter2\\",\\"host\\":\\"db.internal\\",\\"port\\":5432}","bucket":"hx"}';
+    const out = redactCredentials(line);
+    expect(out).not.toContain("hunter2");
+    expect(out).toContain("db.internal");
+    expect(out).toContain("5432");
+    expect((JSON.parse(out) as { bucket?: string }).bucket).toBe("hx");
+  });
+
+  test("an unquoted value beginning with a JSON literal is still a secret", () => {
+    // The literal arm was unanchored, so `null` matched the head of
+    // `nullS3cretValue` and the state passthrough then emitted the whole
+    // credential untouched.
+    expect(redactCredentials("password=nullS3cretValue host=db")).toBe(
+      `password=${REDACTED} host=db`,
+    );
+    expect(redactCredentials("secret_access_key=trueSecretHere region=eu")).toBe(
+      `secret_access_key=${REDACTED} region=eu`,
+    );
+  });
+
+  test("a prefixed field name is the same field", () => {
+    // `\b(password)` cannot match after an underscore — both are word
+    // characters — so the two spellings this appliance actually writes went
+    // through in the clear, while the object-key rule called them secrets.
+    expect(redactCredentials("dsn_password=hunter2 host=db")).toBe(
+      `dsn_password=${REDACTED} host=db`,
+    );
+    expect(redactCredentials("POSTGRES_PASSWORD=hunter2 host=db")).toBe(
+      `POSTGRES_PASSWORD=${REDACTED} host=db`,
+    );
+  });
+
+  test("a long dotted token does not stall the redactor", () => {
+    // `[a-z0-9+.-]*` after a `\b` rescans from every word boundary inside a
+    // dotted run: one 128 KB token blocked the event loop for 8.8 s, and every
+    // later open of the Logs tab paid it again.
+    const line = `{"msg":"${"a.".repeat(64_000)}","password":"x"}`;
+    const started = Date.now();
+    redactCredentials(line);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   test("an unquoted value keeps its whole tail — the env and DSN form", () => {
