@@ -54,6 +54,20 @@ function Chrome(): React.ReactElement {
   const status = useResource(() => api.status(), [], { pollMs: 5_000 });
   const identity = useResource(() => api.identity(), [], { pollMs: 60_000 });
 
+  // Land the keyboard somewhere on arrival. The shell mounted with focus on
+  // `document.body`, so the first Tab out of a keyboard sign-in went to the
+  // skip-link and the second to the nav — a surface that opens keyboard
+  // homeless. Once, at mount, and only while nothing else already holds focus:
+  // a poll must never yank focus out from under someone mid-type.
+  const nav = React.useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const landing =
+      nav.current?.querySelector<HTMLButtonElement>("button.active") ??
+      nav.current?.querySelector<HTMLButtonElement>("button");
+    landing?.focus();
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement | null;
@@ -205,7 +219,7 @@ function Chrome(): React.ReactElement {
       </div>
 
       <div className="shell">
-        <nav className="side">
+        <nav className="side" ref={nav}>
           {NAV_GROUPS.map((group) => (
             <React.Fragment key={group.label}>
               <div className="navlbl">{group.label}</div>
