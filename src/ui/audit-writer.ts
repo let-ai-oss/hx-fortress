@@ -9,7 +9,7 @@
 // ("the life of the database") would become a liability. One durable record per
 // (login, remote-key, 5-minute window) carrying the final attempt count keeps
 // growth proportional to ACTIVE PAIRS instead of attempts. Attempts refused by a
-// rate bucket or by the global ceiling append NOTHING at all: they cost a
+// rate bucket, or shed by the argon gate, append NOTHING at all: they cost a
 // counter, never an fsync, or a flood would still be able to make this host
 // write to disk as fast as it can send packets.
 //
@@ -161,9 +161,9 @@ export class ConsoleAudit implements ConsoleExportAudit {
 
   /**
    * Note one failed public-auth attempt. Nothing is written here, which is the
-   * point. The caller must NOT call this for an attempt a rate bucket or the
-   * global ceiling refused: those are counted by the limiter and write no
-   * record, so a flood cannot convert a refusal into disk traffic.
+   * point. The caller must NOT call this for an attempt a rate bucket refused or
+   * the argon gate shed: those are counted by the limiter and write no record,
+   * so a flood cannot convert a refusal into disk traffic.
    */
   noteFailure(action: string, args: { login?: string | null; remoteKey: string }): void {
     const at = this.now();

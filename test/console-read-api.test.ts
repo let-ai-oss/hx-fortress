@@ -850,14 +850,46 @@ describe("credentials never leave", () => {
     );
   });
 
+  test("a numeric secret is redacted on BOTH paths", () => {
+    // The two halves of the file had disagreed: the string rule called a number
+    // under one of these names a value somebody chose, and the object rule
+    // called it a configuration fact.
+    expect(redactValue({ password: 1234567890, dsn: 1234567890, hasPassword: false })).toEqual({
+      password: REDACTED,
+      dsn: REDACTED,
+      hasPassword: false,
+    });
+  });
+
+  test("an env value keeps the bracket that closes its diagnostic", () => {
+    expect(redactCredentials("rotate failed (password=hunter2) at 10:00")).toBe(
+      `rotate failed (password=${REDACTED}) at 10:00`,
+    );
+  });
+
+  test("a DSN with no user, and one whose password holds a slash", () => {
+    // `redis://:secret@host` carries no user, and requiring one left that
+    // password in the clear.
+    expect(redactCredentials("redis://:justpass@h:6379")).toBe(`redis://:${REDACTED}@h:6379`);
+    expect(redactCredentials("postgresql://u:pa/ss@h:5432/db")).toBe(
+      `postgresql://u:${REDACTED}@h:5432/db`,
+    );
+  });
+
   test("a long dotted token does not stall the redactor", () => {
     // `[a-z0-9+.-]*` after a `\b` rescans from every word boundary inside a
     // dotted run: one 128 KB token blocked the event loop for 8.8 s, and every
     // later open of the Logs tab paid it again.
-    const line = `{"msg":"${"a.".repeat(64_000)}","password":"x"}`;
-    const started = Date.now();
-    redactCredentials(line);
-    expect(Date.now() - started).toBeLessThan(1_000);
+    // THREE shapes, because the first bound only fixed the first of them: a
+    // dotted run against the scheme (8.8 s), repeated `a://` (3.6 s) and
+    // repeated `redis://h:1/` (1.2 s) against the user and password runs. A test
+    // that pinned only the dotted one could not see the other two.
+    for (const token of ["a.".repeat(64_000), "a://".repeat(32_000), "redis://h:1/".repeat(10_923)]) {
+      const line = `{"msg":"${token}","password":"x"}`;
+      const started = Date.now();
+      redactCredentials(line);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
   });
 
   test("an unquoted value keeps its whole tail — the env and DSN form", () => {

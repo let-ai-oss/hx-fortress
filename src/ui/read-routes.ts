@@ -443,7 +443,11 @@ export async function handleReadRoute(
           sessionRef: ctx.sessionId,
           params: { format: "pdf", generatedAt: payload.generatedAt },
         });
-        const bytes = renderPdf(REPORT_TITLE, reportLines(payload));
+        // Through the SAME belt as the JSON twin one case up. Nothing in a report
+        // payload carries a credential shape today; this is the belt, not a fix
+        // — the route is reachable by a readonly session and one added field is
+        // all it would take.
+        const bytes = renderPdf(REPORT_TITLE, reportLines(redactValue(payload)));
         return new Response(bytes.buffer as ArrayBuffer, {
           status: 200,
           headers: {
@@ -498,7 +502,13 @@ export async function handleReadRoute(
             413,
           );
         }
-        return new Response(`${rows.map((r) => JSON.stringify(r)).join("\n")}\n`, {
+        // REDACTED, like every other body that leaves. Its sibling two cases up
+        // (`logsExport`) says why in its own comment — this route is reachable
+        // by a READONLY session — and this one, which serialises rows straight
+        // out of the audit table, did not. `error` is a thrown message and the
+        // paged view of the same rows redacts it, so the export was the one way
+        // to read a credential the panel would not show.
+        return new Response(`${rows.map((r) => JSON.stringify(redactValue(r))).join("\n")}\n`, {
           status: 200,
           headers: {
             "content-type": "application/x-ndjson",

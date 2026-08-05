@@ -36,6 +36,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { clampActor, sanitizeParams } from "./audit-actions";
+import { redactCredentials } from "../ui/redact";
 
 export type AuditOrigin = "console" | "cli" | "system";
 
@@ -342,6 +343,12 @@ export class AuditSpool {
       ...record,
       actor: clampActor(record.actor),
       params: sanitizeParams(record.action, record.params),
+      // AT WRITE TIME, like `params`. `error` is a thrown message — a driver's
+      // connect failure quotes the whole DSN — and it was the one field of a
+      // record that went to disk, and from there to the audit table and its
+      // export, exactly as it arrived. Redacting it here means the column never
+      // holds a credential, rather than every reader having to remember to.
+      error: record.error === null || record.error === undefined ? record.error : redactCredentials(record.error),
       origin: record.origin ?? this.origin,
       fileId: this.fileId,
       seq: (this.seq += 1),

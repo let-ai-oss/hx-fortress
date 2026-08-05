@@ -14,11 +14,20 @@
 /** What a redacted value reads as. One string, so a reader learns to see it. */
 export const REDACTED = "[redacted]";
 
-// A DSN's SCHEME is bounded. `[a-z0-9+.-]*` after a `\b` rescans from every
-// word boundary inside a dotted or hyphenated run, which is quadratic — one
-// 128 KB token in a log line blocked the event loop for 8.8 s, and every later
-// open of the Logs tab paid it again. No scheme is thirty characters long.
-const DSN = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)([^\s:/@]+):([^\s@]*)@/gi;
+// EVERY run here is bounded, and the password run cannot cross a `//`.
+//
+// An unbounded `*` after a `\b`, or after a `://` that may not be followed by an
+// `@`, rescans to the end of the whitespace-free token from each starting
+// position — quadratic, and measured through the real chain on a 128 KB line:
+// 8.8 s for a dotted run against the scheme, 3.6 s for repeated `a://` and 1.2 s
+// for repeated `redis://h:1/` against the credential runs, with every later open
+// of the Logs tab paying it again. No scheme is thirty characters long; a
+// password may legitimately contain one `/` and does here, but never a `//`,
+// which is what bounds the last two. All three are now ≤6 ms.
+//
+// The user run is `{0,256}`, not `{1,...}`: `redis://:secret@host` carries no
+// user, and requiring one left that password in the clear.
+const DSN = /\b([a-z][a-z0-9+.-]{0,30}:\/\/)([^\s:/@]{0,256}):((?:[^\s@/]|\/(?!\/)){0,256})@/gi;
 const BEARER = /\b(bearer|token|authorization)(\s*[=:]\s*|\s+)([A-Za-z0-9._~+/=-]{8,})/gi;
 const QUERY_SECRET = /([?&](?:password|passwd|pwd|token|secret|credential|key)=)([^&\s]+)/gi;
 
@@ -57,13 +66,17 @@ const JSON_VALUE = [
   String.raw`[^\s,;}\])]+`,
 ].join("|");
 
-/** An env / DSN value: ended by whitespace, `;` or `&`, never by a comma —
- *  a comma is a legal character in one, and stopping at it left the tail. */
+/** An env / DSN value: ended by whitespace, `;`, `&` or a CLOSING BRACKET —
+ *  never by a comma, which is a legal character in one, and stopping at it left
+ *  the tail of the credential in the clear. The bracket matters because these
+ *  fields turn up inside parenthesised diagnostics ("rotate failed
+ *  (password=… ) at 10:00"), where swallowing the `)` deletes what follows. */
+const ENV_END = String.raw`\s;&)\]}`;
 const ENV_VALUE = [
   String.raw`'[^']*'`,
   String.raw`(?<q>")(?:[^"\\]|\\.)*"`,
-  String.raw`(?:null|true|false)(?![^\s;&])`,
-  String.raw`[^\s;&]+`,
+  String.raw`(?:null|true|false)(?![^${ENV_END}])`,
+  String.raw`[^${ENV_END}]+`,
 ].join("|");
 
 const JSON_FIELD = new RegExp(
@@ -192,7 +205,7 @@ export function redactCredentials(value: string): string {
  *  exists for. Matched on the key here, and kept in step with the field rules
  *  above and with `command-params.ts`. */
 const SECRET_KEY_NAME =
-  /^(?:.*_)?(?:password|passwd|pwd|secret|secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key(?:[_-]?id)?|api[_-]?key|apikey|dsn|database[_-]?url|signing[_-]?key|client[_-]?secret)$/i;
+  /^(?:.*_)?(?:password|passwd|pwd|secret|secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key(?:[_-]?id)?|api[_-]?key|apikey|dsn|database[_-]?url|signing[_-]?key|client[_-]?secret|(?:password|pwd|passwd)[_-]?hash)$/i;
 
 // DELIBERATELY NOT on that list: a bare `token`, and `credentialRef`. The
 // console MINTS both and has to hand them back — the sign-in response carries
@@ -235,7 +248,11 @@ export function redactValue<T>(value: T): T {
       // well as its meaning — the same reason `null` is left alone, so "not
       // configured" and "withheld" never read alike.
       const named = SECRET_KEY_NAME.test(camelToSnake(key));
-      const primitive = inner === null || inner === undefined || typeof inner === "boolean" || typeof inner === "number";
+      // `null`, `undefined` and a boolean are "is it configured" facts. A NUMBER is
+  // not — none of these fields has a numeric state, so a number under one is a
+  // value somebody chose, and the string path already redacts it. The two halves
+  // of this file had disagreed about that.
+  const primitive = inner === null || inner === undefined || typeof inner === "boolean";
       out[key] = named && !primitive ? REDACTED : redactValue(inner);
     }
     return out as unknown as T;

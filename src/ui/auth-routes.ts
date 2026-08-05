@@ -149,7 +149,7 @@ export async function handleAuthRoute(
       workbenchSub: entry?.workbenchSub ?? null,
     });
     if (!result.ok) {
-      // A refusal by a rate bucket or by the global ceiling appends NOTHING: it
+      // A refusal by a rate bucket appends NOTHING: it
       // is a counter, and an attempt the box refused must not be able to make it
       // write to disk. A genuine failure joins its (login, source, window) and
       // becomes one record when that window closes.
