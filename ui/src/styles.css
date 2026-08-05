@@ -256,6 +256,12 @@
   .stat { padding: 22px 26px; border-right: 1px solid var(--border); }
   .stat:last-child { border-right: none; }
   .stat .big { font-family: var(--display); font-size: 32px; font-weight: 700; letter-spacing: -0.02em; margin-top: 4px; }
+  /* An identifier value — a bucket name, a fortress id — is one token to a
+     reader even when it contains hyphens, and the default wrap broke
+     `hx-fortress-rig` after a hyphen into two stacked lines that read as two
+     separate values. Shrink it to fit instead, and break only if there is no
+     other way. */
+  .stat .big .mono { display: inline-block; max-width: 100%; font-size: 17px; word-break: keep-all; overflow-wrap: break-word; }
   .stat .sub { color: var(--text-subtle); font-size: 14px; }
   .stat .sub, .stat .lbl { cursor: default; user-select: none; }
 
@@ -281,7 +287,16 @@
   .facts .frw:last-child { border-bottom: none; padding-bottom: 2px; }
   .facts .frw:first-child { padding-top: 2px; }
   .facts.wide .frw { grid-template-columns: 190px 1fr auto; }
-  .facts .k { color: var(--text-subtle); font-size: 14.5px; }
+  /* Metric NAMES are dotted identifiers in mono — `ingest.pause_seconds_remaining`
+     is far past 150px, and each row is its own grid, so the key overran the
+     value column and the two rendered on top of each other. Give the name the
+     slack instead of a fixed track: a fixed 260px starved the value column and
+     broke the `Published` date one word per line. */
+  .facts.metrics .frw { grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; }
+  /* min-width:0 + wrapping: a key longer than its track must WRAP inside the
+     column, never spill across the value. A grid cell does not clip by default,
+     so without this the two overlap and both become unreadable. */
+  .facts .k { color: var(--text-subtle); font-size: 14.5px; min-width: 0; overflow-wrap: anywhere; }
   .facts .v { font-size: 15.5px; font-weight: 500; }
   .facts .vs { color: var(--text-subtle); font-size: 13.5px; font-weight: 400; margin-top: 1px; }
   .facts .vs.okv { color: var(--ok); font-weight: 600; }
@@ -498,7 +513,10 @@
     padding: 18px 20px; font-family: var(--mono); font-size: 14px; font-weight: 500; line-height: 1.85;
     color: #d3d7ea; max-height: 480px; overflow: auto;
   }
-  .logpane .ln { white-space: pre-wrap; }
+  /* `pre-wrap` alone wraps at whitespace, and a structured log line's fields are
+     compact JSON with none — so a long one ran off the right edge and its tail
+     was simply unreadable, on the surface whose whole job is to be read. */
+  .logpane .ln { white-space: pre-wrap; overflow-wrap: anywhere; }
   .logpane .ln .ts { color: #8b90ad; }
   .logpane .ln .lmod { color: #aab0e2; }
   .logpane .ln.up { color: #dcdefb; }

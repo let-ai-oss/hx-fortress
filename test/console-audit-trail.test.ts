@@ -293,6 +293,20 @@ describe("the drain", () => {
     };
     expect(payloadFingerprint(roundTripped)).toBe(payloadFingerprint(record));
     expect(payloadFingerprint({ ...record, actor: "mallory" })).not.toBe(payloadFingerprint(record));
+
+    // The THIRD difference, and the one that actually shipped: this driver hands
+    // `jsonb` back as raw JSON TEXT, not as an object. Fingerprinted directly,
+    // every drained record disagreed with its own spooled twin — one
+    // integrity_error per record per drain, each accusing the operator's disk of
+    // having been altered. A fortress holding 35 sessions had 83,397 audit rows,
+    // 83,388 of them that false alarm, 45 MB of database, still climbing.
+    const asText = { ...record, ts: new Date(record.ts), params: '{"role":"operator","login":"erik"}' };
+    expect(payloadFingerprint(asText)).toBe(payloadFingerprint(record));
+    // …and it is still a VALUE comparison: different params must still differ.
+    const otherText = { ...record, params: '{"role":"readonly","login":"erik"}' };
+    expect(payloadFingerprint(otherText)).not.toBe(payloadFingerprint(record));
+    // Text that is not JSON compares as itself rather than throwing.
+    expect(payloadFingerprint({ ...record, params: "{ not json" })).not.toBe(payloadFingerprint(record));
   });
 
   test("records written while Postgres is down drain when it comes back", async () => {

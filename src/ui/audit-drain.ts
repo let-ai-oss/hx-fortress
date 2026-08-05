@@ -71,10 +71,31 @@ function rows<T>(result: unknown): T[] {
   return Array.isArray(wrapped) ? (wrapped as T[]) : [];
 }
 
+/** `params` as a VALUE, whichever side it came from.
+ *
+ *  The spool holds it parsed; Postgres hands `jsonb` back as raw JSON TEXT under
+ *  this driver. Fingerprinting those two directly made every drained record
+ *  disagree with its own spooled twin — one `console.audit.integrity_error` per
+ *  record per drain, forever, each one accusing the operator's disk of having
+ *  been altered. Measured on a fortress holding 35 sessions: 83,397 audit rows
+ *  of which 83,388 were that false alarm, 45 MB of the database, still climbing.
+ *
+ *  Unparseable text is returned AS IS so it still compares by value rather than
+ *  throwing inside a comparison. */
+function paramsValue(params: unknown): unknown {
+  if (typeof params !== "string") return params;
+  try {
+    return JSON.parse(params);
+  } catch {
+    return params;
+  }
+}
+
 /** The comparable form of a record, from either side. Timestamps are normalized
- *  because the driver hands back a Date where the file holds a string, and
- *  params are key-sorted because jsonb does not preserve object order - neither
- *  difference is a difference in what was recorded. */
+ *  because the driver hands back a Date where the file holds a string, params
+ *  are PARSED because it hands jsonb back as text, and then key-sorted because
+ *  jsonb does not preserve object order - none of those is a difference in what
+ *  was recorded. */
 export function payloadFingerprint(record: {
   ts: string | Date;
   origin: string;
@@ -96,7 +117,7 @@ export function payloadFingerprint(record: {
     record.sessionRef,
     record.tier,
     record.action,
-    sortedJson(record.params),
+    sortedJson(paramsValue(record.params)),
     record.kind,
     record.refFileId,
     record.refSeq === null ? null : Number(record.refSeq),

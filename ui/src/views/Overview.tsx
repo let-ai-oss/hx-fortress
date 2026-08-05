@@ -175,7 +175,7 @@ export default function Overview(): React.ReactElement {
                   <FactRow
                     k="Size"
                     v={fmt.bytes(row.bytesUploaded)}
-                    vs={`${fmt.int(row.eventCount)} events · ${fmt.int(row.chunkCount)} chunks`}
+                    vs={`${fmt.plural(row.eventCount, "event")} · ${fmt.plural(row.chunkCount, "chunk")}`}
                   />
                   <FactRow
                     k="Where"
@@ -194,7 +194,7 @@ export default function Overview(): React.ReactElement {
               data.metrics === null ? (
                 <Empty>{data.reason ?? "the daemon has published no metrics"}</Empty>
               ) : (
-                <div className="facts">
+                <div className="facts metrics">
                   <FactRow
                     k="Published"
                     v={fmt.ago(data.metrics.writtenAt)}
