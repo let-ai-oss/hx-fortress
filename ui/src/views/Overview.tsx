@@ -14,6 +14,11 @@ export default function Overview(): React.ReactElement {
   const status = useResource(() => api.status(), [], { pollMs: 10_000, active });
   const page = useResource(() => api.sessions({ limit: "1" }), [], { pollMs: 15_000, active });
   const facts = useResource(() => api.facts(), [], { pollMs: 30_000, active });
+  // The daemon says whether Postgres came up; the console can only see whether
+  // coordinates were written, which is a strictly later event.
+  const pgFailed =
+    status.data?.daemonPostgres?.phase === "failed" ||
+    status.data?.daemonPostgres?.phase === "retrying";
   const growth = useResource(() => api.growth(30), [], { pollMs: 60_000, active });
   const metrics = useResource(() => api.metrics(), [], { pollMs: 15_000, active });
 
@@ -50,17 +55,29 @@ export default function Overview(): React.ReactElement {
         />
         <Tile
           head="Metadata database"
+          // The DAEMON's verdict first. `database` is derived from pg.json,
+          // which exists only once Postgres is ready, so a boot that died
+          // earlier rendered as "not configured" — which reads like nobody set
+          // it up, on the one tile that should say the database CRASHED.
           state={
             status.data
-              ? status.data.database.kind === "ready"
-                ? status.data.database.mode === "external"
-                  ? "External"
-                  : "Embedded"
-                : status.data.database.kind.split("-").join(" ")
+              ? pgFailed
+                ? "Failed to start"
+                : status.data.database.kind === "ready"
+                  ? status.data.database.mode === "external"
+                    ? "External"
+                    : "Embedded"
+                  : status.data.database.kind.split("-").join(" ")
               : null
           }
-          sub={facts.data?.postgres ? `${fmt.bytes(facts.data.postgres.databaseBytes)} on disk` : null}
-          tone={status.data?.database.kind === "ready" ? "ok" : "bad"}
+          sub={
+            pgFailed
+              ? (status.data?.daemonPostgres?.reason ?? "the daemon reported no reason")
+              : facts.data?.postgres
+                ? `${fmt.bytes(facts.data.postgres.databaseBytes)} on disk`
+                : null
+          }
+          tone={!pgFailed && status.data?.database.kind === "ready" ? "ok" : "bad"}
           onClick={() => app.goto("postgres")}
         />
         <Tile

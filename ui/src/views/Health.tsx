@@ -52,7 +52,24 @@ export function Postgres(): React.ReactElement {
   const facts = useResource(() => api.facts(), [], { pollMs: 30_000, active });
   const identity = useResource(() => api.identity(), [], { pollMs: 60_000, active });
 
-  const database = status.data ? databaseCopy(status.data.database) : null;
+  // The DAEMON's verdict wins whenever it reports a failure. `database` is
+  // derived from pg.json, which is written only once Postgres is ready, so a
+  // boot that died earlier renders as "No coordinates — start the fortress
+  // daemon" while the daemon is running and has already recorded exactly what
+  // went wrong. Telling an operator to start something that is already started
+  // is worse than saying nothing: it sends them away from the evidence.
+  const pg = status.data?.daemonPostgres ?? null;
+  const database = status.data
+    ? pg && (pg.phase === "failed" || pg.phase === "retrying")
+      ? {
+          headline: pg.phase === "failed" ? "Failed to start" : "Retrying",
+          detail:
+            pg.reason ??
+            "the daemon reported no reason — see `hx-fortress logs` on this host.",
+          ok: false,
+        }
+      : databaseCopy(status.data.database)
+    : null;
 
   return (
     <section className={active ? "view active" : "view"}>

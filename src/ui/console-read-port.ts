@@ -363,6 +363,9 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         writtenAt: snapshot?.host.writtenAt ?? null,
         rootMatch: await compareRoots(deps.paths.root, snapshot?.host.root),
         database,
+        daemonPostgres: snapshot
+          ? { phase: snapshot.postgres.phase, reason: snapshot.postgres.reason }
+          : null,
       };
       if (database.kind === "ready" && database.mode === "external") {
         view.externalBanner = externalContainmentBanner();

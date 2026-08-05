@@ -7,6 +7,66 @@ const RO_DSN = "postgresql://hx_app_ro:pw-ro@127.0.0.1:54329/hx-db";
 const dsnFor = (role?: "ro" | "rw"): string => (role === "ro" ? RO_DSN : RW_DSN);
 
 describe("embedded provider", () => {
+  test("a failed boot NAMES the step, quotes the server log, and is logged", async () => {
+    // The silence this replaces: the provider swallowed the error into
+    // phase/reason and wrote nothing anywhere. An operator saw the binaries
+    // install, then nothing, while every ingest was refused with
+    // `postgres_not_ready`. The real cause — a backend killed by SIGILL running
+    // the pgvector migration — sat in Postgres's own log, which no surface read.
+    const logged: Array<{ msg: string; fields?: Record<string, unknown> }> = [];
+    const provider = createEmbeddedPostgres({
+      dsn: dsnFor,
+      acquire: async () => "/bin",
+      ensureCluster: async () => undefined,
+      startServer: async () => undefined,
+      stopServer: async () => undefined,
+      ensureDbSchema: async () => undefined,
+      ensureVector: async () => undefined,
+      migrate: async () => {
+        throw new Error("Connection closed");
+      },
+      logger: {
+        error: (msg: string, fields?: Record<string, unknown>) => logged.push({ msg, fields }),
+        info: () => undefined,
+        warn: () => undefined,
+        debug: () => undefined,
+      } as never,
+      serverLogTail: async () =>
+        'client backend (PID 41050) was terminated by signal 4: Illegal instruction',
+    });
+    await provider.start();
+
+    const { phase, reason } = provider.status();
+    expect(phase).toBe("failed");
+    // WHICH step — "Connection closed" alone names nothing actionable.
+    expect(reason).toContain("applying migrations");
+    // …and the cause, carried out of Postgres's own log.
+    expect(reason).toContain("Illegal instruction");
+    // …and it reached the log, not just the status file.
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.msg).toBe("postgres failed to start");
+    expect(logged[0]?.fields?.step).toBe("applying migrations");
+    expect(String(logged[0]?.fields?.serverLog)).toContain("signal 4");
+    expect(provider.isReady()).toBe(false);
+  });
+
+  test("a failure with no server log still names its step", async () => {
+    const provider = createEmbeddedPostgres({
+      dsn: dsnFor,
+      acquire: async () => {
+        throw new Error("404 fetching the bundle");
+      },
+      ensureCluster: async () => undefined,
+      startServer: async () => undefined,
+      stopServer: async () => undefined,
+      ensureDbSchema: async () => undefined,
+      migrate: async () => undefined,
+    });
+    await provider.start();
+    expect(provider.status().reason).toContain("acquiring the Postgres binaries");
+    expect(provider.status().reason).toContain("404");
+  });
+
   test("progresses to ready and exposes role-aware dsns in de-superuser order", async () => {
     const order: string[] = [];
     const provider = createEmbeddedPostgres({

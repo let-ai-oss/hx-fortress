@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { acquireBinaries } from "./acquire";
@@ -149,6 +149,19 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
 
   return createEmbeddedPostgres({
     dsn: roleDsn,
+    logger: deps.logger,
+    // The Postgres server's own log, which is where the CAUSE lives whenever the
+    // server itself is what died — a backend killed by a signal, a failed
+    // extension, a corrupt cluster. The error the provider catches is only the
+    // driver noticing the socket went away ("Connection closed"), which names
+    // nothing an operator can act on. Errors only, newest last, and bounded.
+    serverLogTail: async () => {
+      const text = await readFile(path.join(dataDir, "pg_ctl-server.log"), "utf8").catch(() => null);
+      if (!text) return null;
+      const lines = text.split("\n").filter((l) => /(FATAL|PANIC|ERROR|was terminated)/.test(l));
+      const tail = lines.slice(-4).join(" | ").trim();
+      return tail ? tail.slice(0, 600) : null;
+    },
     acquire: () =>
       acquireBinaries({
         fetchImpl: fetch,

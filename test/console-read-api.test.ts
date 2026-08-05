@@ -256,6 +256,7 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
     status: async () => ({
       daemon: "running",
       copy: "running",
+      daemonPostgres: null,
       version: "0.0.0-test",
       serviceManager: "systemd (user)",
       pid: 42,
@@ -527,6 +528,7 @@ describe("degraded states", () => {
       status: async () => ({
         daemon: "running",
         copy: "running",
+        daemonPostgres: null,
         version: "0.0.0-test",
         serviceManager: "systemd (user)",
         pid: 1,
@@ -548,6 +550,7 @@ describe("staleness and the pre-heartbeat state", () => {
       status: async () => ({
         daemon: "pre-heartbeat",
         copy: "pre-heartbeat daemon - restart to finish the upgrade",
+        daemonPostgres: null,
         version: "0.0.0-test",
         serviceManager: "systemd (user)",
         pid: 7,
@@ -579,6 +582,7 @@ describe("staleness and the pre-heartbeat state", () => {
           writtenAt: null,
           rootMatch: "unknown",
           database: { kind: "not-configured" },
+      daemonPostgres: null,
         }),
       });
       const { res } = await get(READ_PATHS.status, port);

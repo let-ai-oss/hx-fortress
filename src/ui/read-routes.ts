@@ -130,6 +130,14 @@ export interface ConsoleStatusView {
   /** Root identity comparison between the console and the daemon. */
   rootMatch: "same" | "different" | "unknown";
   database: ConsoleDbState;
+  /** What the DAEMON says about Postgres, straight from its status file.
+   *
+   *  The console derives `database` from pg.json alone, and pg.json is written
+   *  only once Postgres is ready — so a boot that died before that reads as
+   *  "no coordinates", and the page told the operator to start a daemon that
+   *  was already running. The daemon knew exactly what happened and nobody
+   *  asked it. Null when there is no snapshot to read. */
+  daemonPostgres: { phase: string; reason: string | null } | null;
   /** Present only in external mode. Both containment voids, stated. */
   externalBanner?: string[];
 }

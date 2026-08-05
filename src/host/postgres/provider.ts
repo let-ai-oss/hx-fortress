@@ -35,6 +35,16 @@ export interface EmbeddedDeps {
   /** Role-aware connection string builder handed to modules once ready. Default
    *  (and `"rw"`) resolves the DML role; `"ro"` the SELECT-only role. */
   dsn: (role?: "ro" | "rw") => string;
+  /** Where the failure goes. Without it a boot that dies here is SILENT: the
+   *  phase and reason land in status.json and nothing is ever written to the
+   *  log, so an operator watching `hx-fortress logs` sees the binaries install
+   *  and then nothing, while every ingest is refused with `postgres_not_ready`. */
+  logger?: ScopedLogger;
+  /** Last lines of the Postgres server's own log, read on failure. The cause is
+   *  routinely THERE and nowhere else — a backend killed by a signal, a bad
+   *  extension, a corrupt cluster — while the error this code catches is only
+   *  the driver noticing the socket went away. */
+  serverLogTail?: () => Promise<string | null>;
 }
 
 export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
@@ -44,23 +54,31 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
 
   return {
     async start() {
+      let step = "acquiring the Postgres binaries";
       try {
         phase = "acquiring";
         binDir = await deps.acquire();
+        step = "creating the cluster";
         phase = "initializing";
         await deps.ensureCluster(binDir);
+        step = "starting the server";
         await deps.startServer(binDir);
+        step = "hardening authentication";
         // De-superuser hardening: set the fortress password + rewrite pg_hba to
         // scram BEFORE any schema work, converting a legacy trust cluster in
         // place. Must precede ensureDbSchema so every later connection is scram.
         if (deps.ensureAuth) await deps.ensureAuth(binDir);
+        step = "creating the database and schema";
         await deps.ensureDbSchema();
+        step = "installing pgvector";
         // Inject pgvector before migrate so the embeddings migrations can apply
         // this boot. Mandatory: if the inject throws, it propagates and fails
         // the start (phase = "failed") — semantic search is core, so we refuse
         // to boot half-working rather than silently degrade.
         if (deps.ensureVector) await deps.ensureVector();
+        step = "applying migrations";
         await deps.migrate();
+        step = "provisioning the least-privilege roles";
         // Provision the least-privilege app roles after migrate, so the blanket
         // GRANT ON ALL TABLES covers everything this boot created.
         if (deps.ensureAppRoles) await deps.ensureAppRoles();
@@ -68,7 +86,17 @@ export function createEmbeddedPostgres(deps: EmbeddedDeps): PostgresProvider {
         reason = null;
       } catch (error) {
         phase = "failed";
-        reason = sanitizeDbError(error);
+        // WHICH STEP, not just the driver's last words. "Connection closed" is
+        // what the client saw; "applying migrations" is what was happening, and
+        // it is the difference between a five-minute diagnosis and an hour.
+        const detail = sanitizeDbError(error);
+        const tail = await deps.serverLogTail?.().catch(() => null);
+        reason = tail ? `${step}: ${detail} — ${tail}` : `${step}: ${detail}`;
+        deps.logger?.error("postgres failed to start", {
+          step,
+          error: detail,
+          ...(tail ? { serverLog: tail } : {}),
+        });
       }
     },
     async stop() {

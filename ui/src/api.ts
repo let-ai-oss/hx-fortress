@@ -200,6 +200,11 @@ export interface StatusView {
   writtenAt: string | null;
   rootMatch: "same" | "different" | "unknown";
   database: ConsoleDbState;
+  /** What the DAEMON says about Postgres. `database` above is derived from
+   *  pg.json, which only exists once Postgres is READY — so on a failed boot it
+   *  reads "no coordinates" and says nothing about why. This is the daemon's
+   *  own verdict, and it is the one that names the cause. */
+  daemonPostgres: { phase: string; reason: string | null } | null;
   externalBanner?: string[];
 }
 
