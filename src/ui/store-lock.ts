@@ -20,7 +20,7 @@
 // refuses and names the remediation. Rebuilding would silently drop the keys the
 // parser does not know about — which on users.json means dropping accounts.
 
-import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -131,15 +131,30 @@ function pidAlive(pid: number): boolean {
  * one file ends up waiting a timer the other does not.
  */
 export async function reclaimableLock(lock: string): Promise<LockReclaim | null> {
-  const info = await stat(lock).catch(() => null);
-  if (!info) return null; // vanished — the retry will take it
-  const owner = parseOwner(await readFile(lock, "utf8").catch(() => ""));
-  if (!owner) return { owner: null, reason: "unreadable" };
-  if (owner.bootId !== BOOT_ID && !pidAlive(owner.pid)) {
-    return { owner, reason: "owner-gone" };
+  // ONE open, then both facts off that handle. Resolving the path twice — stat
+  // it, then read it — let the two answers describe DIFFERENT files: the holder
+  // releases and a new owner takes the lock in between, and the age test then
+  // runs the departed holder's mtime against the newcomer's identity and calls
+  // a lock that is seconds old stale. Reclaiming a live lock is the one outcome
+  // this protocol exists to prevent, since every writer above it (users.json,
+  // ui.json, the credential store) rests on single-writer.
+  const held = await open(lock, "r").catch(() => null);
+  if (!held) return null; // vanished — the retry will take it
+  try {
+    const [info, text] = await Promise.all([
+      held.stat(),
+      held.readFile("utf8").catch(() => ""),
+    ]);
+    const owner = parseOwner(text);
+    if (!owner) return { owner: null, reason: "unreadable" };
+    if (owner.bootId !== BOOT_ID && !pidAlive(owner.pid)) {
+      return { owner, reason: "owner-gone" };
+    }
+    if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return { owner, reason: "stale" };
+    return null;
+  } finally {
+    await held.close().catch(() => {});
   }
-  if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return { owner, reason: "stale" };
-  return null;
 }
 
 /** Remove a lock file whatever its state. The `--force-unlock` implementation. */
