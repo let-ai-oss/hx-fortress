@@ -347,34 +347,68 @@ describe("the argon gate", () => {
     expect(again.ok === false && again.status).toBe(429);
   });
 
-  test("a flood that ROTATES the login still pays the ceiling", async () => {
+  test("a flood that ROTATES the login still SPENDS the ceiling", async () => {
     // Every first attempt at a name is clean by construction, so a predicate
-    // that skipped the ceiling for a clean principal was never consulted at all
-    // by a rotating flood: the process-wide bound on argon work stopped bounding
-    // the one shape it exists to bound. The token is spent unconditionally now,
-    // and the exemption asks for a login this fortress actually holds.
+    // that skipped the take for a clean principal was never consulted at all by
+    // a rotating flood: the process-wide bound on argon work stopped bounding
+    // the one shape it exists to bound. The token is spent unconditionally now.
     const runtime = runtimeOn(root);
     const created = await runtime.users.create("ada", "operator");
     await runtime.users.completeSetup(created.token, PASSWORD);
 
-    for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
-    const stranger = await runtime.signIn({
-      login: `stranger-${Math.random().toString(36).slice(2)}`,
-      password: "wrong-password-here",
-      remoteKey: "fresh-address",
-      remoteAddr: "fresh-address",
-    });
-    expect(stranger.ok === false && stranger.status).toBe(429);
-    expect(stranger.ok === false && stranger.reason).toContain("too many sign-in attempts");
+    const before = runtime.limiter.takeGlobalSignIn();
+    expect(before.ok).toBe(true);
+    for (let i = 0; i < 5; i += 1) {
+      await runtime.signIn({
+        login: `stranger-${i}`,
+        password: "wrong-password-here",
+        remoteKey: "rotating",
+        remoteAddr: "rotating",
+      });
+    }
+    // Six tokens gone (the probe plus five rotating attempts), which is the
+    // property: the flood is counted whatever it calls itself.
+    let spent = 1;
+    for (; spent < GLOBAL_SIGN_IN_CEILING.limit + 1; spent += 1) {
+      if (!runtime.limiter.takeGlobalSignIn().ok) break;
+    }
+    expect(spent).toBe(GLOBAL_SIGN_IN_CEILING.limit - 5);
+  });
 
-    // …and the operator, who exists and has failed at nothing, still gets in.
-    const genuine = await runtime.signIn({
+  test("a SATURATED ceiling refuses identically whether or not the login exists", async () => {
+    // The refusal must not be an existence oracle: an unknown login answering
+    // 429 while a known one answers the uniform 401 tells an attacker which
+    // names are real, which is exactly what the sign-in path's own uniformity
+    // rule forbids. Both are dirty principals here, so both are refused.
+    const runtime = runtimeOn(root);
+    const created = await runtime.users.create("ada", "operator");
+    await runtime.users.completeSetup(created.token, PASSWORD);
+    // Dirty them both, from the same address.
+    for (const login of ["ada", "ghost"]) {
+      await runtime.signIn({
+        login,
+        password: "wrong-password-here",
+        remoteKey: "shared",
+        remoteAddr: "shared",
+      });
+    }
+    for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
+
+    const known = await runtime.signIn({
       login: "ada",
       password: PASSWORD,
-      remoteKey: "fresh-address",
-      remoteAddr: "fresh-address",
+      remoteKey: "shared",
+      remoteAddr: "shared",
     });
-    expect(genuine.ok).toBe(true);
+    const unknown = await runtime.signIn({
+      login: "ghost",
+      password: PASSWORD,
+      remoteKey: "shared",
+      remoteAddr: "shared",
+    });
+    expect(known.ok === false && known.status).toBe(429);
+    expect(unknown.ok === false && unknown.status).toBe(429);
+    expect(known.ok === false && known.reason).toBe(unknown.ok === false ? unknown.reason : "");
   });
 
   test("a principal with no recent failures still gets in during a flood", async () => {

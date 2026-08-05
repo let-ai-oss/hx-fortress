@@ -130,6 +130,23 @@ describe("the console's authentication surface", () => {
     expect(bodies[0].recovery).toContain("ui user reset");
   });
 
+  test("one address cannot deny sign-in to everybody behind a proxy", async () => {
+    // The gate spends its bucket BEFORE the body is read, so it can only key on
+    // the address — and behind a proxy (the shape this console ships for:
+    // publicUrl set, trustedProxies empty) every caller shares one. A five-per-
+    // minute take there was the whole organization's budget: five requests from
+    // anywhere denied sign-in to every operator, which is the org-wide lockout
+    // the rate limiter's first rule forbids.
+    const token = await createUser("ada", "operator");
+    await runtime.users.completeSetup(token, PASSWORD);
+    for (let i = 0; i < 20; i += 1) {
+      const refused = await signIn(`stranger-${i}`, "wrong-password-here");
+      expect(refused.status).toBe(401);
+    }
+    const genuine = await signIn("ada", PASSWORD);
+    expect(genuine.status).toBe(200);
+  });
+
   test("a session reaches read routes, and a readonly one is refused a mutate", async () => {
     const token = await createUser("ada", "readonly");
     await runtime.users.completeSetup(token, PASSWORD);

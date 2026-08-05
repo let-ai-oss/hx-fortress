@@ -30,8 +30,20 @@ export interface BucketPolicy {
  *  starve itself. The instance probe gets its own bucket because it answers
  *  before any session exists and is reachable from loopback alone. */
 export const BUCKETS = {
-  /** Keyed (login, remote-key). */
+  /** Keyed (login, remote-key), and spent INSIDE `signIn` where the login is
+   *  known — never at the gate, which runs before the body is read and could
+   *  only key it on the address. That address is shared by every caller behind a
+   *  proxy (the deployment this console ships for: `publicUrl` set,
+   *  `trustedProxies: []`), so a gate-level take of five per minute was the
+   *  whole organization's budget and five requests from anywhere denied sign-in
+   *  to everybody — a lockout that is org-wide, which RULE ONE above forbids.
+   *  The gate keeps its shed for this route through `publicSignIn` below. */
   signIn: { limit: 5, windowMs: 60_000 },
+  /** The GATE's shed for the sign-in route, keyed remote-key because that is all
+   *  a pre-body check has. Sized for a shared address rather than one person: it
+   *  is a flood shed, not a lockout, and the real per-principal metering is
+   *  `signIn` above plus the process-wide ceiling and the argon gate. */
+  publicSignIn: { limit: 240, windowMs: 60_000 },
   /** Keyed remote-key. Separate from sign-in so a burst of one cannot exhaust
    *  the other's budget. */
   ssoEntry: { limit: 10, windowMs: 60_000 },

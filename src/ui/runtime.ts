@@ -278,17 +278,22 @@ export class UiRuntime {
     // the process-wide bound was never consulted at all — the ceiling stopped
     // bounding the flood it exists to bound.
     //
-    // And the exemption asks about the PRINCIPAL, not the address, because this
+    // The exemption asks about the PRINCIPAL, not the address, because this
     // console ships for a `publicUrl` behind a proxy where the default
     // `trustedProxies: []` makes every caller share one remote key — so an
     // address-only question answered "dirty" for everybody after a single
-    // attacker failure. It also requires the login to be one this fortress
-    // HOLDS: an account that does not exist has no operator to protect, and
-    // "unknown login" is exactly what a rotating flood is made of.
+    // attacker failure.
+    //
+    // It does NOT ask whether the login exists. Requiring that made the refusal
+    // itself an existence oracle — with the ceiling saturated, an unknown login
+    // got 429 and a known one got the uniform 401 — which is precisely what the
+    // paragraph above forbids. Bounding the flood is the ceiling's job through
+    // the token it always spends, and the argon gate's queue is what actually
+    // sheds the work.
     const file = await this.readUsers();
     const known = liveUser(file, args.login) !== null;
     const ceiling = this.limiter.takeGlobalSignIn(now);
-    if (!ceiling.ok && !(known && this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now))) {
+    if (!ceiling.ok && !this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now)) {
       return {
         ok: false,
         status: 429,
@@ -308,9 +313,13 @@ export class UiRuntime {
       return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: locked.retryAfterMs };
     }
 
-    // Same question for the argon gate's reserved slot, and for the same reason:
-    // the reserved slot is for an operator this fortress knows, not for whoever
-    // happens to be attempting a name for the first time.
+    // The argon gate's RESERVED slot does ask, and this is the one place the
+    // existence question is safe to put: it decides scheduling inside an already
+    // saturated gate, never a status code, and the alternative is handing the
+    // last slot to a flood of first attempts at names that do not exist — which
+    // is exactly what the gate's own header says it must not do. The residual is
+    // a timing difference under saturation, which is weaker than the status-code
+    // oracle it replaces.
     const clean = known && this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now);
     let matched: boolean;
     try {

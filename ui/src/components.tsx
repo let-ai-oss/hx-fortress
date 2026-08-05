@@ -360,30 +360,43 @@ export function useConfirm(): [
     setPending(null);
   };
   const confirmRef = useRef<HTMLButtonElement | null>(null);
+  // The listener reads the CURRENT pending through a ref, so the effect can
+  // depend on nothing but "is a dialog open" — see the dependency list below.
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  const open = pending !== null;
 
   // The console's own cheatsheet says "Esc — Close dialogs and menus", and this
   // dialog listened for nothing: Escape fell through to the app-level handler,
   // which knows about the shortcuts overlay and the menus but not about this.
   // CAPTURE phase, so it wins over the number-key view shortcuts — one of those
   // hid the section owning the dialog and left `ask()` unsettled forever.
+  //
+  // KEYED ON `open`, not on every render. A dep-less effect re-runs after each
+  // render of the host component, and these panels poll every ten seconds — so
+  // the focus call below fired on a timer and yanked focus back to the
+  // confirming control while somebody was Tabbing to Cancel, on dialogs whose
+  // confirm button is the destructive one.
   useEffect(() => {
-    if (!pending) return undefined;
+    if (!open) return undefined;
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
-        close(false);
+        pendingRef.current?.resolve(false);
+        setPending(null);
         return;
       }
       // Every other key stays inside the dialog while it is open.
       if (event.key !== "Tab") event.stopPropagation();
     };
     document.addEventListener("keydown", onKey, true);
-    // Focus lands on the confirming control at MOUNT, before any user action, so
-    // the first key press acts rather than summoning a selection.
+    // Focus lands on the confirming control ONCE, when the dialog appears,
+    // before any user action — so the first key press acts rather than summoning
+    // a selection, and nothing moves it afterwards.
     confirmRef.current?.focus();
     return () => document.removeEventListener("keydown", onKey, true);
-  });
+  }, [open]);
 
   const element = pending ? (
     <div className="overlayw open" onClick={() => close(false)} role="dialog" aria-modal="true">

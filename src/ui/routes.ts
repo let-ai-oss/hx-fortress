@@ -60,7 +60,7 @@ export const PUBLIC_ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/assets/", prefix: true, cls: "public", bucket: "asset", audited: false },
   { method: "GET", path: "/fonts/", prefix: true, cls: "public", bucket: "asset", audited: false },
   { method: "GET", path: "/healthz", cls: "public", audited: false, originExempt: true },
-  { method: "POST", path: "/ui/api/session", cls: "public", bucket: "signIn", audited: true },
+  { method: "POST", path: "/ui/api/session", cls: "public", bucket: "publicSignIn", audited: true },
   { method: "POST", path: "/ui/api/sso/exchange", cls: "public", bucket: "ssoEntry", audited: true },
   { method: "GET", path: "/ui/api/setup/status", cls: "public", bucket: "setup", audited: true },
   { method: "POST", path: "/ui/api/setup/complete", cls: "public", bucket: "setup", audited: true },

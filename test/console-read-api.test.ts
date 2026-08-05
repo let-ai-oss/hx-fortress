@@ -776,6 +776,21 @@ describe("credentials never leave", () => {
     // rather than dropping.
     expect(redacted).toContain('"bucket": "letai-sessions"');
     expect(redacted).toContain('"store": "s3"');
+    // STILL JSON. The field rules used to eat the value's closing quote, so a
+    // redacted log line stopped parsing — on the tab whose value is that a
+    // machine can read it back.
+    expect(() => JSON.parse(redacted)).not.toThrow();
+  });
+
+  test("a redaction keeps the value's TYPE — a boolean is not a secret", () => {
+    // `hasPassword: false` is a fact about configuration. Replacing it with a
+    // string changes what it means as well as what it is, for the same reason
+    // `null` is left alone: "not configured" and "withheld" must not read alike.
+    expect(redactValue({ passwordSet: true, hasPassword: false, password: null })).toEqual({
+      passwordSet: true,
+      hasPassword: false,
+      password: null,
+    });
   });
 
   test("the equals form still works, and both separators live in one rule", () => {

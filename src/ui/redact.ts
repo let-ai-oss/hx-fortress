@@ -24,8 +24,18 @@ const QUERY_SECRET = /([?&](?:password|passwd|pwd|token|secret|credential|key)=)
 // them missed the file they were added for. The JSON arm keeps the closing quote
 // out of the captured value by matching the quoted form explicitly.
 const FIELD_SEP = String.raw`(?:\s*[=:]\s*|"\s*:\s*)`;
-const FIELD_VALUE = String.raw`(?:'[^']*'|"[^"]*"|\S+)`;
+// The quotes are their OWN groups so a redacted JSON line is still JSON. Eating
+// them produced `{"secretAccessKey": [redacted]}`, which no reader can parse —
+// on the Logs tab, whose whole value is that a machine can read it back.
+const FIELD_VALUE = String.raw`(?:'[^']*'|(")([^"]*)(")|\S+)`;
 const PG_PASSWORD_FIELD = new RegExp(String.raw`\b(password)(${FIELD_SEP})(${FIELD_VALUE})`, "gi");
+
+/** Re-emit `label`, its separator and a redaction that keeps whatever quoting
+ *  the value had. `open`/`close` are the quote groups from FIELD_VALUE; they are
+ *  undefined for the unquoted and single-quoted forms. */
+function redactField(label: string, sep: string, open?: string, close?: string): string {
+  return `${label}${sep}${open ?? ""}${REDACTED}${close ?? ""}`;
+}
 
 // The shapes THIS appliance holds, which the four above do not recognise at all:
 // a GCS service-account JSON, an AWS access key pair, a presigned signature, and
@@ -78,11 +88,19 @@ export function redactCredentials(value: string): string {
     .replace(DSN, (_m, scheme: string, user: string) => `${scheme}${user}:${REDACTED}@`)
     .replace(QUERY_SECRET, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(BEARER, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
-    .replace(PG_PASSWORD_FIELD, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
+    .replace(
+      PG_PASSWORD_FIELD,
+      (_m, label: string, sep: string, _v: string, open?: string, _inner?: string, close?: string) =>
+        redactField(label, sep, open, close),
+    )
     .replace(PRIVATE_KEY_BLOCK, REDACTED)
     .replace(SERVICE_ACCOUNT, (_m, open: string, _key: string, close: string) => `${open}${REDACTED}${close}`)
     .replace(AWS_ACCESS_KEY, REDACTED)
-    .replace(AWS_SECRET_FIELD, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
+    .replace(
+      AWS_SECRET_FIELD,
+      (_m, label: string, sep: string, _v: string, open?: string, _inner?: string, close?: string) =>
+        redactField(label, sep, open, close),
+    )
     .replace(PRESIGNED_SIGNATURE, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(PG_PASSWORD_ENV, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
     .replace(API_KEY_FIELD, REDACTED)
@@ -133,8 +151,12 @@ export function redactValue<T>(value: T): T {
       // A named secret goes whatever its shape: the name is the whole evidence,
       // and null/absent stays as it is so "not configured" and "withheld" do not
       // read alike.
+      // STRINGS only. A `hasPassword: false` or a `passwordSet: true` is a fact
+      // about configuration, not a secret, and turning it into "[redacted]"
+      // changes its type as well as its meaning — the same reason `null` is left
+      // alone, so "not configured" and "withheld" never read alike.
       out[key] =
-        inner !== null && inner !== undefined && SECRET_KEY_NAME.test(camelToSnake(key))
+        typeof inner === "string" && SECRET_KEY_NAME.test(camelToSnake(key))
           ? REDACTED
           : redactValue(inner);
     }
