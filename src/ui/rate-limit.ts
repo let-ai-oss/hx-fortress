@@ -84,6 +84,12 @@ export type BucketName = keyof typeof BUCKETS;
 /** Process-wide sign-in ceiling: load shedding above every per-principal budget,
  *  so a distributed flood cannot convert "one attempt per source" into unbounded
  *  work for the box. */
+/** RETIRED. A process-wide sign-in counter cannot tell one principal from
+ *  another, so refusing on it is an org-wide lockout — RULE ONE above — and
+ *  behind a proxy it was a renewable, targeted one. `signIn` no longer consults
+ *  it and nothing else ever did. The window is kept only so the sweep's
+ *  "longest window" still covers a key written by an older build in this
+ *  process's lifetime; the limit is unused. */
 export const GLOBAL_SIGN_IN_CEILING: BucketPolicy = { limit: 120, windowMs: 60_000 };
 
 export type BucketVerdict = { ok: true } | { ok: false; retryAfterMs: number };
@@ -102,9 +108,6 @@ export class RateLimiter {
     return this.takeWith(`${bucket}:${key}`, BUCKETS[bucket], now);
   }
 
-  takeGlobalSignIn(now = Date.now()): BucketVerdict {
-    return this.takeWith("global:signIn", GLOBAL_SIGN_IN_CEILING, now);
-  }
 
   private takeWith(key: string, policy: BucketPolicy, now: number): BucketVerdict {
     const window = this.windows.get(key);
@@ -221,21 +224,11 @@ export class LockoutTable {
     this.records.delete(LockoutTable.key(login, remoteKey));
     // A proven password is POSITIVE evidence about this principal, so the
     // failure memory that decides `isCleanPrincipal` goes with the record. It
-    // used to survive a successful sign-in for the full FAILURE_MEMORY_MS, and
-    // nothing else cleared it either — `ui user reset` bumps `lockoutEpoch`,
-    // which only `state()` reads — so the console's documented remedy could not
-    // reach the counters at all.
+    // used to survive a successful sign-in for the full FAILURE_MEMORY_MS. The
+    // other way it ends is `ui user reset`, which runs in the CLI process and
+    // can only reach this in-memory table through `lockoutEpoch` — which is why
+    // the memory carries the epoch it was recorded under.
     this.recentByLogin.delete(login);
-  }
-
-  /** Forget a login's failure memory outright — what `ui user reset` means when
-   *  the delay is not enough. The account's records go too, so a reset really is
-   *  the clean slate the copy promises. */
-  forget(login: string): void {
-    this.recentByLogin.delete(login);
-    for (const digest of [...this.records.keys()]) {
-      if (digest.startsWith(`${login} `)) this.records.delete(digest);
-    }
   }
 
   /** A remote with no failure in living memory. The argon gate keeps a slot for

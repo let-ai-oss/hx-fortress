@@ -23,7 +23,11 @@ const QUERY_SECRET = /([?&](?:password|passwd|pwd|token|secret|credential|key)=)
 // follow the bare name — in JSON the next character is a quote, so every one of
 // them missed the file they were added for. The JSON arm keeps the closing quote
 // out of the captured value by matching the quoted form explicitly.
-const FIELD_SEP = String.raw`(?:\s*[=:]\s*|"\s*:\s*)`;
+// Three written forms: `field = value`, `"field": value`, and the ESCAPED
+// `\"field\": value` that `JSON.stringify` produces when a driver or SDK error
+// is embedded as a string inside a log record — the shape the file-log sink
+// writes, and the one every rule here used to miss entirely.
+const FIELD_SEP = String.raw`(?:\s*[=:]\s*|\\?"\s*:\s*)`;
 // The quotes are their OWN groups so a redacted JSON line is still JSON. Eating
 // them produced `{"secretAccessKey": [redacted]}`, which no reader can parse —
 // on the Logs tab, whose whole value is that a machine can read it back.
@@ -33,8 +37,28 @@ const FIELD_SEP = String.raw`(?:\s*[=:]\s*|"\s*:\s*)`;
 // space. `\S+` swallowed everything after the field — so a line carrying the
 // routine `"password":null` lost its host, its bucket and its error, and the
 // audited logs EXPORT rendered as complete while most of it had been deleted.
-const FIELD_VALUE = String.raw`(?:'[^']*'|(")(?:[^"\\]|\\.)*(")|[^\s,;}\])]+)`;
-const PG_PASSWORD_FIELD = new RegExp(String.raw`\b(password)(${FIELD_SEP})(${FIELD_VALUE})`, "gi");
+// The STRUCTURED arms come first, so an object or an array under a secret name
+// is consumed WHOLE. The bare arm stops at a value delimiter, so matching only
+// its head left the rest of the structure in the clear and broke the line's JSON
+// — on the Logs tab, whose whole value is that a machine can read it back.
+// One level deep is enough for every shape this appliance writes; anything
+// deeper falls to the bare arm, which is bounded rather than greedy.
+const FIELD_VALUE = [
+  String.raw`'[^']*'`,
+  // Quoted, whether the quotes are literal or escaped (`\"…\"` is what
+  // JSON.stringify produces for a nested error embedded as a string).
+  String.raw`(\\?")(?:[^"\\]|\\.)*(\\?")`,
+  String.raw`\{[^{}]*\}`,
+  String.raw`\[[^\[\]]*\]`,
+  // The literals, BEFORE the bare arm — otherwise `null` is swallowed together
+  // with the rest of the line and the state it records is lost.
+  String.raw`null|true|false`,
+  String.raw`-?\d+(?:\.\d+)?`,
+  // Anything else, to a real separator: whitespace, `;` or `&`, which is what
+  // actually ends a value in a DSN or an env line.
+  String.raw`[^\s;&]+`,
+].join("|");
+const PG_PASSWORD_FIELD = new RegExp(String.raw`\b(password)(${FIELD_SEP})((?:${FIELD_VALUE}))`, "gi");
 
 /** Re-emit `label`, its separator and a redaction that keeps whatever quoting
  *  the value had. `open`/`close` are the quote groups from FIELD_VALUE; they are
@@ -46,11 +70,22 @@ function redactField(
   open?: string,
   close?: string,
 ): string {
-  // `null`, `true`, `false` and a bare number are STATES, not secrets: they say
-  // whether something is configured, and `"password":[redacted]` is not JSON
-  // where `"password":null` was. Same rule `redactValue` applies to a leaf.
-  if (/^(?:null|true|false|-?\d+(?:\.\d+)?)$/i.test(raw)) return `${label}${sep}${raw}`;
-  return `${label}${sep}${open ?? ""}${REDACTED}${close ?? ""}`;
+  // Emitted QUOTED wherever the field was written in JSON — an object, an array
+  // or a number replaced by a bare `[redacted]` leaves a line no parser accepts,
+  // which is the property this whole arm exists to preserve. The separator says
+  // which grammar we are in: only the JSON forms carry a quote.
+  const json = sep.includes('"');
+  // `null`, `true` and `false` are STATES, not secrets: they say whether
+  // something is configured, and `"password":[redacted]` is not JSON where
+  // `"password":null` was. Same rule `redactValue` applies to a leaf.
+  //
+  // A NUMBER is not on that list. None of these fields carries a numeric state,
+  // so a number under one of them is a value somebody chose — a numeric
+  // passphrase, a key id — and passing it through to keep the line parseable
+  // would be printing it.
+  if (/^(?:null|true|false)$/i.test(raw)) return `${label}${sep}${raw}`;
+  const quote = open ?? (json ? '"' : "");
+  return `${label}${sep}${quote}${REDACTED}${close ?? quote}`;
 }
 
 // The shapes THIS appliance holds, which the four above do not recognise at all:
@@ -63,7 +98,7 @@ const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A
 const SERVICE_ACCOUNT = /("private_key"\s*:\s*")((?:[^"\\]|\\.)*)(")/g;
 const AWS_ACCESS_KEY = /\bA(?:KIA|SIA|ROA|IDA)[0-9A-Z]{12,}\b/g;
 const AWS_SECRET_FIELD = new RegExp(
-  String.raw`\b(secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key[_-]?id)(${FIELD_SEP})(${FIELD_VALUE})`,
+  String.raw`\b(secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key[_-]?id)(${FIELD_SEP})((?:${FIELD_VALUE}))`,
   "gi",
 );
 const PRESIGNED_SIGNATURE = /\b(X-(?:Goog|Amz)-Signature=)([A-Fa-f0-9]{16,})/gi;

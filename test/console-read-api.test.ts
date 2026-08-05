@@ -782,6 +782,36 @@ describe("credentials never leave", () => {
     expect(() => JSON.parse(redacted)).not.toThrow();
   });
 
+  test("a STRUCTURED secret is consumed whole, and the line still parses", () => {
+    // The unquoted arm stopped at the first delimiter, so an array or an object
+    // under a secret name lost only its head — the rest stayed in the clear and
+    // the line stopped being JSON, on the tab whose value is that a machine can
+    // read it back.
+    const shapes = [
+      '{"ts":"x","password":["s3cr3tA","s3cr3tB"],"host":"db"}',
+      '{"ts":"x","password":{"v":"s3cr3tHunter2"},"host":"db"}',
+      '{"password":1234567890,"host":"db"}',
+      // The escaped form JSON.stringify produces for a nested error.
+      '{"err":"{\\"password\\":\\"s3cr3tHunter2\\"}"}',
+    ];
+    for (const line of shapes) {
+      const out = redactCredentials(line);
+      expect(out).not.toContain("s3cr3t");
+      expect(out).not.toContain("1234567890");
+      expect(() => JSON.parse(out)).not.toThrow();
+    }
+    // …and a state stays a state: `null` is "not configured", not a secret.
+    const withNull = '{"level":"error","password":null,"host":"10.0.0.4"}';
+    expect(redactCredentials(withNull)).toBe(withNull);
+  });
+
+  test("an unquoted value keeps its whole tail — the env and DSN form", () => {
+    // Stopping at a comma left the rest of a comma-bearing value in the clear.
+    expect(redactCredentials("password=s3c,r3tHunter2 host=db")).toBe(
+      `password=${REDACTED} host=db`,
+    );
+  });
+
   test("a redaction keeps the value's TYPE — a boolean is not a secret", () => {
     // `hasPassword: false` is a fact about configuration. Replacing it with a
     // string changes what it means as well as what it is, for the same reason

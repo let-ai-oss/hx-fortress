@@ -5,7 +5,6 @@ import path from "node:path";
 
 import { ArgonBusyError, ArgonGate } from "../src/ui/argon-gate";
 import {
-  GLOBAL_SIGN_IN_CEILING,
   LOCKOUT_FREE_ATTEMPTS,
   LockoutTable,
   RateLimiter,
@@ -349,62 +348,20 @@ describe("the argon gate", () => {
     expect(genuine.ok).toBe(true);
   });
 
-  test("a flood that ROTATES the login still SPENDS the ceiling", async () => {
-    // Every first attempt at a name is clean by construction, so a predicate
-    // that skipped the take for a clean principal was never consulted at all by
-    // a rotating flood: the process-wide bound on argon work stopped bounding
-    // the one shape it exists to bound. The token is spent unconditionally now.
-    const runtime = runtimeOn(root);
-    const created = await runtime.users.create("ada", "operator");
-    await runtime.users.completeSetup(created.token, PASSWORD);
-
-    const before = runtime.limiter.takeGlobalSignIn();
-    expect(before.ok).toBe(true);
-    for (let i = 0; i < 5; i += 1) {
-      await runtime.signIn({
-        login: `stranger-${i}`,
-        password: "wrong-password-here",
-        remoteKey: "rotating",
-        remoteAddr: "rotating",
-      });
-    }
-    // Six tokens gone (the probe plus five rotating attempts), which is the
-    // property: the flood is counted whatever it calls itself.
-    let spent = 1;
-    for (; spent < GLOBAL_SIGN_IN_CEILING.limit + 1; spent += 1) {
-      if (!runtime.limiter.takeGlobalSignIn().ok) break;
-    }
-    expect(spent).toBe(GLOBAL_SIGN_IN_CEILING.limit - 5);
-  });
-
-  test("a SATURATED ceiling never refuses — a counter cannot tell principals apart", async () => {
-    // A process-wide ceiling that refuses is an org-wide lockout by
-    // construction, and behind a proxy it is a renewable one: fail against a
-    // named operator every half hour to keep them out of the exemption, hold the
-    // ceiling down, and they cannot get in with the CORRECT password. The bounds
-    // that survive are per-principal — the (login, remote) bucket, the
-    // exponential account lockout, and the argon gate's own shed.
-    const runtime = runtimeOn(root);
-    const created = await runtime.users.create("ada", "operator");
-    await runtime.users.completeSetup(created.token, PASSWORD);
-    // Ada has failed once, from the address everybody shares, so she is dirty by
-    // login AND by remote — the exact state the old refusal caught her in.
-    await runtime.signIn({
-      login: "ada",
-      password: "wrong-password-here",
-      remoteKey: "proxy",
-      remoteAddr: "proxy",
-    });
-    for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
-    expect(runtime.limiter.takeGlobalSignIn().ok).toBe(false);
-
-    const genuine = await runtime.signIn({
-      login: "ada",
-      password: PASSWORD,
-      remoteKey: "proxy",
-      remoteAddr: "proxy",
-    });
-    expect(genuine.ok).toBe(true);
+  test("a rotating-login flood is shed by the argon gate, not by a counter", async () => {
+    // The process-wide ceiling is gone: it could only refuse everybody, which is
+    // an org-wide lockout. What bounds the work is the gate — bounded
+    // concurrency, one in-flight hash per remote key, and a bounded queue that
+    // sheds as a fast 503 rather than a denial.
+    const gate = new ArgonGate({ maxConcurrent: 1, reserved: 0, queueLimit: 1, waitMs: 20 });
+    const release: Array<() => void> = [];
+    const held = gate.run("a", false, () => new Promise<void>((r) => release.push(r)));
+    await Bun.sleep(5);
+    const queued = gate.run("b", false, async () => undefined);
+    await expect(gate.run("c", false, async () => undefined)).rejects.toThrow(ArgonBusyError);
+    for (const r of release) r();
+    await held;
+    await queued;
   });
 
   test("the per-principal bucket is what refuses, and only the principal who spent it", async () => {

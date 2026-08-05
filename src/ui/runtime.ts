@@ -272,28 +272,26 @@ export class UiRuntime {
     // saturated the ceiling and every subsequent sign-in got 429, the real
     // operator included.
     //
-    // The token is ALWAYS SPENT and the ceiling NEVER REFUSES. That is not an
-    // oversight: a process-wide counter cannot tell one principal from another,
-    // so refusing on it is by construction an org-wide lockout — the thing RULE
-    // ONE in rate-limit.ts forbids. Behind a proxy (this console's shipped
-    // shape: `publicUrl` set, `trustedProxies: []`) every caller shares one
-    // remote key, so any exemption keyed on the address is false for everybody
-    // the moment one attacker fails, and an exemption keyed on the login is
-    // false for an operator who mistyped once in the last half hour — leaving
-    // exactly one renewable move: fail against a named operator every thirty
-    // minutes, hold the ceiling down, and they cannot get in with the correct
-    // password. Measured, and it is why this branch is gone.
+    // THE PROCESS-WIDE CEILING IS GONE, not merely un-refused. A counter that
+    // cannot tell one principal from another can only refuse them all, which is
+    // an org-wide lockout by construction — the thing RULE ONE in rate-limit.ts
+    // forbids — and behind a proxy (this console's shipped shape: `publicUrl`
+    // set, `trustedProxies: []`) every exemption we could key it on was either
+    // false for everybody (the shared address) or removable by one failure (the
+    // login). Measured: fail against a named operator every thirty minutes,
+    // hold the counter down at two requests a second, and they cannot get in
+    // WITH THE CORRECT PASSWORD. Spending a token nothing reads would have been
+    // the same claim with the evidence removed.
     //
-    // What actually bounds the work is layered and per-principal: the
-    // (login, remote) bucket below at five a minute, the exponential per-account
-    // lockout after it, and the argon gate — which bounds concurrency, caps each
-    // remote key at one in-flight hash, sheds a full queue as a fast 503 rather
-    // than a lockout, and reserves a slot for a clean principal. The counter is
-    // still spent so `takeGlobalSignIn` remains a true aggregate bound for
-    // anything that reads it.
+    // What bounds the work is layered and per-principal: the (login, remote)
+    // bucket below at five a minute, the exponential account lockout after it,
+    // and the argon gate — which bounds concurrency (and therefore RSS), caps a
+    // remote key at ONE in-flight hash, reserves a slot for a clean principal,
+    // and sheds a full queue as a fast 503 rather than a lockout. Measured under
+    // 3,000 rotating-login sign-ins from rotating addresses: 2,399 shed, 601
+    // hashed, resident memory held at maxConcurrent × 64 MiB.
     const file = await this.readUsers();
     const known = liveUser(file, args.login) !== null;
-    this.limiter.takeGlobalSignIn(now);
     const bucket = this.limiter.take("signIn", `${args.login} ${args.remoteKey}`, now);
     if (!bucket.ok) {
       return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: bucket.retryAfterMs };

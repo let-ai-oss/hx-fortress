@@ -18,6 +18,7 @@ import {
   SIGN_IN_FAILURE_COPY,
   SIGN_IN_RECOVERY_COPY,
 } from "./copy";
+import { ArgonBusyError, ARGON_WAIT_MS } from "./argon-gate";
 import { UiRuntime } from "./runtime";
 import { redactValue } from "./redact";
 import { SESSION_HEADER, sessionCopy } from "./sessions";
@@ -155,10 +156,21 @@ export async function handleAuthRoute(
       if (result.status === 401) {
         ctx.audit?.noteFailure(AUDIT_ACTIONS.signInFailed, { login, remoteKey: ctx.remoteKey });
       }
+      // 503 is LOAD SHEDDING, not a verdict about the credential. Folding it
+      // into "that login and password did not match" told an operator their
+      // password was wrong during a two-second spike and pointed them at the
+      // reset in the recovery line — an admin round-trip and a credential
+      // rotation caused by queue depth. The gate's own sentence says nothing
+      // about the account, so it enumerates nothing.
+      const shed = result.status === 503;
       return json(
         {
-          error: result.status === 429 ? LOCKOUT_COPY : SIGN_IN_FAILURE_COPY,
-          recovery: SIGN_IN_RECOVERY_COPY,
+          error: shed
+            ? result.reason
+            : result.status === 429
+              ? LOCKOUT_COPY
+              : SIGN_IN_FAILURE_COPY,
+          ...(shed ? {} : { recovery: SIGN_IN_RECOVERY_COPY }),
         },
         result.status,
         retryAfter(result.retryAfterMs),
@@ -245,7 +257,16 @@ export async function handleAuthRoute(
         remoteKey: ctx.remoteKey,
       });
       return json({ completed: true, login: user.login, role: user.role });
-    } catch {
+    } catch (error) {
+      // The SHED is not a dead link. A setup token that arrived while the argon
+      // gate was full is still valid — nothing consumed it — and telling the
+      // operator it is "no longer valid" sends them to the recovery line on that
+      // page, which asks an admin to run `ui user reset`: a new link and a
+      // credential-epoch bump, for a queue that was busy for two seconds. Named
+      // before the uniform answer below, and only this one is named.
+      if (error instanceof ArgonBusyError) {
+        return json({ error: error.message }, error.status, retryAfter(ARGON_WAIT_MS));
+      }
       ctx.audit?.noteFailure(AUDIT_ACTIONS.setupFailed, { remoteKey: ctx.remoteKey });
       // ONE sentence, never the exception's. The caller holds a setup token that
       // did not work and nothing else, and every reason this throws — unknown,
