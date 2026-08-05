@@ -29,6 +29,7 @@
 
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
+import { EVENTS_IDLE_TIMEOUT_S } from "./events";
 import type { ConsoleAudit } from "./audit-writer";
 import { handleAuthRoute } from "./auth-routes";
 import { handleMutateRoute, type ConsoleWritePort } from "./mutate-routes";
@@ -359,6 +360,11 @@ export function startUiServer(
         hostname: host,
         port: ctx.port,
         maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+        // The live feed is a long-lived SSE stream that is idle between
+        // heartbeats; Bun's default idleTimeout (10s) is shorter than the
+        // heartbeat and closed every one of them mid-stream. See
+        // EVENTS_IDLE_TIMEOUT_S — it is derived from the heartbeat on purpose.
+        idleTimeout: EVENTS_IDLE_TIMEOUT_S,
         // NODE_ENV is set nowhere on the container path, and Bun's default is a
         // development error page. Stated here rather than inherited.
         development: false,

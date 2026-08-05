@@ -209,7 +209,12 @@ describe("serving", () => {
   });
 
   test("off the wire, a traversal target never yields a byte from outside the map", async () => {
-    const server = startUiServer(ctx, "127.0.0.1");
+    // Port 0, not the console's default: this is the only test here that binds
+    // a real socket, and on 8788 it failed on any machine actually RUNNING a
+    // fortress console — which is every machine this is developed on. The
+    // handler tests above keep 8788 in their Request URLs because that is the
+    // Host the allowlist is built from; only the listener needs to move.
+    const server = startUiServer({ ...ctx, port: 0 }, "127.0.0.1");
     try {
       const port = server.port as number;
       // Bun resolves dot segments before the handler runs, so an unencoded

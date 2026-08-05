@@ -8,6 +8,8 @@ import path from "node:path";
 import {
   EVENTS_BACKOFF_MS,
   EVENTS_GLOBAL_CEILING,
+  EVENTS_HEARTBEAT_MS,
+  EVENTS_IDLE_TIMEOUT_S,
   EVENTS_PATH,
   EVENTS_PER_SESSION_CAP,
   EVENTS_PER_USER_CAP,
@@ -357,5 +359,31 @@ describe("the log producer", () => {
       const logs = events.filter((e) => e.event === "log");
       expect(logs.map((l) => l.id)).toEqual(["2026-07-01T00:00:01.000Z", undefined]);
     });
+  });
+});
+
+describe("the server's idle timeout against the heartbeat", () => {
+  test("a stream survives a heartbeat interval — and a MISSED one", () => {
+    // The bug this pins: Bun.serve's idleTimeout defaulted to 10s while the
+    // heartbeat is 15s, so an SSE stream — idle BY DESIGN between heartbeats —
+    // was closed by the server ~12s in, every time. The client reconnected a
+    // second later and the console flashed "Reconnecting the live feed" on a
+    // 12-second loop against a completely healthy fortress. Measured in a
+    // browser: nine banner transitions in 45 seconds.
+    expect(EVENTS_IDLE_TIMEOUT_S * 1000).toBeGreaterThan(EVENTS_HEARTBEAT_MS);
+    // Two full heartbeats, so ONE lost heartbeat does not close a live stream.
+    expect(EVENTS_IDLE_TIMEOUT_S * 1000).toBeGreaterThan(EVENTS_HEARTBEAT_MS * 2);
+    // Bun refuses anything above 255 seconds.
+    expect(EVENTS_IDLE_TIMEOUT_S).toBeLessThanOrEqual(255);
+  });
+
+  test("it is DERIVED from the heartbeat, and the server actually applies it", async () => {
+    // A heartbeat raised without this constant following it would reintroduce
+    // the loop, so the relationship is asserted over the source itself — and so
+    // is the one line that makes it reach Bun.
+    const events = await Bun.file(new URL("../src/ui/events.ts", import.meta.url)).text();
+    expect(events).toMatch(/EVENTS_IDLE_TIMEOUT_S\s*=\s*Math\.min\(255,[\s\S]{0,120}EVENTS_HEARTBEAT_MS/);
+    const server = await Bun.file(new URL("../src/ui/server.ts", import.meta.url)).text();
+    expect(server).toMatch(/idleTimeout:\s*EVENTS_IDLE_TIMEOUT_S/);
   });
 });

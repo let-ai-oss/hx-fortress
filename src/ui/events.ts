@@ -28,6 +28,23 @@ export const EVENTS_PATH = "/ui/api/events";
  *  revocation performed by another process. */
 export const EVENTS_HEARTBEAT_MS = 15_000;
 
+/** How long the SERVER may leave a connection idle before closing it, in
+ *  seconds — Bun.serve's `idleTimeout`, whose cap is 255.
+ *
+ *  An SSE stream is idle BY DESIGN between heartbeats, and Bun's default is 10
+ *  seconds: shorter than the 15s heartbeat above, so every live connection was
+ *  killed ~12s in, before the first heartbeat could reset the clock. The client
+ *  reconnected a second later and the console flashed "Reconnecting the live
+ *  feed" on a 12-second loop against a completely healthy fortress — a banner
+ *  that cries wolf is worse than none, because the one time the feed really is
+ *  gone it reads as the usual flicker.
+ *
+ *  DERIVED, never a second literal: the two numbers are one decision, and a
+ *  heartbeat edited without this would resurrect exactly the same bug. Two full
+ *  heartbeats plus a margin, so ONE missed heartbeat does not close a stream
+ *  that is otherwise healthy. */
+export const EVENTS_IDLE_TIMEOUT_S = Math.min(255, Math.ceil((EVENTS_HEARTBEAT_MS * 2) / 1000) + 5);
+
 /** The `retry:` field the server sends on open - the client's backoff FLOOR.
  *  The schedule below is the client's own; this is what a browser falls back to
  *  if the script is not the one that reconnects. */
