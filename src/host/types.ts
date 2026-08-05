@@ -223,7 +223,7 @@ export interface ModuleLifecycleHandler {
   uninstall(moduleId: string): Promise<void>;
 }
 
-export type PostgresPhase = "acquiring" | "initializing" | "ready" | "failed";
+export type PostgresPhase = "acquiring" | "initializing" | "retrying" | "ready" | "failed";
 
 export interface PostgresStatusSnapshot {
   phase: PostgresPhase;
@@ -239,4 +239,10 @@ export interface PostgresProvider {
    *  is the DML role; `"ro"` the SELECT-only role. External Postgres returns the
    *  operator's single URL for both. */
   dsn(role?: "ro" | "rw"): string | null;
+  /** Background phase transitions (the external provider's re-probe loop flips
+   *  retrying → ready long after start() returned). The runtime subscribes so
+   *  status.json is rewritten — otherwise a recovered fortress would report
+   *  "retrying" until its next lifecycle write. The embedded provider never
+   *  fires it (its phases all change inside start()/stop()). */
+  onPhaseChange?(listener: (snapshot: PostgresStatusSnapshot) => void): void;
 }

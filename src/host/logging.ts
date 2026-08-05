@@ -1,3 +1,4 @@
+import { sanitizeDbError } from "./postgres/sanitize";
 import type { Clock, HostLogger, LogRecord, LogSink, ScopedLogger } from "./types";
 
 function createScopedLogger(moduleId: string, sink: LogSink, clock: Clock): ScopedLogger {
@@ -41,10 +42,10 @@ export class BusHostLogger implements HostLogger {
   constructor(private readonly bus: LogBus) {}
 
   error(message: string, error?: unknown): void {
-    const fields =
-      error !== undefined
-        ? { error: error instanceof Error ? error.message : String(error) }
-        : undefined;
+    // The funnel every logger.error(msg, err) drains through — sanitize HERE so
+    // no caller can ship a raw driver error (drizzle's wrapper embeds the full
+    // SQL + bound params — transcript content — and connect errors the DSN).
+    const fields = error !== undefined ? { error: sanitizeDbError(error) } : undefined;
     this.bus.host.error(message, fields);
   }
 }

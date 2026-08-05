@@ -83,22 +83,149 @@ describe("embedded provider", () => {
   });
 });
 
-describe("external provider", () => {
-  test("is ready when the probe succeeds; dsn echoes the url", async () => {
-    const provider = createExternalPostgres("postgresql://host/hx-db", async () => true);
+describe("external provider (re-probe-until-ready)", () => {
+  const url = "postgresql://host/hx-db";
+  const instant = async (): Promise<void> => {};
+
+  test("is ready when probe + migrate succeed; dsn echoes the url", async () => {
+    const provider = createExternalPostgres(url, instant, instant);
     await provider.start();
     expect(provider.isReady()).toBe(true);
     // Role-split is embedded-only: both roles resolve to the operator's URL.
-    expect(provider.dsn()).toBe("postgresql://host/hx-db");
-    expect(provider.dsn("rw")).toBe("postgresql://host/hx-db");
-    expect(provider.dsn("ro")).toBe("postgresql://host/hx-db");
+    expect(provider.dsn()).toBe(url);
+    expect(provider.dsn("rw")).toBe(url);
+    expect(provider.dsn("ro")).toBe(url);
     await provider.stop();
   });
 
-  test("fails without throwing when unreachable", async () => {
-    const provider = createExternalPostgres("postgresql://host/hx-db", async () => false);
+  test("start() returns after the FIRST failed attempt with phase 'retrying' — never 'failed'-forever", async () => {
+    let attempts = 0;
+    const provider = createExternalPostgres(
+      url,
+      async () => {
+        attempts += 1;
+        throw new Error("connection refused");
+      },
+      instant,
+      { retryMs: 5, maxRetryMs: 5 },
+    );
     await provider.start();
-    expect(provider.status().phase).toBe("failed");
+    expect(provider.status().phase).toBe("retrying");
     expect(provider.isReady()).toBe(false);
+    expect(provider.dsn()).toBeNull();
+    // The background loop keeps attempting (each attempt time-bounded, the
+    // LOOP infinite) — a finite attempt cap would recreate the incident.
+    await new Promise((r) => setTimeout(r, 40));
+    expect(attempts).toBeGreaterThan(2);
+    await provider.stop();
+  });
+
+  test("background recovery flips to ready and fires onPhaseChange", async () => {
+    let failuresLeft = 2;
+    const phases: string[] = [];
+    const provider = createExternalPostgres(
+      url,
+      async () => {
+        if (failuresLeft > 0) {
+          failuresLeft -= 1;
+          throw new Error("still booting");
+        }
+      },
+      instant,
+      { retryMs: 5, maxRetryMs: 5 },
+    );
+    provider.onPhaseChange?.((snap) => phases.push(snap.phase));
+    await provider.start();
+    expect(provider.status().phase).toBe("retrying");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(provider.isReady()).toBe(true);
+    expect(provider.dsn()).toBe(url);
+    expect(phases).toContain("retrying");
+    expect(phases[phases.length - 1]).toBe("ready");
+    await provider.stop();
+  });
+
+  test("ready ONLY after migrate — a failing migrate keeps dsn null", async () => {
+    const provider = createExternalPostgres(
+      url,
+      instant,
+      async () => {
+        throw new Error("relation is locked");
+      },
+      { retryMs: 5, maxRetryMs: 5 },
+    );
+    await provider.start();
+    expect(provider.status().phase).toBe("retrying");
+    expect(provider.dsn()).toBeNull();
+    await provider.stop();
+  });
+
+  test("a HUNG migrate attempt counts FAILED via the outer deadline; the retry converges; the zombie is pure-swallowed", async () => {
+    let calls = 0;
+    let releaseZombie: () => void = () => {};
+    const provider = createExternalPostgres(
+      url,
+      instant,
+      async () => {
+        calls += 1;
+        if (calls === 1) {
+          // First attempt hangs past the outer deadline (the incident shape).
+          await new Promise<void>((resolve) => {
+            releaseZombie = resolve;
+          });
+        }
+      },
+      { retryMs: 5, maxRetryMs: 5, migrateDeadlineMs: 20 },
+    );
+    const phases: string[] = [];
+    provider.onPhaseChange?.((snap) => phases.push(snap.phase));
+    await provider.start();
+    expect(provider.status().phase).toBe("retrying");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(provider.isReady()).toBe(true);
+    const readyCount = phases.filter((p) => p === "ready").length;
+    // The abandoned first attempt settling LATE must not re-fire the ready
+    // path (pure swallow — it never mutates phase/reason).
+    releaseZombie();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(phases.filter((p) => p === "ready").length).toBe(readyCount);
+    await provider.stop();
+  });
+
+  test("the reason is sanitized — a probe error embedding the DSN never reaches status", async () => {
+    const provider = createExternalPostgres(
+      url,
+      async () => {
+        throw new Error(`connect failed: postgresql://user:secret@host/db`);
+      },
+      instant,
+      { retryMs: 60_000, maxRetryMs: 60_000 },
+    );
+    await provider.start();
+    expect(provider.status().reason).not.toContain("secret");
+    expect(provider.status().reason).toContain("[REDACTED_URL]");
+    await provider.stop();
+  });
+
+  test("stop() cancels the loop and suppresses late phase emissions", async () => {
+    let attempts = 0;
+    const provider = createExternalPostgres(
+      url,
+      async () => {
+        attempts += 1;
+        throw new Error("down");
+      },
+      instant,
+      { retryMs: 5, maxRetryMs: 5 },
+    );
+    const phases: string[] = [];
+    provider.onPhaseChange?.((snap) => phases.push(snap.phase));
+    await provider.start();
+    await provider.stop();
+    const seen = attempts;
+    const emitted = phases.length;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(attempts).toBe(seen);
+    expect(phases.length).toBe(emitted);
   });
 });

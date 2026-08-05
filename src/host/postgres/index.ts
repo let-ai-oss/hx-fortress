@@ -25,10 +25,11 @@ import { ensurePgvectorInstalled } from "./pgvector-install";
 import { createEmbeddedPostgres, createExternalPostgres } from "./provider";
 import { resolvePostgresConfig } from "./resolve";
 import { defaultSpawner, type Spawner } from "./spawn";
-import { makeMigrationExec } from "./sql-exec";
+import { makeMigrationExec, migrationTimeoutMs } from "./sql-exec";
 import type { fortressPaths } from "../paths";
 import type { FortressConfig, PostgresProvider, ScopedLogger } from "../types";
 import { parseBooleanEnv } from "../../env";
+import { withDeadline } from "../with-deadline";
 
 export interface BuildPostgresDeps {
   env: Record<string, string | undefined>;
@@ -46,12 +47,23 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
 
   if (resolved.mode === "external" && resolved.externalUrl) {
     const url = resolved.externalUrl;
-    return createExternalPostgres(url, () => probe(url), async () => {
-      await runMigrations(makeMigrationExec(url), migrations);
-      // No role split exists externally — the operator's single DSN is what the
-      // console gets, and the banner reports containment as unavailable.
-      await writePgJson(deps.paths.pgJson, { mode: "external", databaseUrl: url });
-    });
+    return createExternalPostgres(
+      url,
+      () => probe(url),
+      async () => {
+        await runMigrations(makeMigrationExec(url), migrations);
+        // No role split exists externally — the operator's single DSN is what the
+        // console gets, and the banner reports containment as unavailable.
+        await writePgJson(deps.paths.pgJson, { mode: "external", databaseUrl: url });
+      },
+      {
+        logger: deps.logger,
+        // Outer whole-attempt bound: the per-batch SET LOCAL covers each
+        // statement; this covers hangs the batches can't see. + margin so a
+        // single maximal migration still fits one attempt.
+        migrateDeadlineMs: migrationTimeoutMs(deps.env) + 60_000,
+      },
+    );
   }
 
   const classifier = resolveZonkyClassifier(
@@ -238,13 +250,24 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
   });
 }
 
-async function probe(url: string): Promise<boolean> {
+/** One bounded external-PG probe attempt. Param-FREE by design (no
+ *  statement_timeout startup parameter): a pooler-fronted DSN must be able to
+ *  reach ready before the operator discovers the =0 hatch — the guarded-db
+ *  probe is the param-carrying canary that then surfaces the misconfiguration.
+ *  Bounded on BOTH sides (driver connectionTimeout + a raced SELECT 1) and the
+ *  client is closed on every path — the old probe leaked it on failure. */
+async function probe(url: string): Promise<void> {
+  const client = new Bun.SQL(url, { max: 1, connectionTimeout: 10 });
   try {
-    const client = new Bun.SQL(url);
-    await client`SELECT 1`;
-    await client.end();
-    return true;
-  } catch {
-    return false;
+    await withDeadline(
+      client`SELECT 1`.then(() => undefined),
+      10_000,
+      "external postgres probe timed out",
+    );
+  } finally {
+    // Detached: close's own promise can hang on a black-holed socket, and the
+    // provider loop must never wait on teardown. Observed (Bun exits on
+    // unhandled rejections).
+    void client.close({ timeout: 1 }).catch(() => {});
   }
 }

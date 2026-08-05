@@ -7,6 +7,7 @@
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { HxDb, HxTx } from "../host/postgres/db";
+import { tagLockTimeout } from "../host/postgres/pg-errors";
 import {
   hxIngestEvents,
   hxSessionAgents,
@@ -528,10 +529,16 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // M2: exclusive per-session advisory lock FIRST (auto-released on
     // commit/rollback), then re-check the tombstone INSIDE the lock — this plus
     // tombstone-first ordering closes the resurrect-and-re-embed race the pre-txn
-    // check above only narrows.
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
-    );
+    // check above only narrows. The lock WAIT counts against statement_timeout;
+    // a 57014 cancelling it (a live chunk queued behind a long same-session
+    // restore txn — the deploy-day shape) is tagged positionally so the caller
+    // retries the whole txn once (rolled back atomically; dedupe keeps it
+    // exactly-once) instead of losing the chunk.
+    await tx
+      .execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
+      )
+      .catch(tagLockTimeout);
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }
@@ -781,9 +788,11 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
     // M2: same per-session advisory lock + in-lock tombstone re-check as the
     // parent path (keyed on the base session id, so parent + agent + purge
     // serialize together).
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
-    );
+    await tx
+      .execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
+      )
+      .catch(tagLockTimeout);
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }

@@ -20,6 +20,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { HxDb, HxTx } from "../host/postgres/db";
+import { tagLockTimeout } from "../host/postgres/pg-errors";
 import {
   hxAnalysisFacts,
   hxDeletedSessions,
@@ -51,10 +52,14 @@ export async function markSessionDeleted(db: HxDb, key: SessionKey): Promise<voi
     // M2: take the same per-session advisory lock ingest takes, so the tombstone
     // write serializes against an in-flight ingest/reconcile for this session —
     // tombstone-first ordering + the in-lock ingest re-check closes the
-    // resurrect-and-re-embed window.
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(key.userId, key.sessionId)}, 0))`,
-    );
+    // resurrect-and-re-embed window. A 57014 that cancels the lock WAIT (queued
+    // behind a long same-session txn) is tagged positionally so callers can
+    // park/retry it as transient rather than as a statement failure.
+    await tx
+      .execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(key.userId, key.sessionId)}, 0))`,
+      )
+      .catch(tagLockTimeout);
     await tx
       .insert(hxDeletedSessions)
       .values({

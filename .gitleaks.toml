@@ -23,15 +23,9 @@ paths = [
 ]
 
 [[allowlists]]
-description = "credentialRef fixtures — 32-hex indirection ids, which are not credentials"
-# A `credentialRef` is 32 lowercase hex characters by construction: it names the
-# INDIRECTION, and exists precisely so the secret it points at never travels on
-# the command. A conforming fixture therefore has to look like a key to the
-# generic detector, and cannot be softened without destroying what the test
-# proves. The files below carry those fixtures; every other file, including
-# every other test, stays fully scanned.
-paths = [
-  '''test/console-commands\.test\.ts''',
-  '''test/console-runtime-files\.test\.ts''',
-  '''test/console-audit-trail\.test\.ts''',
+description = "The two canonical placeholders the console tests use as credential REFERENCE ids (they assert the reference is NOT the credential) — self-evidently synthetic. Scoped to the exact secret VALUES, so the files stay fully scanned for anything real."
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^fedcba9876543210fedcba9876543210$''',
 ]

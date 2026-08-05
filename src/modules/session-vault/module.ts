@@ -55,6 +55,11 @@ export interface SessionVaultDeps {
   /** Compose the store-write pause gate around the store. Omitted in tests and
    *  wherever no pause plane exists. */
   pause?: StorePauseHooks;
+  /** Resolves the RW DSN for deleteSession's DEDICATED purge client (built
+   *  param-free per invocation — no statement_timeout / maxLifetime — so an
+   *  oversized purge keeps its zombie-convergence). Null until Postgres is
+   *  ready ⇒ the RPC fails typed and the cloud PARKS the purge job. */
+  purgeDsn?: () => string | null;
 }
 
 /** RPC methods that mutate the store — always log completion + duration. The
@@ -220,10 +225,11 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
         const result = await handleVaultRpc(
           store,
           req,
-          deps.db?.() ?? null,
+          deps.db ?? null,
           authz,
-          deps.dbRead?.() ?? null,
+          deps.dbRead ?? null,
           logger ?? undefined,
+          deps.purgeDsn ?? null,
         );
         const ms = Date.now() - startedAt;
         if (WRITE_RPC_METHODS.has(req.method) || ms >= SLOW_RPC_LOG_MS) {

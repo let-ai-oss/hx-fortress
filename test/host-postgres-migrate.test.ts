@@ -22,15 +22,16 @@ function fakeDb(availableExtensions: string[] = []): MigrationExec & {
       const insert = sql.match(/schema_migrations.*VALUES \('([^']+)'\)/s);
       if (insert) applied.add(insert[1]);
     },
-    async query<T>(sql: string, params?: unknown[]): Promise<T[]> {
+    async query<T>(sql: string): Promise<T[]> {
       if (sql.includes("FROM hx.schema_migrations")) {
         return [...applied].map((name) => ({ name })) as T[];
       }
-      // The extension-availability check now binds the name ($1) — read it from
-      // params rather than a quoted literal.
-      if (sql.includes("pg_available_extensions WHERE name = $1")) {
-        const ext = String(params?.[0] ?? "");
-        return [{ n: available.has(ext) ? 1 : 0 }] as T[];
+      // The extension probe is a simple-protocol batch with the ALLOWLISTED
+      // name interpolated as a quoted literal (the extended protocol can't
+      // share the bounded batch) — parse the literal back out.
+      const probe = sql.match(/pg_available_extensions WHERE name = '([^']+)'/);
+      if (probe) {
+        return [{ n: available.has(probe[1]) ? 1 : 0 }] as T[];
       }
       return [] as T[];
     },

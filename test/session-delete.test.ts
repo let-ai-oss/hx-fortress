@@ -216,7 +216,7 @@ describe.if(!!DSN)("session delete — Postgres purge + tombstone guards", () =>
     const res = await handleVaultRpc(
       store,
       { method: "deleteSession", key: { ...KEY, sessionId: `${SESSION_ID}:a:agent-1` } },
-      db,
+      () => db,
       { sub: USER_ID },
     );
     expect(res).toEqual({ method: "deleteSession", value: { complete: true, deleted: 3 } });

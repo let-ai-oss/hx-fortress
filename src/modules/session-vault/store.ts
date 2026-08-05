@@ -73,10 +73,17 @@ export function createWedgeEscalation(opts: {
   beforeExitBoundMs?: number;
   exit?: (code: number) => void;
   supervised?: () => boolean;
+  /** What is wedged — names the layer in every escalation log line. The store
+   *  keeps the historical default; guarded-db passes "database". */
+  subject?: string;
+  /** The likely never-worked-since-boot causes for this subject (log hint). */
+  neverWorkedHint?: string;
 }): (info: { hadCountedSuccess: boolean }) => void {
   const exit = opts.exit ?? ((code: number): void => process.exit(code));
   const supervised = opts.supervised ?? ((): boolean => supervisedRestartAvailable());
   const boundMs = opts.beforeExitBoundMs ?? 5_000;
+  const subject = opts.subject ?? "store write path";
+  const hint = opts.neverWorkedHint ?? "credentials/bucket/outage";
   return ({ hadCountedSuccess }) => {
     // A process whose write path NEVER worked proves the wedge is not pool
     // state — bad credentials, a deleted bucket, a regional outage — and a
@@ -84,18 +91,18 @@ export function createWedgeEscalation(opts: {
     // its restart cap and take DOWN the reads that survive a write wedge.
     if (!hadCountedSuccess) {
       opts.logger?.error(
-        "store write path has never succeeded since boot — a restart cannot cure this (credentials/bucket/outage); continuing degraded",
+        `${subject} has never succeeded since boot — a restart cannot cure this (${hint}); continuing degraded`,
       );
       return;
     }
     if (!supervised()) {
       opts.logger?.error(
-        "store write path wedged beyond in-process recovery — no supervisor detected, continuing degraded (set FORTRESS_STORE_EXIT_ON_WEDGE=on to opt into exit)",
+        `${subject} wedged beyond in-process recovery — no supervisor detected, continuing degraded (set FORTRESS_STORE_EXIT_ON_WEDGE=on to opt into exit)`,
       );
       return;
     }
     opts.logger?.error(
-      "store write path wedged beyond in-process recovery — exiting for supervisor restart",
+      `${subject} wedged beyond in-process recovery — exiting for supervisor restart`,
     );
     void (async (): Promise<void> => {
       try {

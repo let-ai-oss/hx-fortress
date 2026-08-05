@@ -495,7 +495,23 @@ console's own variables and for what host networking changes.
 | `FORTRESS_STORE_HEAVY_TIMEOUT_MS` | no | Deadline for heavy storage calls — whole-canonical read/write, chunk compose (default `120000`). |
 | `FORTRESS_STORE_SCAN_TIMEOUT_MS` | no | Deadline for whole-bucket scans — reconciler discovery, large session lists (default `600000`). |
 | `FORTRESS_STORE_PROBE_INTERVAL_MS` | no | Write-path self-test cadence (default `60000`; `0` disables). A hung probe counts toward the storage-client rebuild. |
-| `FORTRESS_STORE_EXIT_ON_WEDGE` | no | `on`/`off`: force or forbid exiting for a supervisor restart when storage rebuilds prove futile. Default: auto-detect systemd/launchd/Railway; never exits from a terminal, never exits if the write path has not succeeded since boot. |
+| `FORTRESS_STORE_EXIT_ON_WEDGE` | no | `on`/`off`: force or forbid exiting for a supervisor restart when rebuilds prove futile. **Spans BOTH self-heal layers** — the storage client and the hx-db pools. Default: auto-detect systemd/launchd/Railway; never exits from a terminal, never exits if the layer has not succeeded since boot. |
+| `FORTRESS_DB_CONNECT_TIMEOUT_MS` | no | Pool connect bound (default `10000`; `0` ⇒ default — never disableable). |
+| `FORTRESS_DB_STATEMENT_TIMEOUT_MS` | no | Server-side `statement_timeout` startup parameter on every fortress pool (default `120000`). **`0` OMITS the parameter entirely on every consumer — the pooled-DSN escape hatch** (see upgrade note below). |
+| `FORTRESS_DB_MAX_LIFETIME_MS` | no | Hard connection rotation (default `3600000` — one hour; `0` ⇒ default — rotation is the last-resort poisoned-pool healer behind the 60 s probe's rebuild path, and a guarantor restore of a very large session must fit one connection lifetime). Kills a still-running statement at rotation (the txn rolls back atomically); purges are exempt (own client). |
+| `FORTRESS_DB_PROBE_INTERVAL_MS` | no | hx-db liveness probe cadence (default `60000`; `0` disables — mirrors the store probe). 3 consecutive breaches rebuild the pools; 2 futile rebuilds escalate per `FORTRESS_STORE_EXIT_ON_WEDGE`. |
+| `FORTRESS_DB_MIGRATION_TIMEOUT_MS` | no | Per-statement bound inside every migration batch (default `300000`; validated integer). **Each single migration must fit this budget** — per-migration journaling converges incrementally across attempts, one too-slow migration never does; raise it for backfill-class migrations. |
+| `FORTRESS_GUARANTOR_INTERVAL_MS` | no | Reconcile sweep interval (default `3600000`; `0` ⇒ default — use `FORTRESS_GUARANTOR_DISABLED` to turn the guarantor off). |
+
+**Upgrade note — pooler-fronted `FORTRESS_DATABASE_URL` (PgBouncer-class):**
+v0.17.0 sends a `statement_timeout` startup parameter on its pools. Poolers
+that reject unknown startup parameters (`unsupported startup parameter`) will
+refuse those connections — the fortress still boots and migrates (its
+provider/migration clients are parameter-free), then logs a one-shot ERROR
+naming the remedy: set `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0` to omit the
+parameter everywhere. Note the `=0` semantics deliberately differ per knob
+(statement-timeout `0` = omit; max-lifetime/guarantor `0` = default;
+probe-interval `0` = disable) — each row above states its own.
 
 Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rules new
 enrolls provision automatically; add them once so the minutely write-probe's

@@ -43,7 +43,8 @@ import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { buildPostgresProvider } from "./postgres";
-import { createHxDb, type HxDb } from "./postgres/db";
+import { createGuardedDb, type GuardedDb } from "./postgres/guarded-db";
+import type { HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
@@ -176,22 +177,17 @@ export async function runFortressHost(
   // the direct gateway; the RO handle (hx_app_ro) is the SELECT-only read path
   // for the MCP tools (HTTP /mcp + the reverse tunnel). Embedded mode splits the
   // two roles; external mode resolves both to the operator's single URL.
-  let hxDbRw: HxDb | null = null;
-  const resolveHxDb = (): HxDb | null => {
-    if (hxDbRw) return hxDbRw;
-    const dsn = postgres.dsn("rw");
-    if (!dsn) return null;
-    hxDbRw = createHxDb(dsn);
-    return hxDbRw;
-  };
-  let hxDbRo: HxDb | null = null;
-  const resolveHxDbRead = (): HxDb | null => {
-    if (hxDbRo) return hxDbRo;
-    const dsn = postgres.dsn("ro");
-    if (!dsn) return null;
-    hxDbRo = createHxDb(dsn);
-    return hxDbRo;
-  };
+  //
+  // The memoization now lives inside guarded-db (built below, once the
+  // provider exists — same late-binding as the closures that follow): it owns
+  // the pools, probes them every 60 s, and rotates them when the probe proves
+  // the pool wedged — the Aug-2026 incident class where every PG op hung
+  // forever with zero error lines.
+  let guardedDb: GuardedDb | null = null;
+  const resolveHxDb = (): HxDb | null => guardedDb?.db() ?? null;
+  const resolveHxDbRead = (): HxDb | null => guardedDb?.dbRead() ?? null;
+  // Late-bound recovery hooks (the worker/guarantor are built after guarded-db).
+  const dbHealth = { onRebuild: (): void => {}, onRecovered: (): void => {} };
   // The store-write pause plane. The state is what the gate consults on every
   // bucket-mutating call; the counter is what a pre-swap quiesce barrier waits
   // on. Both are created before the store so the gate can be composed around
@@ -245,6 +241,9 @@ export async function runFortressHost(
       armed: () => drainArmed,
       onRefused: () => metrics.increment("ingest.paused_refusals"),
     },
+    // deleteSession's dedicated purge client (param-free, per invocation) —
+    // built from the RW DSN so an oversized purge keeps zombie-convergence.
+    purgeDsn: () => postgres.dsn("rw"),
   });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
@@ -351,6 +350,15 @@ export async function runFortressHost(
     paths,
     logger: bus.scopeFor("postgres"),
   });
+
+  guardedDb = createGuardedDb({
+    dsn: (role) => postgres.dsn(role),
+    logger: bus.scopeFor("hx-db"),
+    onRebuild: () => dbHealth.onRebuild(),
+    onRecovered: () => dbHealth.onRecovered(),
+    stopEmbeddedPostgres: () => postgres.stop(),
+  });
+  guardedDb.start();
 
   const vaultCreds = await readVaultCredentials();
 
@@ -563,6 +571,9 @@ export async function runFortressHost(
     setEmbedSignalHandler(() => embedWorker?.signal());
     embedWorker.start();
   }
+  // A pool rebuild retires the DSN's sockets — the worker must not keep its own
+  // pool pointed at them.
+  dbHealth.onRebuild = () => embedWorker?.resetDb();
 
   // Component G (MC-2606) — the guarantor. Re-indexes any canonical transcript
   // that reached the bucket but has NO hx.sessions row (the row-less state behind
@@ -601,6 +612,10 @@ export async function runFortressHost(
     // canonical was stored) nudges the guarantor to re-index the orphan soon,
     // rather than waiting for the next hourly sweep.
     setReconcileSignalHandler(() => guarantor?.signal());
+    // First probe success after a pool rebuild: the outage that forced the
+    // rebuild almost certainly stranded row-less canonicals — sweep in
+    // ~debounce, ignoring the (remote-pressure) cooldown. Internal-only seam.
+    dbHealth.onRecovered = () => guarantor?.signalUrgent();
   } else {
     bus.scopeFor("guarantor").warn("guarantor disabled (FORTRESS_GUARANTOR_DISABLED)");
   }
@@ -1292,5 +1307,6 @@ export async function runFortressHost(
     setReconcileSignalHandler(() => {});
     await embedWorker?.stop();
     await guarantor?.stop();
+    await guardedDb?.stop();
   }
 }

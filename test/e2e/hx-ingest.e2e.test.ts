@@ -212,7 +212,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
         meta: { title: "Relayed", repoSlug: "let-ai/let-forge" },
         attribution: ATTR,
       },
-      db,
+      () => db,
     );
     expect(res).toEqual({ method: "ingestCommit", value: { ok: true } });
     expect(
@@ -270,7 +270,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
 
   test("the listSessions tunnel RPC returns prepared rows", async () => {
     const noopStore = {} as SessionStore;
-    const res = await handleVaultRpc(noopStore, { method: "listSessions", userId: "user-ext-1" }, db);
+    const res = await handleVaultRpc(noopStore, { method: "listSessions", userId: "user-ext-1" }, () => db);
     expect(res.method).toBe("listSessions");
     if (res.method !== "listSessions") throw new Error("unexpected method");
     expect(res.value.length).toBeGreaterThanOrEqual(2);
