@@ -39,6 +39,13 @@ export default function Residency(): React.ReactElement {
   const active = app.view === "residency";
   const posture = useResource(() => api.posture(), [], { pollMs: 60_000, active });
   const page = useResource(() => api.sessions({ limit: "1" }), [], { pollMs: 30_000, active });
+  // The DAEMON's own state. `posture` is read from a published file, so it
+  // answers whether or not anything is running — gating the mutation controls on
+  // it left Run audit, the witness toggles and Acknowledge enabled against a
+  // stopped daemon, each replying "asked the daemon to…" about a request nothing
+  // would ever claim.
+  const status = useResource(() => api.status(), [], { pollMs: 10_000, active });
+  const daemonRunning = status.data?.daemon === "running";
 
   const totals = page.data?.totals ?? null;
 
@@ -107,18 +114,32 @@ export default function Residency(): React.ReactElement {
               <div className="why-note" style={{ marginTop: 14 }}>
                 {data.qualification}
               </div>
+              {data.clockSkew ? (
+                // Computed by the read port and rendered NOWHERE until now. The
+                // failure it describes is invisible from this host: a drifted
+                // clock rejects every one-click hand-off with a page only the
+                // person in the workbench ever sees.
+                <div className="banner warn" style={{ marginTop: 12 }} data-testid="clock-skew">
+                  <span className="badge">!</span>
+                  <span className="btxt">
+                    This host's clock is {fmt.int(Math.abs(data.clockSkew.offsetSeconds))}s from the
+                    one that minted the last grant (allowed: {data.clockSkew.allowedSeconds}s).{" "}
+                    {data.clockSkew.remediation}
+                  </span>
+                </div>
+              ) : null}
             </>
           )}
         </Loaded>
       </Panel>
 
       <FindingsPanel
-        daemonRunning={posture.data !== null}
-        findings={posture.data?.findings ?? null}
+        daemonRunning={daemonRunning}
+        resource={posture}
         onChanged={() => void posture.reload()}
       />
 
-      <AuditPanel daemonRunning={posture.data !== null} witness={posture.data?.witness ?? null} />
+      <AuditPanel daemonRunning={daemonRunning} witness={posture.data?.witness ?? null} />
 
       {page.data?.rows[0] ? (
         <VerifyResidencyPanel
@@ -327,15 +348,41 @@ function AuditPanel(props: {
  */
 function FindingsPanel(props: {
   daemonRunning: boolean;
-  findings: PostureView["findings"];
+  resource: { data: PostureView | null; stale?: boolean };
   onChanged: () => void;
 }): React.ReactElement | null {
   const [dialog, ask] = useConfirm();
   const [result, showResult] = useResultLine();
   const [busy, setBusy] = React.useState<string | null>(null);
+  // Sessions the operator has asked for, awaiting the daemon's own record of
+  // the acknowledgement. The command is a REQUEST — the row cannot clear until
+  // the daemon claims and completes it — so the page says "asked" on the row
+  // itself rather than leaving a live button that mints a second command on
+  // every further click.
+  const [asked, setAsked] = React.useState<ReadonlySet<string>>(new Set());
   const reason = props.daemonRunning ? undefined : NO_POLLER_REFUSAL;
-  const data = props.findings;
+  const posture = props.resource.data;
+  const data = posture?.findings ?? null;
 
+  // UNKNOWN is not CLEAN. A stopped Postgres degrades `findings` to null, and
+  // rendering nothing there says "no findings" on the one surface where the
+  // difference is the whole point.
+  if (posture && data === null) {
+    return (
+      <Panel
+        title="What the last run found"
+        sub="This console could not read the audit's own tables, so it cannot say what the last run found."
+      >
+        <div className="banner warn">
+          <span className="badge">!</span>
+          <span className="btxt">
+            Not answered — the fortress database could not be reached. This is not the same as a
+            run with nothing to report.
+          </span>
+        </div>
+      </Panel>
+    );
+  }
   if (!data || data.rows.length === 0) return null;
 
   const acknowledge = async (row: ResidencyFindingRow): Promise<void> => {
@@ -355,6 +402,7 @@ function FindingsPanel(props: {
         sessionId: row.sessionId,
         reason: "acknowledged from the console",
       });
+      setAsked((prev) => new Set([...prev, row.sessionId]));
       showResult("Asked the daemon to record it. The finding clears once it has.");
       props.onChanged();
     } catch (error) {
@@ -388,13 +436,19 @@ function FindingsPanel(props: {
               </div>
             </div>
             <div>
+              {/* The VERDICT always, even once acknowledged: what was found is
+                  the fact, and an acknowledgement is an annotation on it. */}
               <span className={row.acknowledged ? "pill ok pc" : "pill warn pc"}>
-                {row.acknowledged ? "acknowledged" : row.verdict.split("_").join(" ")}
+                {row.verdict.split("_").join(" ")}
               </span>
             </div>
             <div className="m">
               {row.acknowledged ? (
-                fmt.when(row.observedAt)
+                <span className="sub">acknowledged</span>
+              ) : asked.has(row.sessionId) ? (
+                <span className="sub" data-testid="ack-asked">
+                  asked — awaiting the daemon
+                </span>
               ) : row.acknowledgeable ? (
                 <MutationControl
                   label="Acknowledge"

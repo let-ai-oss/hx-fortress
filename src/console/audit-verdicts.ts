@@ -13,18 +13,24 @@
 // downgraded by an acknowledgement — an acknowledgement says "we know why a copy
 // exists there", and no answer to that question makes a missing object present.
 
-export type ResidencyVerdict =
-  | "confirmed"
-  | "also_at_letai"
-  | "not_delivered_here"
-  | "no_record"
-  | "copy_unchecked"
-  | "missing_here"
-  | "lanes_hold_it"
-  | "residency_unchecked"
-  | "residency_unwitnessable"
-  | "unknown_provenance"
-  | "not_applicable";
+/** Every verdict, as a VALUE — so a caller that has to partition the matrix
+ *  (the console's findings page partitions it by `sessionCheckPasses`) derives
+ *  the partition from this list instead of restating one that drifts. */
+export const RESIDENCY_VERDICTS = [
+  "confirmed",
+  "also_at_letai",
+  "not_delivered_here",
+  "no_record",
+  "copy_unchecked",
+  "missing_here",
+  "lanes_hold_it",
+  "residency_unchecked",
+  "residency_unwitnessable",
+  "unknown_provenance",
+  "not_applicable",
+] as const;
+
+export type ResidencyVerdict = (typeof RESIDENCY_VERDICTS)[number];
 
 /** What was actually observed for one session. */
 export interface VerdictInput {

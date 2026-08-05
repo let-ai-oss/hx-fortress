@@ -86,8 +86,6 @@ interface AppState {
   setMarker: (marker: string | null) => void;
 
   live: LiveState;
-  logLines: LogLine[];
-  clearLogLines: () => void;
 
   theme: string;
   toggleTheme: () => void;
@@ -334,8 +332,6 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       marker,
       setMarker,
       live,
-      logLines,
-      clearLogLines,
       theme,
       toggleTheme,
       shortcutsOpen,
@@ -354,8 +350,6 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       ssoIdentity,
       marker,
       live,
-      logLines,
-      clearLogLines,
       theme,
       toggleTheme,
       shortcutsOpen,
@@ -364,7 +358,34 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
     ],
   );
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  // The daemon log is its OWN context. Held in the app-state memo, every line
+  // that arrived rebuilt that object — so all twelve mounted views re-rendered
+  // and App's two document keydown listeners were torn down and re-added, at the
+  // rate the daemon writes. Only the Logs view reads these.
+  const logsValue = useMemo<LogLinesState>(
+    () => ({ logLines, clearLogLines }),
+    [logLines, clearLogLines],
+  );
+
+  return (
+    <Ctx.Provider value={value}>
+      <LogsCtx.Provider value={logsValue}>{children}</LogsCtx.Provider>
+    </Ctx.Provider>
+  );
+}
+
+export interface LogLinesState {
+  logLines: LogLine[];
+  clearLogLines: () => void;
+}
+
+const LogsCtx = createContext<LogLinesState | null>(null);
+
+/** The live daemon log. Separate from `useApp` on purpose — see the provider. */
+export function useLogLines(): LogLinesState {
+  const value = useContext(LogsCtx);
+  if (!value) throw new Error("useLogLines outside the provider");
+  return value;
 }
 
 export { DEFAULT_ROUTE, takeFragmentToken };

@@ -13,6 +13,11 @@
 // paid the cost the bound exists to prevent.
 
 import { sql, type SQL } from "drizzle-orm";
+import {
+  RESIDENCY_VERDICTS,
+  sessionCheckPasses,
+  type ResidencyVerdict,
+} from "../../console/audit-verdicts";
 
 export interface AuditRange {
   /** ISO instants. Both required for an export; optional for a bounded page. */
@@ -272,15 +277,30 @@ export function disputedCommandIdsQuery(commandIds: readonly string[]): SQL {
  *  is a different way to say the same thing. */
 export const FINDINGS_PAGE_MAX = 100;
 
+/** The verdicts `sessionCheckPasses` refuses — single-sourced from it rather
+ *  than restated, so a new failing verdict reaches this page the day it is
+ *  admitted to the matrix. */
+export const FAILING_VERDICTS: readonly ResidencyVerdict[] = RESIDENCY_VERDICTS.filter(
+  (v) => !sessionCheckPasses(v, false),
+);
+
 /**
- * The LATEST run's findings that still fail the residency check, with whether
+ * The LATEST run's findings that still FAIL the residency check, with whether
  * each has been acknowledged.
  *
- * Only the failing ones: `confirmed` is not recorded at all, and a surface that
- * listed the benign verdicts would bury the row an operator has to act on. The
- * acknowledgement join is what makes the Acknowledge control idempotent on the
- * page — an already-acknowledged `also_at_letai` renders as cleared rather than
- * as a second thing to do.
+ * The failing set is filtered HERE, in SQL, and the list is the same one
+ * `sessionCheckPasses` refuses. Rendering every recorded finding put verdicts
+ * that PASS — `no_record`, `lanes_hold_it`, `unknown_provenance` — on a page
+ * whose whole job is to be short, toned as warnings, and with a hard LIMIT and
+ * no paging they could push the acknowledgeable rows off it entirely.
+ *
+ * The acknowledgement join is scoped to the ONE verdict an acknowledgement can
+ * clear. Acks are keyed on (org, session) and deliberately outlive the runs
+ * whose findings they answered, so an unscoped join let an old `also_at_letai`
+ * sign-off mark a LATER `missing_here` for the same session as acknowledged —
+ * a green pill over a still-failing incident, and sorted last so it fell off
+ * the page. `not_delivered_here` is never downgraded by an acknowledgement, and
+ * this join is where that has to be true.
  */
 export function auditFindingsQuery(limit = FINDINGS_PAGE_MAX): SQL {
   return sql`
@@ -297,7 +317,9 @@ export function auditFindingsQuery(limit = FINDINGS_PAGE_MAX): SQL {
            count(*) OVER () AS "total"
       FROM latest l
       JOIN hx.audit_findings f ON f.run_id = l.id
-      LEFT JOIN hx.audit_acks k ON k.org = f.org AND k.session_id = f.session_id
+      LEFT JOIN hx.audit_acks k
+        ON k.org = f.org AND k.session_id = f.session_id AND f.verdict = 'also_at_letai'
+     WHERE f.verdict IN (${sql.join(FAILING_VERDICTS.map((v) => sql`${v}`), sql`, `)})
      ORDER BY (k.session_id IS NOT NULL), f.observed_at DESC, f.session_id
      LIMIT ${limit}`;
 }

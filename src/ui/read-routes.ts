@@ -277,6 +277,25 @@ function refusal(reason: string, status = 400): Response {
 
 const ISO = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
 
+/** Shape AND value. The pattern alone admits `2026-13-45`, `2026-02-30` and
+ *  `9999-99-99T99:99Z`, each of which Postgres rejects with "date/time field
+ *  value out of range" — a 500 out of a filter the caller cannot act on, where a
+ *  400 naming the field is the honest answer. `Date.parse` is the same calendar
+ *  the database uses for the cases that matter (it rejects month 13 and Feb 30
+ *  alike), and it is the only check available that does not re-implement one. */
+function isInstant(value: string): boolean {
+  if (!ISO.test(value)) return false;
+  if (!Number.isFinite(Date.parse(value))) return false;
+  // `Date.parse` ROLLS OVER where Postgres refuses: `2026-02-30` reads back as
+  // 2 March and reports finite, while the database raises "date/time field value
+  // out of range". The calendar day is therefore compared against what was
+  // written, which is the only way to tell the two apart without shipping a
+  // second calendar.
+  const [y, m, d] = value.slice(0, 10).split("-").map(Number);
+  const back = new Date(Date.UTC(y, m - 1, d));
+  return back.getUTCFullYear() === y && back.getUTCMonth() === m - 1 && back.getUTCDate() === d;
+}
+
 /** Range and filter, validated HERE. An export whose bounds are trimmed after
  *  the rows come back has already paid the cost the bound exists to prevent, and
  *  its recorded parameters would describe a query the server did not run. */
@@ -285,7 +304,7 @@ export function parseExportRange(query: URLSearchParams): { ok: true; range: Exp
   for (const key of ["from", "to"] as const) {
     const value = query.get(key);
     if (value === null) continue;
-    if (!ISO.test(value)) return { ok: false, reason: `${key} must be an ISO-8601 instant` };
+    if (!isInstant(value)) return { ok: false, reason: `${key} must be an ISO-8601 instant` };
     range[key] = value;
   }
   if (range.from && range.to && Date.parse(range.from) > Date.parse(range.to)) {
@@ -334,7 +353,7 @@ export async function handleReadRoute(
         // handler, which is a 500 the caller cannot act on.
         for (const key of ["from", "to"] as const) {
           const value = url.searchParams.get(key);
-          if (value !== null && value !== "" && !ISO.test(value)) {
+          if (value !== null && value !== "" && !isInstant(value)) {
             return refusal(`${key} must be an ISO-8601 instant`);
           }
         }

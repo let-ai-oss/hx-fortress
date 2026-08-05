@@ -361,7 +361,13 @@ export class AuditSpool {
     // Flag only. Rotating HERE would deadlock the whole spool: `beforeRotate`
     // appends (production wires it to flushFailures), and an append issued from
     // inside the chain waits on `this.tail` — which is this very call.
-    if (this.bytes >= this.rotateBytes) this.rotateDue = true;
+    //
+    // And NOT while a rotation is in flight. `beforeRotate`'s own records land
+    // in the file being retired, whose bound is already spent, so counting them
+    // toward the next rotation re-armed it before the new file held anything:
+    // measured at a 300-byte bound, files of 270 and 300 bytes alternating with
+    // full ones, i.e. the directory filling with stubs.
+    if (!this.rotating && this.bytes >= this.rotateBytes) this.rotateDue = true;
     return full;
   }
 
@@ -378,7 +384,8 @@ export class AuditSpool {
     this.rotateDue = false;
     try {
       // Inside the guard, so a flush that appends does not recurse into another
-      // rotation — its records belong to the file being retired.
+      // rotation — its records belong to the file being retired, and `appendOne`
+      // will not re-arm `rotateDue` for them.
       if (this.beforeRotate) await this.beforeRotate();
     } finally {
       this.rotating = false;

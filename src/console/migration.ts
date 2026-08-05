@@ -211,6 +211,11 @@ export async function copySession(
   source: SessionStore,
   target: SessionStore,
   key: SessionKey,
+  /** Called between objects. The final delta runs INSIDE the armed pause and a
+   *  session with many sidecars costs three round trips each, so without a beat
+   *  here one copy can outlast an episode — and the fence then refuses a cut
+   *  that had most of its budget left. */
+  beat: () => Promise<void> = async (): Promise<void> => undefined,
 ): Promise<CopiedObject> {
   const text = await source.readCanonicalText(key);
   await target.writeCanonicalText(key, text);
@@ -222,6 +227,7 @@ export async function copySession(
     );
   }
   for (const name of await source.listSessionArtifacts(key)) {
+    await beat();
     const artifact = await source.readArtifactText(key, name);
     // Null only where a delete landed between the listing and the read; there is
     // nothing left to carry, and the tombstone replay is what agrees with it.
@@ -365,7 +371,7 @@ export async function runStorageMigration(deps: MigrationDeps): Promise<Migratio
       // and a record over a SHORTER object is one about a session that has been
       // appended to since.
       if (done.has(ref) && (await targetIsCurrent(key))) continue;
-      const object = await copySession(deps.source, deps.target, key);
+      const object = await copySession(deps.source, deps.target, key, beat);
       done.add(ref);
       copied += 1;
       result.sessionsCopied += 1;

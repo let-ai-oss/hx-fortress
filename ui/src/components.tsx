@@ -359,8 +359,34 @@ export function useConfirm(): [
     pending?.resolve(ok);
     setPending(null);
   };
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+
+  // The console's own cheatsheet says "Esc — Close dialogs and menus", and this
+  // dialog listened for nothing: Escape fell through to the app-level handler,
+  // which knows about the shortcuts overlay and the menus but not about this.
+  // CAPTURE phase, so it wins over the number-key view shortcuts — one of those
+  // hid the section owning the dialog and left `ask()` unsettled forever.
+  useEffect(() => {
+    if (!pending) return undefined;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        close(false);
+        return;
+      }
+      // Every other key stays inside the dialog while it is open.
+      if (event.key !== "Tab") event.stopPropagation();
+    };
+    document.addEventListener("keydown", onKey, true);
+    // Focus lands on the confirming control at MOUNT, before any user action, so
+    // the first key press acts rather than summoning a selection.
+    confirmRef.current?.focus();
+    return () => document.removeEventListener("keydown", onKey, true);
+  });
+
   const element = pending ? (
-    <div className="overlayw open" onClick={() => close(false)}>
+    <div className="overlayw open" onClick={() => close(false)} role="dialog" aria-modal="true">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="mhead">
           <div className="row1">
@@ -377,6 +403,7 @@ export function useConfirm(): [
             Cancel
           </button>
           <button
+            ref={confirmRef}
             className={pending.danger ? "btn danger" : "btn"}
             onClick={() => close(true)}
           >

@@ -1,7 +1,7 @@
 import React from "react";
 
 import { API, api, downloadFromServer, type AuditRow, type SpoolRecord } from "../api";
-import { Empty, FactRow, Loaded, Panel } from "../components";
+import { Empty, FactRow, Loaded, Panel, ResultLine, useResultLine } from "../components";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { disabledWindowMarkers } from "../../../src/ui/audit-markers";
@@ -29,6 +29,20 @@ export function AuditTrailPanel({ active }: { active: boolean }): React.ReactEle
   const tail = useResource(() => api.spool(100), [degraded], { active: active && degraded });
   const identity = useResource(() => api.identity(), [], { pollMs: 120_000, active });
   const markers = disabledWindowMarkers(rows.data?.rows ?? []);
+  const [result, showResult] = useResultLine();
+
+  // The export route is metered (60/min) and `downloadFromServer` throws on any
+  // non-2xx, so `void`-ing it turned a refusal into an unhandled rejection and
+  // nothing at all on screen — the reader clicks again and again. Its sibling in
+  // Logs.tsx has always answered in place; this now does the same.
+  const exportTrail = async (): Promise<void> => {
+    try {
+      await downloadFromServer(API.auditExport, "hx-fortress-audit.jsonl");
+      showResult("The fortress read the trail and recorded that a copy left.");
+    } catch (err) {
+      showResult(err instanceof Error ? err.message : "the export was refused", true);
+    }
+  };
 
   return (
     <Panel
@@ -96,13 +110,11 @@ export function AuditTrailPanel({ active }: { active: boolean }): React.ReactEle
                 ))}
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
-                <button
-                  className="btn ghost"
-                  onClick={() => void downloadFromServer(API.auditExport, "hx-fortress-audit.jsonl")}
-                >
+                <button className="btn ghost" onClick={() => void exportTrail()}>
                   Export the trail
                 </button>
               </div>
+              <ResultLine state={result} />
             </>
           )}
         </Loaded>

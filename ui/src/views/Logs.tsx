@@ -4,7 +4,7 @@ import { API, api, downloadFromServer } from "../api";
 import { Empty, FactRow, Loaded, MenuPill, Panel, ResultLine, SearchBox, useResultLine } from "../components";
 import { useResource } from "../hooks";
 import { copyText, saveRenderedRows } from "../lib/util";
-import { useApp, type LogLine } from "../state";
+import { useApp, type LogLine, useLogLines } from "../state";
 
 const LEVELS = [
   { key: "all", label: "Everything" },
@@ -14,6 +14,7 @@ const LEVELS = [
 
 export default function Logs(): React.ReactElement {
   const app = useApp();
+  const { logLines, clearLogLines } = useLogLines();
   const active = app.view === "logs";
   const identity = useResource(() => api.identity(), [], { active });
   const [text, setText] = useState("");
@@ -29,20 +30,20 @@ export default function Logs(): React.ReactElement {
   // one it grew.
   const modules = useMemo(() => {
     const names = new Set<string>();
-    for (const line of app.logLines) if (line.module) names.add(line.module);
+    for (const line of logLines) if (line.module) names.add(line.module);
     return [...names].sort();
-  }, [app.logLines]);
+  }, [logLines]);
 
   const shown = useMemo(() => {
     const needle = text.trim().toLowerCase();
-    return app.logLines.filter((line) => {
+    return logLines.filter((line) => {
       if (module !== "all" && line.module !== module) return false;
       if (level === "warn" && line.level !== "warn" && line.level !== "error") return false;
       if (level === "error" && line.level !== "error") return false;
       if (needle && !line.line.toLowerCase().includes(needle)) return false;
       return true;
     });
-  }, [app.logLines, module, level, text]);
+  }, [logLines, module, level, text]);
 
   useEffect(() => {
     if (follow && paneRef.current) paneRef.current.scrollTop = paneRef.current.scrollHeight;
@@ -134,7 +135,7 @@ export default function Logs(): React.ReactElement {
       >
         {shown.length === 0 ? (
           <div className="ln" style={{ color: "var(--text-subtle)" }}>
-            {app.logLines.length === 0
+            {logLines.length === 0
               ? "Nothing has arrived on the live connection yet."
               : "No line on screen matches this filter."}
           </div>
@@ -154,7 +155,7 @@ export default function Logs(): React.ReactElement {
         }}
       >
         <span>
-          {shown.length} of {app.logLines.length} lines on screen
+          {shown.length} of {logLines.length} lines on screen
         </span>
         <span>scroll up to pause following</span>
       </div>

@@ -45,10 +45,26 @@ const PG_PASSWORD_ENV = /\b(PGPASSWORD)(\s*=\s*)(\S+)/g;
 const API_KEY_FIELD = /\b(sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[0-9A-Za-z-]{10,})/g;
 /** The catch-all `command-params.ts` has always carried and this file did not:
  *  a long, dense, non-word run inside quotes is a raw key whatever it is called.
- *  Quoted only — an unquoted run of 40 dense characters is as likely to be a
- *  bucket path, a checksum or an object key, and blanking those makes diagnosis
- *  impossible for no gain. */
+ *
+ *  DELIBERATELY NARROW, because the console's Logs tab is the surface that says
+ *  what is broken and a redactor that blanks ordinary values makes it useless.
+ *  Excluded, measured against real log lines:
+ *    • anything containing `/` — an object key, a session key, a bucket path;
+ *    • pure hex — a checksum, a request id, a fileId (the migration's own
+ *      "checksum mismatch: <sha256>" line is the case that made this concrete);
+ *    • pure decimal, and anything with a `-`-separated word shape
+ *      (`expired-after-3600-seconds`), which is prose, not a key.
+ *  What is left is a base64-ish run mixing cases and digits, which is what a raw
+ *  key looks like and what almost nothing else does. */
 const HIGH_ENTROPY_QUOTED = /"([A-Za-z0-9+/=_-]{40,})"/g;
+function looksLikeRawKey(value: string): boolean {
+  if (value.includes("/")) return false;
+  if (/^[0-9a-fA-F]+$/.test(value)) return false;
+  if (/^[0-9]+$/.test(value)) return false;
+  if (/-/.test(value) && /[a-z]{3,}-[a-z0-9]/i.test(value)) return false;
+  // Mixed case AND digits: the shape of a generated secret.
+  return /[a-z]/.test(value) && /[A-Z0-9+/=_]/.test(value);
+}
 
 /**
  * Redact every credential shape in a string.
@@ -70,12 +86,35 @@ export function redactCredentials(value: string): string {
     .replace(PRESIGNED_SIGNATURE, (_m, prefix: string) => `${prefix}${REDACTED}`)
     .replace(PG_PASSWORD_ENV, (_m, label: string, sep: string) => `${label}${sep}${REDACTED}`)
     .replace(API_KEY_FIELD, REDACTED)
-    .replace(HIGH_ENTROPY_QUOTED, `"${REDACTED}"`);
+    .replace(HIGH_ENTROPY_QUOTED, (whole: string, inner: string) =>
+      looksLikeRawKey(inner) ? `"${REDACTED}"` : whole,
+    );
 }
+
+/** A property NAME that makes its value a secret whatever the value looks like.
+ *
+ *  Every rule above needs name, separator and value inside ONE string, which is
+ *  how a log line or an error message is shaped. A structured body is not: the
+ *  name is the object key and the value is a bare leaf, so `{"secretAccessKey":
+ *  "wJal…"}` went through every rule untouched — on the very path `redactValue`
+ *  exists for. Matched on the key here, and kept in step with the field rules
+ *  above and with `command-params.ts`. */
+const SECRET_KEY_NAME =
+  /^(?:.*_)?(?:password|passwd|pwd|secret|secret[_-]?access[_-]?key|session[_-]?token|private[_-]?key(?:[_-]?id)?|api[_-]?key|apikey|dsn|database[_-]?url|signing[_-]?key|client[_-]?secret)$/i;
+
+// DELIBERATELY NOT on that list: a bare `token`, and `credentialRef`. The
+// console MINTS both and has to hand them back — the sign-in response carries
+// the session token, the setup link carries its own, and a credentialRef names
+// an indirection precisely so the secret it points at never travels. Redacting
+// them by name broke sign-in outright (measured: the token came back as
+// "[redacted]"), which is the shape of over-redaction that makes a redactor get
+// switched off. `session_token` IS on the list — that one is AWS's, at rest in
+// credentials.json, and nothing serves it to a caller.
 
 /**
  * Redact recursively through a response body. Keys are left alone - the SHAPE of
- * a payload is not a secret and hiding it makes a diagnosis impossible.
+ * a payload is not a secret and hiding it makes a diagnosis impossible - but a
+ * key whose NAME says its value is a credential redacts that value outright.
  *
  * A value whose data lives somewhere other than its own enumerable properties is
  * passed through UNTOUCHED. A Date is the one that matters: the driver hands
@@ -91,7 +130,13 @@ export function redactValue<T>(value: T): T {
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = redactValue(inner);
+      // A named secret goes whatever its shape: the name is the whole evidence,
+      // and null/absent stays as it is so "not configured" and "withheld" do not
+      // read alike.
+      out[key] =
+        inner !== null && inner !== undefined && SECRET_KEY_NAME.test(camelToSnake(key))
+          ? REDACTED
+          : redactValue(inner);
     }
     return out as unknown as T;
   }
@@ -103,4 +148,10 @@ export function redactValue<T>(value: T): T {
 export function redactedMessage(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   return redactCredentials(raw);
+}
+
+/** `secretAccessKey` → `secret_access_key`, so one pattern covers both spellings
+ *  rather than two that drift. */
+function camelToSnake(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
 }

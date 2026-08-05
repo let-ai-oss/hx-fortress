@@ -258,6 +258,9 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     const witness = db
       ? await readWitnessSetting(db).catch(() => null)
       : null;
+    // `null` means UNKNOWN — no database, or the query failed — and the page
+    // says so rather than rendering an empty list, which reads as "nothing to
+    // act on" on a compliance surface.
     const findingRows = db
       ? await query<FindingRow>(() => auditFindingsQuery()).catch(() => null)
       : null;
@@ -282,7 +285,12 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
               ingestChannel: row.ingestChannel,
               detail: row.detail,
               observedAt: isoOrNull(row.observedAt),
-              acknowledged: row.acknowledged === true,
+              // Both, and the flag is AND-ed with the verdict rather than left
+              // to the page to combine: an acknowledgement clears exactly one
+              // verdict, and a row that renders "acknowledged" over any other is
+              // a green pill on a still-failing incident.
+              acknowledged:
+                row.acknowledged === true && acknowledgeable(row.verdict as ResidencyVerdict),
               acknowledgeable: acknowledgeable(row.verdict as ResidencyVerdict),
             })),
           }

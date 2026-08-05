@@ -604,6 +604,25 @@ describe("public auth failures collapse; everything else does not", () => {
     expect((await listSpoolFiles(dir)).length).toBeGreaterThan(1);
   });
 
+  test("the file AFTER a rotation gets the whole bound, not what the flush left", async () => {
+    // `beforeRotate` appends, and its records belong to the file being retired
+    // — whose byte count is already spent. Counting them against it re-armed the
+    // rotation immediately, so every later file was retired after a record or
+    // two and the spool filled the directory with stubs.
+    const { audit, spool } = consoleAudit({}, { rotateBytes: 300 });
+    for (let round = 0; round < 4; round += 1) {
+      audit.noteFailure(AUDIT_ACTIONS.signInFailed, { login: "erik", remoteKey: `10.0.0.${round}` });
+      await audit.run(`${AUDIT_ACTIONS.servicePrefix}start`, { actor: null }, async () => undefined);
+      await audit.run(`${AUDIT_ACTIONS.servicePrefix}stop`, { actor: null }, async () => undefined);
+    }
+    await spool.rotate();
+    const files = await listSpoolFiles(dir);
+    expect(files.length).toBeGreaterThan(1);
+    // Every retired file but the last carries a real load — no file is retired
+    // after a single record.
+    for (const file of files.slice(0, -1)) expect(file.bytes).toBeGreaterThan(300);
+  });
+
   test("an open window is closed when the file rotates", async () => {
     const { audit, spool } = consoleAudit();
     audit.noteFailure(AUDIT_ACTIONS.signInFailed, { login: "erik", remoteKey: "10.0.0.1" });

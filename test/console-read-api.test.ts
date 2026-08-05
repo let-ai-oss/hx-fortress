@@ -788,6 +788,53 @@ describe("credentials never leave", () => {
     ).toBe(REDACTED);
   });
 
+  test("a named secret in a STRUCTURED body goes by its name", () => {
+    // Every field rule needs name, separator and value inside one string, which
+    // is how a log line reads. A response body is not shaped that way — the name
+    // is the object key and the value a bare leaf — so the secrets these rules
+    // were written for went through untouched on the very path redactValue
+    // exists for.
+    const body = redactValue({
+      openaiApiKey: "sk-abcdefghijklmnopqrstuvwxyz012345",
+      secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      gcsPrivateKeyId: "1a2b3c4d",
+      sessionToken: "FQoGZXIvYXdz",
+      bucket: "acme-vault",
+      nested: { password: "hunter22", note: "fine" },
+      absent: null,
+    });
+    expect(body).toEqual({
+      openaiApiKey: REDACTED,
+      secretAccessKey: REDACTED,
+      gcsPrivateKeyId: REDACTED,
+      sessionToken: REDACTED,
+      bucket: "acme-vault",
+      nested: { password: REDACTED, note: "fine" },
+      // Absent stays absent: "not configured" and "withheld" must not read alike.
+      absent: null,
+    });
+  });
+
+  test("what the console MINTS is not redacted by name", () => {
+    // The sign-in response carries the session token and the setup link carries
+    // its own; a credentialRef names an indirection precisely so the secret it
+    // points at never travels. Blanking these broke sign-in outright.
+    expect(
+      redactValue({ token: "s3ss10n-t0ken-value", credentialRef: "0123456789abcdef0123456789abcdef" }),
+    ).toEqual({ token: "s3ss10n-t0ken-value", credentialRef: "0123456789abcdef0123456789abcdef" });
+  });
+
+  test("the entropy rule leaves ordinary diagnostics alone", () => {
+    // The Logs tab is the surface that says what is broken; a redactor that
+    // blanks object keys and checksums makes it useless.
+    const key = '{"key":"u-denis/claude-code/0199abcd-ef01-2345-6789-abcdef012345"}';
+    expect(redactCredentials(key)).toBe(key);
+    const sum = 'checksum mismatch: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"';
+    expect(redactCredentials(sum)).toBe(sum);
+    // …and still catches the shape of a generated key.
+    expect(redactCredentials('"AKIAIOSFODNN7EXAMPLEwJalrXUtnFEMIK7MDENGbPxRfiCY"')).toContain(REDACTED);
+  });
+
   test("an instant survives redaction as an instant", () => {
     // The driver hands timestamptz back as a Date. Rebuilt from its enumerable
     // properties it becomes `{}`, and every "last activity" on every page reads

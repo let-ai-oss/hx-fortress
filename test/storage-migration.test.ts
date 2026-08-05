@@ -651,6 +651,38 @@ describe("the drain, the barrier and the fence", () => {
     expect(episodes.length).toBeGreaterThan(3);
   });
 
+  test("a sidecar-heavy COPY inside the pause heartbeats too", async () => {
+    // copySession was the one in-pause loop with no beat: three round trips per
+    // sidecar, so one session could outlast an episode on its own and the fence
+    // then refused a healthy cut with most of the budget unspent.
+    const h = harness({ sessions: 1, swapPauseMs: 30 * 60_000 });
+    // A sidecar REWRITTEN as the drain arms: the canonical is untouched, so only
+    // the final in-pause pass (which hashes sidecars) notices, and it re-copies
+    // that session while the window is armed.
+    // Six of them, so the copy is a long walk rather than one long call — which
+    // is the shape a beat can actually save.
+    for (let i = 0; i < 6; i += 1) {
+      await h.source.writeArtifact(key(0), `workflow-run${i}.json`, `{"i":${i}}`);
+    }
+    const armDrain = h.deps.armDrain;
+    h.deps.armDrain = (on: boolean): void => {
+      if (on) void h.source.writeArtifact(key(0), "session.json", '{"updatedAt":"later"}');
+      armDrain(on);
+    };
+    // Each write costs a third of an episode: no single one outlasts the window,
+    // but the seven together outlast three of them.
+    const write = h.target.writeArtifact.bind(h.target);
+    h.target.writeArtifact = async (k, name, text): Promise<void> => {
+      h.advance(20_000);
+      await write(k, name, text);
+    };
+    const result = await runStorageMigration(h.deps);
+    expect(result.phase).toBe("done");
+    expect(result.switched).toBe(true);
+    // …and the re-copy really happened inside the pause.
+    expect(await h.target.readArtifactText(key(0), "session.json")).toBe('{"updatedAt":"later"}');
+  });
+
   test("a window that LAPSED under the in-pause work refuses the cut", async () => {
     // Re-arming afterwards makes the gate agree again but cannot undo the writes
     // admitted while it was open — and a permanent delete landing then is read

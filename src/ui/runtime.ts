@@ -36,6 +36,7 @@ import { SESSION_HEADER, SessionTable, type SessionPolicy, type UiSession } from
 import {
   LiveUsers,
   UsersStore,
+  liveUser,
   signInEligible,
   verifyPassword,
   type UiUser,
@@ -269,31 +270,37 @@ export class UiRuntime {
     // unknown logins, the operator who knows their password still gets in" — but
     // the process-wide ceiling ran ahead of it, so 24 source addresses saturated
     // it and every subsequent sign-in got 429, the real operator included. A
-    // principal with no recent failures skips the ceiling; it exists to bound
-    // strangers, and a clean principal is not one.
+    // principal with no recent failures is not REFUSED by the ceiling; it exists
+    // to bound strangers, and a clean principal is not one.
     //
-    // Asked about the PRINCIPAL, not the address. This console ships for a
-    // `publicUrl` behind a proxy, where the default `trustedProxies: []` makes
-    // every caller share one remote key — so the address-only question answered
-    // "dirty" for everybody after a single attacker failure, and the reservation
-    // protected nobody on the one deployment it was written for.
-    if (!this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now)) {
-      const ceiling = this.limiter.takeGlobalSignIn(now);
-      if (!ceiling.ok) {
-        return {
-          ok: false,
-          status: 429,
-          reason: "too many sign-in attempts right now",
-          retryAfterMs: ceiling.retryAfterMs,
-        };
-      }
+    // The token is ALWAYS spent. Skipping the take for a clean principal meant
+    // one address rotating a fresh login per attempt was clean every time and
+    // the process-wide bound was never consulted at all — the ceiling stopped
+    // bounding the flood it exists to bound.
+    //
+    // And the exemption asks about the PRINCIPAL, not the address, because this
+    // console ships for a `publicUrl` behind a proxy where the default
+    // `trustedProxies: []` makes every caller share one remote key — so an
+    // address-only question answered "dirty" for everybody after a single
+    // attacker failure. It also requires the login to be one this fortress
+    // HOLDS: an account that does not exist has no operator to protect, and
+    // "unknown login" is exactly what a rotating flood is made of.
+    const file = await this.readUsers();
+    const known = liveUser(file, args.login) !== null;
+    const ceiling = this.limiter.takeGlobalSignIn(now);
+    if (!ceiling.ok && !(known && this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now))) {
+      return {
+        ok: false,
+        status: 429,
+        reason: "too many sign-in attempts right now",
+        retryAfterMs: ceiling.retryAfterMs,
+      };
     }
     const bucket = this.limiter.take("signIn", `${args.login} ${args.remoteKey}`, now);
     if (!bucket.ok) {
       return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: bucket.retryAfterMs };
     }
 
-    const file = await this.readUsers();
     const user = signInEligible(file, args.login);
     const lockoutEpoch = user?.lockoutEpoch ?? 0;
     const locked = this.lockouts.state(args.login, args.remoteKey, lockoutEpoch, now);
@@ -301,8 +308,10 @@ export class UiRuntime {
       return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: locked.retryAfterMs };
     }
 
-    // Same question for the argon gate's reserved slot, and for the same reason.
-    const clean = this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now);
+    // Same question for the argon gate's reserved slot, and for the same reason:
+    // the reserved slot is for an operator this fortress knows, not for whoever
+    // happens to be attempting a name for the first time.
+    const clean = known && this.lockouts.isCleanPrincipal(args.login, args.remoteKey, now);
     let matched: boolean;
     try {
       matched = await this.argon.run(args.remoteKey, clean, () =>

@@ -347,6 +347,36 @@ describe("the argon gate", () => {
     expect(again.ok === false && again.status).toBe(429);
   });
 
+  test("a flood that ROTATES the login still pays the ceiling", async () => {
+    // Every first attempt at a name is clean by construction, so a predicate
+    // that skipped the ceiling for a clean principal was never consulted at all
+    // by a rotating flood: the process-wide bound on argon work stopped bounding
+    // the one shape it exists to bound. The token is spent unconditionally now,
+    // and the exemption asks for a login this fortress actually holds.
+    const runtime = runtimeOn(root);
+    const created = await runtime.users.create("ada", "operator");
+    await runtime.users.completeSetup(created.token, PASSWORD);
+
+    for (let i = 0; i < GLOBAL_SIGN_IN_CEILING.limit; i += 1) runtime.limiter.takeGlobalSignIn();
+    const stranger = await runtime.signIn({
+      login: `stranger-${Math.random().toString(36).slice(2)}`,
+      password: "wrong-password-here",
+      remoteKey: "fresh-address",
+      remoteAddr: "fresh-address",
+    });
+    expect(stranger.ok === false && stranger.status).toBe(429);
+    expect(stranger.ok === false && stranger.reason).toContain("too many sign-in attempts");
+
+    // …and the operator, who exists and has failed at nothing, still gets in.
+    const genuine = await runtime.signIn({
+      login: "ada",
+      password: PASSWORD,
+      remoteKey: "fresh-address",
+      remoteAddr: "fresh-address",
+    });
+    expect(genuine.ok).toBe(true);
+  });
+
   test("a principal with no recent failures still gets in during a flood", async () => {
     const gate = new ArgonGate({ maxConcurrent: 2, reserved: 1, waitMs: 2_000 });
     const release: Array<() => void> = [];
