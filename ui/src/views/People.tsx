@@ -1,7 +1,7 @@
 import React from "react";
 
 import { api, type AdoptionView, type DeviceRow, type RosterPersonRow } from "../api";
-import { Empty, FactRow, Loaded, Panel, SearchBox, Stat } from "../components";
+import { Empty, FactRow, Loaded, Panel, SearchBox, Stat, ViewFallback, awaiting } from "../components";
 import { ROSTER_ABSENT_COPY, ROSTER_EMPTY_COPY } from "../copy";
 import { DISCLOSURE_PEOPLE_NOTE, DISCLOSURE_ROSTER_NOTE } from "../disclosure";
 import * as fmt from "../format";
@@ -40,6 +40,22 @@ export function People(): React.ReactElement {
   const neverSeen = deviceRows.filter((d) => d.lastSeenAt === null).length;
   const roster = data?.roster ?? [];
   const shown = filterRoster(roster, team, search);
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+
+  // `?? 0` away from claiming this fortress holds nothing. Show the shell and
+
+  // a loader until the answers have actually arrived.
+
+  const gate = [adoption, devices];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
+
 
   return (
     <section className={active ? "view active" : "view"}>

@@ -1,7 +1,7 @@
 import React from "react";
 
 import { api, type ConsoleDbState } from "../api";
-import { Empty, FactRow, Loaded, Panel, Stat } from "../components";
+import { Empty, FactRow, Loaded, Panel, Stat, ViewFallback, awaiting } from "../components";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
@@ -70,6 +70,19 @@ export function Postgres(): React.ReactElement {
         }
       : databaseCopy(status.data.database)
     : null;
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+  // `?? 0` away from claiming this fortress holds nothing, and a first load
+  // that FAILED has no data either. Show the shell with a loader — or the
+  // reason, when there is one — until the answers have actually arrived.
+  const gate = [status, facts];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
 
   return (
     <section className={active ? "view active" : "view"}>
@@ -155,6 +168,19 @@ export function Storage(): React.ReactElement {
   const facts = useResource(() => api.facts(), [], { pollMs: 30_000, active });
   const page = useResource(() => api.sessions({ limit: "1" }), [], { pollMs: 60_000, active });
 
+  // Bad numbers are worse than a wait: every headline figure here is one
+  // `?? 0` away from claiming this fortress holds nothing, and a first load
+  // that FAILED has no data either. Show the shell with a loader — or the
+  // reason, when there is one — until the answers have actually arrived.
+  const gate = [facts, page];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
+
   return (
     <section className={active ? "view active" : "view"}>
       <div className="kicker">Setup &amp; health</div>
@@ -226,6 +252,19 @@ export function Embeddings(): React.ReactElement {
   const app = useApp();
   const active = app.view === "embeddings";
   const facts = useResource(() => api.facts(), [], { pollMs: 30_000, active });
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+  // `?? 0` away from claiming this fortress holds nothing, and a first load
+  // that FAILED has no data either. Show the shell with a loader — or the
+  // reason, when there is one — until the answers have actually arrived.
+  const gate = [facts];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
 
   return (
     <section className={active ? "view active" : "view"}>

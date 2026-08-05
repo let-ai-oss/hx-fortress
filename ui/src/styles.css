@@ -389,6 +389,11 @@
   .why-note + .why-note { margin-top: 10px; }
   .why-act { margin-top: 14px; display: flex; gap: 10px; }
   .empty { padding: 28px; text-align: center; color: var(--text-subtle); font-size: 15px; }
+  /* The whole content area while a view's first answer is in flight. Sized so
+     the shell does not jump when the real page replaces it. */
+  .vload { min-height: 60vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  .vload .spin { width: 26px; height: 26px; border: 3px solid var(--border-strong); border-top-color: var(--accent); border-radius: 999px; animation: vspin .7s linear infinite; }
+  .vloadtxt { color: var(--text-subtle); font-size: 15px; }
   .prevrow { display: grid; grid-template-columns: minmax(150px, 1fr) 235px 120px; gap: 18px; align-items: start; padding: 14px 20px; border-bottom: 1px solid var(--border); cursor: pointer; }
   .prevrow:last-child { border-bottom: none; }
   .prevrow:hover { background: var(--bg-subtle); }

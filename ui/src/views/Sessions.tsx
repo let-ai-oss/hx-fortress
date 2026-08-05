@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
 import { api, type SessionRow } from "../api";
-import { Empty, FactRow, Loaded, Panel, SearchBox, Stat } from "../components";
+import { Empty, FactRow, Loaded, Panel, SearchBox, Stat, ViewFallback, awaiting } from "../components";
 import {
   DISCLOSURE_BOUNDARY,
   DISCLOSURE_SESSIONS_LEDE,
@@ -33,6 +33,19 @@ export function Sessions(): React.ReactElement {
   };
 
   const totals = page.data?.totals ?? null;
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+  // `?? 0` away from claiming this fortress holds nothing, and a first load
+  // that FAILED has no data either. Show the shell with a loader — or the
+  // reason, when there is one — until the answers have actually arrived.
+  const gate = [page];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
 
   return (
     <section className={active ? "view active" : "view"}>

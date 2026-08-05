@@ -1272,6 +1272,32 @@ describe("the console follows credentials.json", () => {
     expect(after).not.toBe("not-configured");
   });
 
+  test("with no database, counts REFUSE — they never answer zero", async () => {
+    // The bug: `query()` returned [] for "there is no database", and `totals()`
+    // substitutes a zero row for "no rows" — so a console that had not yet
+    // reached Postgres answered 200 with `sessions: 0, people: 0, bytes: 0`.
+    // Indistinguishable, to the page, from a fortress that genuinely holds
+    // nothing; no client-side loader can correct a number it was handed.
+    const console_ = mount();
+    await console_.ready;
+    await expect(console_.port.sessions(new URLSearchParams())).rejects.toThrow(
+      /has not reached the fortress's database/,
+    );
+  });
+
+  test("…but a fact that needs no database is still answered", async () => {
+    // Storage comes from the credential file. Refusing it because Postgres is
+    // down would hide something this console genuinely knows, so `facts()`
+    // degrades per section: the DB-derived halves go null — which the page
+    // renders as "no answer from this fortress yet" — and storage answers.
+    const console_ = mount();
+    await console_.ready;
+    const facts = await console_.port.facts();
+    expect(facts.postgres).toBeNull();
+    expect(facts.embeddings).toBeNull();
+    expect(facts.storage.bucket).toBe("the-original-bucket");
+  });
+
   test("a migration swap moves the bucket the compliance surface names, with no restart", async () => {
     const console_ = mount();
     await console_.ready;

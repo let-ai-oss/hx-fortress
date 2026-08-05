@@ -221,14 +221,45 @@ interface ClockSkewFile {
   measuredAt: string;
 }
 
+/** What the console says when it has no database to ask. Operator-legible on
+ *  purpose: it is the sentence a page will show. */
+export const CONSOLE_DB_UNREACHED =
+  "this console has not reached the fortress's database yet — see the Postgres page for why";
+
 export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPort {
   const now = deps.now ?? ((): Date => new Date());
   const env = deps.env ?? process.env;
   const postureCache = new RoutingPostureCache(routingPosturePath(deps.paths.runtimeRoot));
 
-  const query = async <T>(build: () => unknown): Promise<T[]> => {
+  /**
+   * For the callers that already model "no answer" as UNKNOWN.
+   *
+   * `facts()` returns `postgres: null` / `embeddings: null` and the page renders
+   * those as "no answer from this fortress yet" — a true statement. Storage
+   * facts come from the credential file and are knowable with Postgres down, so
+   * refusing the whole call would hide something the console does know.
+   */
+  const queryIfReachable = async <T>(build: () => unknown): Promise<T[]> => {
     const db = deps.db();
     if (!db) return [];
+    return rows<T>(await db.execute(build() as never));
+  };
+
+  /**
+   * Run a query, or REFUSE — never invent an empty result.
+   *
+   * `[]` for "there is no database" was the same mistake as `?? 0`, one layer
+   * lower: `totals()` substitutes a zero row when a query returns no rows, so a
+   * console that had not yet reached Postgres answered 200 with
+   * `sessions: 0, people: 0, bytes: 0` — a confident statement that this
+   * fortress holds nothing, indistinguishable to the page from a fortress that
+   * genuinely does. No loader on the client can correct that, because the client
+   * was told a number. A refusal is the honest answer, and the page has a screen
+   * for it.
+   */
+  const query = async <T>(build: () => unknown): Promise<T[]> => {
+    const db = deps.db();
+    if (!db) throw new Error(CONSOLE_DB_UNREACHED);
     return rows<T>(await db.execute(build() as never));
   };
 
@@ -434,8 +465,12 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     growth: (days) => query<ConsoleGrowthRow>(() => consoleGrowthQuery(deps.universe, days)),
 
     async facts(): Promise<ConsoleFactsView> {
-      const [pg] = await query<ConsolePostgresFacts>(() => consolePostgresFactsQuery(deps.universe));
-      const [embeddings] = await query<ConsoleEmbeddingFacts>(() => consoleEmbeddingFactsQuery());
+      const [pg] = await queryIfReachable<ConsolePostgresFacts>(() =>
+        consolePostgresFactsQuery(deps.universe),
+      );
+      const [embeddings] = await queryIfReachable<ConsoleEmbeddingFacts>(() =>
+        consoleEmbeddingFactsQuery(),
+      );
       const bucket = await deps.bucket();
       const facts = await bucketFacts();
       return {

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 
 import { API, api, downloadFromServer, type DataPathRow } from "../api";
 import { AuditTrailPanel } from "./AuditTrail";
-import { FactRow, Loaded, Panel, ResultLine, useResultLine } from "../components";
+import { FactRow, Loaded, Panel, ResultLine, ViewFallback, awaiting, useResultLine } from "../components";
 import { RETENTION_LABELS } from "../copy";
 import { useResource } from "../hooks";
 import { copyText } from "../lib/util";
@@ -51,6 +51,22 @@ export default function Compliance(): React.ReactElement {
       setBusy(false);
     }
   };
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+
+  // `?? 0` away from claiming this fortress holds nothing. Show the shell and
+
+  // a loader until the answers have actually arrived.
+
+  const gate = [paths, identity, facts];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
+
 
   return (
     <section className={active ? "view active" : "view"}>

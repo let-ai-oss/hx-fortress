@@ -236,6 +236,59 @@ export function Stat(props: {
   );
 }
 
+/** Nothing to render from yet — still in flight, or it failed and has no last
+ *  good answer to fall back on. Either way the page must not do arithmetic on
+ *  it. */
+export function awaiting(resource: { data: unknown }): boolean {
+  return resource.data === null;
+}
+
+/**
+ * What a view shows instead of itself while it has no data.
+ *
+ * A first load that FAILED is a different screen from one still in flight, and
+ * both are different from zero: `?? 0` on a headline figure turns "we have not
+ * been told" into "this fortress holds nothing", which is a claim, not a
+ * placeholder.
+ */
+export function ViewFallback({
+  resources,
+}: {
+  resources: readonly { data: unknown; error: string | null; reload: () => void }[];
+}): React.ReactElement {
+  const failed = resources.find((r) => r.data === null && r.error !== null);
+  if (failed) {
+    return (
+      <div className="banner warn">
+        <span className="badge">!</span>
+        <span className="btxt">{failed.error}</span>
+        <button className="btn" onClick={failed.reload}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+  return <ViewLoading />;
+}
+
+/**
+ * The view's whole content area, while its data is still on the way.
+ *
+ * Rendered INSTEAD of the page, because the alternative is worse than a wait:
+ * every headline number on this console is a `?? 0` away from stating that a
+ * fortress holds nothing, and a tile that reads "0 sessions · unavailable"
+ * during a routine first paint is not slower than the truth, it is a different
+ * claim. The shell and the menu stay, so the console never looks gone.
+ */
+export function ViewLoading({ what }: { what?: string }): React.ReactElement {
+  return (
+    <div className="vload">
+      <div className="spin" />
+      <div className="vloadtxt">{what ?? "Reading the fortress…"}</div>
+    </div>
+  );
+}
+
 export function Empty({ children }: { children: React.ReactNode }): React.ReactElement {
   return <div className="empty">{children}</div>;
 }

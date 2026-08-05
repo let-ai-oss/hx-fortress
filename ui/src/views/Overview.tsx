@@ -1,7 +1,7 @@
 import React from "react";
 
 import { api, type GrowthRow } from "../api";
-import { Empty, FactRow, Loaded, Panel, Stat } from "../components";
+import { Empty, FactRow, Loaded, Panel, Stat, ViewFallback, awaiting } from "../components";
 import { DISCLOSURE_LEDE_TAIL, DISCLOSURE_STAT_DETAIL, DISCLOSURE_STAT_LABEL } from "../disclosure";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
@@ -23,6 +23,22 @@ export default function Overview(): React.ReactElement {
   const metrics = useResource(() => api.metrics(), [], { pollMs: 15_000, active });
 
   const totals = page.data?.totals ?? null;
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+
+  // `?? 0` away from claiming this fortress holds nothing. Show the shell and
+
+  // a loader until the answers have actually arrived.
+
+  const gate = [status, page, facts];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
+
 
   return (
     <section className={active ? "view active" : "view"}>

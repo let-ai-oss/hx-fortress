@@ -15,16 +15,7 @@ import {
   type MigrationRunView,
   type StatusView,
 } from "../api";
-import {
-  Empty,
-  FactRow,
-  Loaded,
-  MutationControl,
-  Panel,
-  ResultLine,
-  useConfirm,
-  useResultLine,
-} from "../components";
+import { Empty, FactRow, Loaded, MutationControl, Panel, ResultLine, ViewFallback, awaiting, useConfirm, useResultLine } from "../components";
 import { COMMAND_SURFACE_NOTE, OPS_SESSION_LINE, opsLede } from "../copy";
 import * as fmt from "../format";
 import { useResource, type Resource } from "../hooks";
@@ -48,6 +39,22 @@ export default function Ops(): React.ReactElement {
 
   const principal = app.auth.kind === "signed-in" ? app.auth.principal : null;
   const container = status.data?.serviceManager === "container";
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+
+  // `?? 0` away from claiming this fortress holds nothing. Show the shell and
+
+  // a loader until the answers have actually arrived.
+
+  const gate = [status, identity, commands];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
+
 
   return (
     <section className={active ? "view active" : "view"}>

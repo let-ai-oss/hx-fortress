@@ -1,16 +1,7 @@
 import React from "react";
 
 import { api, type PostureView, type ResidencyFindingRow } from "../api";
-import {
-  FactRow,
-  Loaded,
-  MutationControl,
-  Panel,
-  ResultLine,
-  Stat,
-  useConfirm,
-  useResultLine,
-} from "../components";
+import { FactRow, Loaded, MutationControl, Panel, ResultLine, Stat, ViewFallback, awaiting, useConfirm, useResultLine } from "../components";
 import { COMMAND_REQUEST_NOTE, NO_POLLER_REFUSAL } from "../../../src/ui/copy";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
@@ -48,6 +39,22 @@ export default function Residency(): React.ReactElement {
   const daemonRunning = status.data?.daemon === "running";
 
   const totals = page.data?.totals ?? null;
+
+  // Bad numbers are worse than a wait: every headline figure here is one
+
+  // `?? 0` away from claiming this fortress holds nothing. Show the shell and
+
+  // a loader until the answers have actually arrived.
+
+  const gate = [posture, page, status];
+  if (active && gate.some(awaiting)) {
+    return (
+      <section className="view active">
+        <ViewFallback resources={gate} />
+      </section>
+    );
+  }
+
 
   return (
     <section className={active ? "view active" : "view"}>
