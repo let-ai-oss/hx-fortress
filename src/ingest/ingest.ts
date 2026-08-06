@@ -252,6 +252,16 @@ interface ResolvedDimensions {
   modelId: string | null;
 }
 
+/** An agent-lane commit arrived before its parent session was indexed. Typed so
+ *  the cloud's durable replay can bring it back once the parent lands, instead of
+ *  the lane fabricating a content-less parent row that would then mask the real
+ *  parent from the guarantor forever. */
+export class ParentSessionNotIndexedError extends Error {
+  constructor(public readonly sessionId: string) {
+    super("parent_session_not_indexed");
+  }
+}
+
 function metaStr(meta: Record<string, unknown> | null, key: string): string | null {
   const v = meta?.[key];
   return typeof v === "string" ? v : null;
@@ -779,7 +789,21 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
-    // Ensure the parent session row exists (a child chunk can arrive first).
+    // A child chunk can arrive before its parent — but it must NOT invent one.
+    //
+    // This used to insert a parent STUB: a real hx.sessions row with no title, no
+    // turns and zero rollups. That row is indistinguishable from a real one to
+    // `keyExists`, so the parent's canonical stopped counting as an orphan and the
+    // guarantor never restored it — the reconciler's own comment calls that
+    // permanent content loss. It is also precisely the half-indexed session the
+    // ingest contract forbids: named (or worse, nameless) in the list, with none
+    // of its content behind it.
+    //
+    // A lane is only meaningful under an indexed parent, so if the parent is not
+    // there yet, index NOTHING and let the work come back: the cloud replays this
+    // commit durably, and the guarantor sorts parents before lanes so a restore
+    // materialises the parent first. Failing here is visible and self-healing;
+    // the stub was silent and terminal.
     const parent = (
       await tx
         .select({ id: hxSessions.id })
@@ -793,27 +817,8 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
         )
         .limit(1)
     )[0];
-    let sessionRowId: string;
-    if (parent) {
-      sessionRowId = parent.id;
-    } else {
-      const [ins] = await tx
-        .insert(hxSessions)
-        .values({
-          userId: dims.userId,
-          deviceId: dims.deviceId,
-          orgId: dims.orgId,
-          projectId: dims.projectId,
-          repoId: dims.repoId,
-          family: input.key.family,
-          sessionId: input.key.sessionId,
-          attributionSource: input.recovered ? "recovered" : "auto",
-          firstEventAt: parsed.firstActivityAt ?? now,
-          lastActivityAt: parsed.lastActivityAt ?? now,
-        })
-        .returning({ id: hxSessions.id });
-      sessionRowId = ins.id;
-    }
+    if (!parent) throw new ParentSessionNotIndexedError(input.key.sessionId);
+    const sessionRowId: string = parent.id;
 
     const meta = input.meta;
     const existingAgent = (
