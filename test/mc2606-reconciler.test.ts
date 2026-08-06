@@ -1023,7 +1023,6 @@ describe.if(!!DSN)("Component G — a zero-event row is only ignored when the ca
     const { store, turns } = await zeroEventRowOver(real, null);
     const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
     expect(res.emptyCanonicals).toBe(0);
-    expect(res.unjudgeable).toBeGreaterThanOrEqual(0);
     expect(await turns()).toBe(4);
   });
 });
@@ -1090,5 +1089,71 @@ describe.if(!!DSN)("Component G — a content-less LANE row does not block its o
     // every pass and the lane stays empty forever.
     expect(res.noOpRepairs).toBe(0);
     expect(await laneTurns()).toBe(5);
+  });
+});
+
+
+// The one untested data-safety behaviour left after pass 4: a tail that applies
+// and then fails verification must NOT rebuild from text read before the growth
+// that caused the failure — that deletes the new content.
+describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the rebuild", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+  const rec = (t2: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t2 }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+
+  test("the tail lands, the canonical has grown, and the rebuild stands down", async () => {
+    const key: SessionKey = {
+      userId: `grew-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const head = body(3);
+    const atScan = body(8);   // what the pass listed and read
+    const grown = body(12);   // what the store holds by verify time
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(atScan) }],
+      readCanonicalText: async () => atScan,
+      // Verification and the escalation guard both re-measure, and by then the
+      // canonical is larger than the pass ever saw.
+      statCanonical: async () => Buffer.byteLength(grown),
+    } as unknown as SessionStore;
+
+    const turns = async () => {
+      const [row] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const x = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+      return x.length;
+    };
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    // The tail appended and then failed verification against the grown canonical…
+    expect(res.verifyFallbacks).toBe(1);
+    // …and the rebuild stood down rather than reinstating the pre-growth prefix.
+    expect(res.liveRaces).toBe(1);
+    expect(res.repairedFull).toBe(0);
+    expect(res.integrityFailures).toBe(0);
+    // The tail's 8 records are intact — a rebuild from `atScan` would also give 8,
+    // so the load-bearing assertion is that nothing was DELETED and no false
+    // integrity failure was reported.
+    expect(await turns()).toBe(8);
   });
 });

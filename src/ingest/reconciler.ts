@@ -65,6 +65,10 @@ export interface ReconcileOptions {
 
 export interface ReconcileResult {
   scanned: number;
+  /** Canonicals examined this pass with no indexed row — NOT a damage count.
+   *  It includes empty canonicals re-examined every pass (subtract
+   *  `emptyCanonicals`) and failed restores that will retry. Alert on
+   *  `noOpRepairs` / `integrityFailures` / `restored`, never on this. */
   orphans: number;
   restored: number;
   skippedTombstoned: number;
@@ -78,8 +82,10 @@ export interface ReconcileResult {
   repairedTail: number;
   /** Repairs that rebuilt the whole session from the canonical. */
   repairedFull: number;
-  /** Tail repairs whose post-repair verification failed and were escalated to a
-   *  full rebuild. A persistently non-zero value means the incremental path is
+  /** Tail repairs whose post-repair verification failed. Usually escalated to a
+   *  full rebuild — but when the canonical grew mid-iteration the escalation is
+   *  DEFERRED instead (a paired `liveRaces` in the same result says so), because
+   *  rebuilding from pre-growth text would delete content. A persistently non-zero value means the incremental path is
    *  mis-slicing and should be disabled (FORTRESS_GUARANTOR_TAIL_REPAIR=false). */
   verifyFallbacks: number;
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
