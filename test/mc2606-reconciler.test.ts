@@ -577,6 +577,27 @@ describe.if(!!DSN)("Component G — integrity of a repaired session", () => {
     expect(l.bytes).toBe(Buffer.byteLength(whole));
   });
 
+  test("a session that grew UNDER the sweep is complete, not damaged", async () => {
+    // Production produced exactly this: a live chunk landed between the repair and
+    // the verification, leaving the row AHEAD of the canonical size captured when
+    // the pass started. Treating "not equal" as damage reported healthy sessions
+    // as integrity failures and re-indexed them every sweep.
+    const canonicals = new Map<string, string>();
+    const { key } = await halfIndexed(10, 10, canonicals);
+    const l0 = await lane(key);
+    // The row covers MORE than the canonical the store reports.
+    await db.update(hxSessions).set({ bytesUploaded: l0.bytes + 5_000 }).where(eq(hxSessions.id, l0.id));
+
+    const res = await reconcileOrphans(db, sized(canonicals), { batchDelayMs: 0, correctExistingTitles: false });
+    expect(res.staleIndexes).toBe(0);       // ahead is not behind
+    expect(res.repairedTail).toBe(0);
+    expect(res.repairedFull).toBe(0);
+    expect(res.integrityFailures).toBe(0);  // and it is certainly not a failure
+    const l = await lane(key);
+    expect(l.turns).toBe(10);               // untouched
+    expect(l.dense).toBe(true);
+  });
+
   test("a hole in the MIDDLE is detected by seq density — bytes alone cannot see it", async () => {
     const canonicals = new Map<string, string>();
     const { key } = await halfIndexed(10, 10, canonicals); // fully indexed…

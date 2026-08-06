@@ -104,7 +104,18 @@ async function verifyLane(
   db: HxDb,
   key: SessionKey,
   canonicalBytes: number | null,
+  store?: SessionStore,
 ): Promise<{ ok: boolean; bytes: number; turns: number; dense: boolean }> {
+  // Re-measure the canonical NOW. The size read at scan time can be minutes old,
+  // and for a live session it is already wrong by the time a repair finishes.
+  if (store) {
+    try {
+      const fresh = await store.statCanonical(key);
+      if (fresh != null) canonicalBytes = fresh;
+    } catch {
+      // keep the scan-time size — a stat failure must not fail the verification
+    }
+  }
   const [row] = await db
     .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
     .from(hxSessions)
@@ -129,7 +140,12 @@ async function verifyLane(
   const turns = Number(agg?.n ?? 0);
   const dense = turns === Number(agg?.maxSeq ?? -1) + 1;
   const bytes = Number(row.bytes ?? 0);
-  const bytesOk = canonicalBytes == null || bytes === canonicalBytes;
+  // A session that is still being written grows UNDER the sweep: a live chunk can
+  // land between the repair and this check, leaving the row legitimately AHEAD of
+  // whatever the canonical measured when the pass started. Complete means "covers
+  // the canonical", not "equals a number captured minutes ago" — so >= passes, and
+  // only genuinely BEHIND counts as incomplete.
+  const bytesOk = canonicalBytes == null || bytes >= canonicalBytes;
   return { ok: bytesOk && dense, bytes, turns, dense };
 }
 
@@ -281,7 +297,7 @@ export async function reconcileOrphans(
     if (k.bytes == null || k.sessionId.includes(AGENT_LANE)) return n;
     const nat = `${k.userId}/${k.family}/${k.sessionId}`;
     if (!have.has(nat)) return n;
-    return indexedBytes.get(nat) === k.bytes ? n : n + 1;
+    return (indexedBytes.get(nat) ?? 0) < k.bytes ? n + 1 : n;
   }, 0);
   const ceiling = opts.staleRepairCeiling ?? 0.25;
   const wantRepair = opts.repairStaleIndexes ?? true;
@@ -335,7 +351,11 @@ export async function reconcileOrphans(
       if (key.sessionId.includes(AGENT_LANE)) continue;
       const holed = gapped.has(natural);
       if (holed) res.gappedLanes += 1;
-      const behind = canonicalBytes != null && indexedBytes.get(natural) !== canonicalBytes;
+      // Only BEHIND is damage. A live session can legitimately run ahead of the
+      // size captured when this pass started, and rebuilding it for that would
+      // re-index a healthy session every sweep — churn that looks like repair.
+      const behind =
+        canonicalBytes != null && (indexedBytes.get(natural) ?? 0) < canonicalBytes;
       if (!holed && !behind) continue;
       if (behind) res.staleIndexes += 1;
       if (!repairStale) continue;
@@ -417,7 +437,7 @@ export async function reconcileOrphans(
           });
           // VERIFY — never trust the fast path. Bytes prove it covers the whole
           // canonical; seq density proves it left no hole behind.
-          const v = await verifyLane(db, key, canonicalBytes);
+          const v = await verifyLane(db, key, canonicalBytes, store);
           if (v.ok) {
             landed = true;
             res.repairedTail += 1;
@@ -438,7 +458,7 @@ export async function reconcileOrphans(
         // was not safely sliceable, or it was and did not verify.
         if (!landed) {
           await ingestCommit(db, { ...base, key });
-          const v = await verifyLane(db, key, canonicalBytes);
+          const v = await verifyLane(db, key, canonicalBytes, store);
           if (v.ok) {
             res.repairedFull += 1;
           } else {
