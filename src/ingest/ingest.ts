@@ -287,11 +287,11 @@ async function resolveDimensions(
   now: string,
   cwd: string | null,
 ): Promise<ResolvedDimensions> {
-  const userId = await upsertUser(tx, userExternalId, now);
-  const orgId = attribution.orgExternalId ? await upsertOrg(tx, attribution.orgExternalId, now) : null;
+  const userId = await upsertUser(tx, userExternalId);
+  const orgId = attribution.orgExternalId ? await upsertOrg(tx, attribution.orgExternalId) : null;
   const projectId =
     orgId && attribution.projectExternalId
-      ? await upsertProject(tx, orgId, attribution.projectExternalId, now)
+      ? await upsertProject(tx, orgId, attribution.projectExternalId)
       : null;
   // Prefer the client-sent repoSlug; fall back to the cwd's repo root so repo
   // attribution (and the by-repo aggregate) is populated instead of null when the
