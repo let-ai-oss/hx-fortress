@@ -15,7 +15,7 @@
 // caller's responsibility (the scheduler), non-throwing per session.
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { and, eq, gt, isNull, sql as dsql } from "drizzle-orm";
+import { and, eq, gt, isNotNull, isNull, sql as dsql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
@@ -145,6 +145,8 @@ async function verifyLane(
   key: SessionKey,
   canonicalBytes: number | null,
   store?: SessionStore,
+  /** Agent lane to verify. Omitted / null = the parent lane. */
+  agentId?: string | null,
 ): Promise<{ ok: boolean; bytes: number; turns: number; dense: boolean }> {
   // Re-measure the canonical NOW. The size read at scan time can be minutes old,
   // and for a live session it is already wrong by the time a repair finishes.
@@ -170,16 +172,40 @@ async function verifyLane(
     )
     .limit(1);
   if (!row) return { ok: false, bytes: 0, turns: 0, dense: false };
+  // hx.turns.agent_id holds the lane ROW id, not the external agent id — resolve
+  // it before counting, and read the lane's OWN byte count while we are here.
+  let bytes = Number(row.bytes ?? 0);
+  let laneRowId: string | null = null;
+  if (agentId) {
+    const [laneRow] = await db
+      .select({ id: hxSessionAgents.id, bytes: hxSessionAgents.bytesUploaded })
+      .from(hxSessionAgents)
+      .where(
+        and(
+          eq(hxSessionAgents.sessionId, row.id),
+          eq(hxSessionAgents.agentExternalId, agentId),
+          isNull(hxSessionAgents.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (!laneRow) return { ok: false, bytes: 0, turns: 0, dense: false };
+    laneRowId = laneRow.id;
+    bytes = Number(laneRow.bytes ?? 0);
+  }
   const [agg] = await db
     .select({
       n: dsql<number>`count(*)::int`,
       maxSeq: dsql<number>`coalesce(max(${hxTurns.seq}), -1)::int`,
     })
     .from(hxTurns)
-    .where(and(eq(hxTurns.sessionId, row.id), isNull(hxTurns.agentId)));
+    .where(
+      and(
+        eq(hxTurns.sessionId, row.id),
+        laneRowId ? eq(hxTurns.agentId, laneRowId) : isNull(hxTurns.agentId),
+      ),
+    );
   const turns = Number(agg?.n ?? 0);
   const dense = turns === Number(agg?.maxSeq ?? -1) + 1;
-  const bytes = Number(row.bytes ?? 0);
   // A session that is still being written grows UNDER the sweep: a live chunk can
   // land between the repair and this check, leaving the row legitimately AHEAD of
   // whatever the canonical measured when the pass started. Complete means "covers
@@ -313,6 +339,26 @@ export async function reconcileOrphans(
       .groupBy(hxUsers.externalId, hxSessions.family, hxSessions.sessionId)
       .having(dsql`count(*) <> max(${hxTurns.seq}) + 1`);
     for (const h of holes) gapped.add(`${h.ext}/${h.family}/${h.sessionId}`);
+    // …and the same question per agent lane. Lanes are ~a third of all indexed
+    // content and were previously existence-only, so a holed lane was invisible.
+    const laneHoles = await db
+      .select({
+        ext: hxUsers.externalId,
+        family: hxSessions.family,
+        sessionId: hxSessions.sessionId,
+        agentId: hxSessionAgents.agentExternalId,
+      })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .innerJoin(hxTurns, eq(hxTurns.sessionId, hxSessions.id))
+      // turns carry the lane ROW id; the sweep keys on the EXTERNAL id.
+      .innerJoin(hxSessionAgents, eq(hxSessionAgents.id, hxTurns.agentId))
+      .where(and(isNull(hxSessions.deletedAt), isNotNull(hxTurns.agentId)))
+      .groupBy(hxUsers.externalId, hxSessions.family, hxSessions.sessionId, hxSessionAgents.agentExternalId)
+      .having(dsql`count(*) <> max(${hxTurns.seq}) + 1`);
+    for (const h of laneHoles) {
+      gapped.add(`${h.ext}/${h.family}/${h.sessionId}${AGENT_LANE}${h.agentId}`);
+    }
   } catch (err) {
     // Never let the integrity sweep take the whole pass down with it.
     opts.logger?.warn?.("reconciler: seq-gap scan failed", { err: sanitizeDbError(err) });
@@ -323,12 +369,28 @@ export async function reconcileOrphans(
       family: hxSessions.family,
       sessionId: hxSessions.sessionId,
       agentId: hxSessionAgents.agentExternalId,
+      bytesUploaded: hxSessionAgents.bytesUploaded,
     })
     .from(hxSessionAgents)
     .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
-    .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionAgents.deletedAt)));
-  for (const r of agents) have.add(`${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`);
+    // A lane with zero events carries no content, exactly like a parent stub, and
+    // must not mask its own canonical from the orphan scan.
+    .where(
+      and(
+        isNull(hxSessions.deletedAt),
+        isNull(hxSessionAgents.deletedAt),
+        gt(hxSessionAgents.eventCount, 0),
+      ),
+    );
+  // Lanes hold ~a third of all indexed content, so they get the same byte-level
+  // completeness check as parents — keyed on their OWN bytes_uploaded.
+  const laneBytes = new Map<string, number>();
+  for (const r of agents) {
+    const k = `${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`;
+    have.add(k);
+    laneBytes.set(k, Number(r.bytesUploaded ?? 0));
+  }
 
   const keys: CanonicalEntry[] = await store.listAllCanonicalKeys();
 
@@ -396,20 +458,20 @@ export async function reconcileOrphans(
       // landed) is invisible to an existence check, and no sweep would ever find
       // it. Byte counts are only compared when the store reported one.
       const canonicalBytes = key.bytes ?? null;
-      if (key.sessionId.includes(AGENT_LANE)) continue;
       if (canonicalBytes == null) res.unjudgeable += 1;
+      const isLane = key.sessionId.includes(AGENT_LANE);
       const holed = gapped.has(natural);
       if (holed) res.gappedLanes += 1;
       // Only BEHIND is damage. A live session can legitimately run ahead of the
       // size captured when this pass started, and rebuilding it for that would
       // re-index a healthy session every sweep — churn that looks like repair.
-      const behind =
-        canonicalBytes != null && (indexedBytes.get(natural) ?? 0) < canonicalBytes;
+      const indexedNow = (isLane ? laneBytes : indexedBytes).get(natural) ?? 0;
+      const behind = canonicalBytes != null && indexedNow < canonicalBytes;
       if (!holed && !behind) continue;
       if (behind) res.staleIndexes += 1;
       if (!repairStale) continue;
       staleRepair = true;
-      scanBytes = indexedBytes.get(natural) ?? 0;
+      scanBytes = indexedNow;
       // A hole in the middle cannot be appended away — force the full rebuild.
       alreadyIndexedBytes = holed ? 0 : scanBytes;
     }
@@ -452,17 +514,50 @@ export async function reconcileOrphans(
         rebuild: true as const,
       };
       if (laneIdx >= 0) {
-        // Agent lane → the parent session key + the agentId.
-        await ingestAgentCommit(db, {
-          ...base,
-          key: { userId: key.userId, family: key.family, sessionId: baseSid },
-          agentId: key.sessionId.slice(laneIdx + AGENT_LANE.length),
-        });
-        // NOTE: agent lanes are still restore-only — they are not completeness
-        // checked and this write is not verified. Tracked as D3; do not read
-        // repairedFull here as proof the lane is whole.
+        // Agent lane → the parent session key + the agentId. Lanes get the same
+        // contract as parents now: compare-and-swap against what the sweep saw,
+        // then PROVE the result rather than assume it. A lane is rebuilt whole —
+        // there is no tail path for lanes until the parent one has proven itself
+        // in production.
+        const agentId = key.sessionId.slice(laneIdx + AGENT_LANE.length);
+        const laneKey = { userId: key.userId, family: key.family, sessionId: baseSid };
+        let laneOutcome: Awaited<ReturnType<typeof ingestAgentCommit>>;
+        try {
+          laneOutcome = await ingestAgentCommit(db, {
+            ...base,
+            key: laneKey,
+            agentId,
+            ...(scanBytes !== undefined ? { expectIndexedBytes: scanBytes } : {}),
+          });
+        } catch (err) {
+          if (!(err instanceof IndexAdvancedError)) throw err;
+          res.liveRaces += 1;
+          opts.logger?.info?.("reconciler: lane advanced under the sweep — deferring to the live write", {
+            sessionId: baseSid, agentId, family: key.family,
+            expected: err.expected, nowIndexed: err.actual,
+          });
+          if (delay > 0) await sleep(delay);
+          continue;
+        }
+        if (!laneOutcome.applied) {
+          res.noOpRepairs += 1;
+          opts.logger?.warn?.("reconciler: lane repair reported NO-OP", {
+            sessionId: baseSid, agentId, family: key.family, reason: laneOutcome.reason,
+          });
+        } else {
+          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId);
+          if (v.ok) {
+            res.repairedFull += 1;
+          } else {
+            res.integrityFailures += 1;
+            opts.logger?.warn?.("reconciler: LANE STILL INCOMPLETE after a full rebuild", {
+              sessionId: baseSid, agentId, family: key.family,
+              indexedBytes: v.bytes, canonicalBytes: key.bytes ?? null,
+              turns: v.turns, dense: v.dense,
+            });
+          }
+        }
         res.restored += 1;
-        res.repairedFull += 1;
       } else {
         const canonicalBytes = key.bytes ?? Buffer.byteLength(chunkText);
 

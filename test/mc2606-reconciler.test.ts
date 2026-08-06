@@ -8,6 +8,7 @@ import { makeMigrationExec } from "../src/host/postgres/sql-exec";
 import {
   IndexAdvancedError,
   LanePrefixMismatchError,
+  ingestAgentCommit,
   ingestCommit,
   type IngestAttribution,
 } from "../src/ingest/ingest";
@@ -799,5 +800,82 @@ describe.if(!!DSN)("Component G — repair can always run, and can never destroy
     expect(caught).toBeInstanceOf(IndexAdvancedError);
     // Without the CAS this lane would be back to 3 turns, permanently.
     expect((await lane(key)).turns).toBe(live.turns);
+  });
+});
+
+
+// Agent lanes hold ~a third of all indexed content and were existence-only: a
+// half-indexed lane was undetectable, and repairing one was a silent no-op
+// because ingestAgentCommit's recovered guard had no rebuild override.
+describe.if(!!DSN)("Component G — agent lanes are checked and repaired like parents", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+  const AGENT = "agent-1";
+
+  test("a partially indexed LANE is detected and fully repaired", async () => {
+    const key: SessionKey = {
+      userId: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const parentText = body(4);
+    const laneHead = body(2);
+    const laneWhole = body(8);
+
+    await ingestCommit(db, {
+      key, chunkId: "p1", replace: false, chunkText: parentText,
+      totalBytes: Buffer.byteLength(parentText), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestAgentCommit(db, {
+      key, agentId: AGENT, chunkId: "a1", replace: false, chunkText: laneHead,
+      totalBytes: Buffer.byteLength(laneHead), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const laneState = async () => {
+      const [row] = await db
+        .select({ id: hxSessionAgents.id, bytes: hxSessionAgents.bytesUploaded })
+        .from(hxSessionAgents)
+        .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const turns = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(eq(hxTurns.agentId, row!.id));
+      return { bytes: Number(row!.bytes ?? 0), turns: turns.length };
+    };
+    const before = await laneState();
+    expect(before.turns).toBe(2);
+
+    // The store holds the WHOLE lane transcript; the index holds only its head.
+    const store = {
+      listAllCanonicalKeys: async () => [
+        { ...key, bytes: Buffer.byteLength(parentText) },
+        { ...key, sessionId: `${key.sessionId}:a:${AGENT}`, bytes: Buffer.byteLength(laneWhole) },
+      ],
+      readCanonicalText: async (k: SessionKey) =>
+        k.sessionId.includes(":a:") ? laneWhole : parentText,
+      statCanonical: async (k: SessionKey) =>
+        Buffer.byteLength(k.sessionId.includes(":a:") ? laneWhole : parentText),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(res.staleIndexes).toBeGreaterThanOrEqual(1);
+    expect(res.noOpRepairs).toBe(0);        // the old recovered guard made this a no-op
+    expect(res.integrityFailures).toBe(0);  // …and it is verified now, not assumed
+
+    const after = await laneState();
+    expect(after.turns).toBe(8);
+    expect(after.bytes).toBe(Buffer.byteLength(laneWhole));
   });
 });

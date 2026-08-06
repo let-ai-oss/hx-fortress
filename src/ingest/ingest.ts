@@ -870,9 +870,12 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
 }
 
 /** Ingest a child-lane (subagent / workflow-agent) commit. */
-export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput): Promise<void> {
+export async function ingestAgentCommit(
+  db: HxDb,
+  input: IngestAgentCommitInput,
+): Promise<IngestOutcome> {
   const userExternalId = input.key.userId;
-  if (!userExternalId || !input.agentId) return;
+  if (!userExternalId || !input.agentId) return { applied: false, reason: "no_user" };
   // Cross-family by identity — child lanes can carry a stale family (see
   // isSessionDeleted); a deleted parent blocks every lane.
   if (await isSessionDeleted(db, userExternalId, input.key.sessionId)) {
@@ -883,7 +886,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
   const parsed = parseChunk(input.chunkText);
   scrubParsed(parsed);
 
-  await db.transaction(async (tx) => {
+  const committed = await db.transaction(async (tx) => {
     // M2: same per-session advisory lock + in-lock tombstone re-check as the
     // parent path (keyed on the base session id, so parent + agent + purge
     // serialize together).
@@ -895,7 +898,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }
-    if (await alreadyIngested(tx, dedupeKey)) return;
+    if (await alreadyIngested(tx, dedupeKey)) return { skip: "deduped" as const };
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
@@ -944,7 +947,34 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
     // the agent lane already exists under the lock, no-op rather than rebuild it
     // (which would race a concurrent live delta for the same lane). The parent
     // row here is pre-existing when the agent exists (FK), so no stub was made.
-    if (input.recovered && existingAgent) return;
+    // …but `rebuild` overrides it, exactly as on the parent path: the reconciler
+    // sets that only once it has already decided this lane must be rebuilt
+    // (behind its canonical, or holed). Without the override every lane repair
+    // was a silent no-op on the FIRST attempt — the same shape as the constant
+    // repair key, but total.
+    if (input.recovered && !input.rebuild && existingAgent) {
+      return { skip: "recovered_skip" as const };
+    }
+
+    // Compare-and-swap, same contract as the parent lane: the sweep read this
+    // lane's byte count and the canonical minutes ago, so a live commit in
+    // between must abort the repair rather than write from a stale observation.
+    if (input.expectIndexedBytes !== undefined) {
+      const actual = Number(existingAgent?.bytesUploaded ?? 0);
+      if (actual !== input.expectIndexedBytes) {
+        throw new IndexAdvancedError(input.expectIndexedBytes, actual);
+      }
+    }
+    if (input.expectPriorTurns !== undefined && existingAgent) {
+      const [priorAgg] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, sessionRowId), eq(hxTurns.agentId, existingAgent.id)));
+      const actualTurns = Number(priorAgg?.n ?? 0);
+      if (actualTurns !== input.expectPriorTurns) {
+        throw new LanePrefixMismatchError(input.expectPriorTurns, actualTurns);
+      }
+    }
     const prev = input.replace ? undefined : existingAgent;
     const agentRollup = {
       eventCount: (prev?.eventCount ?? 0) + parsed.eventCount,
@@ -975,7 +1005,13 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
           gitBranch: metaStr(meta, "gitBranch") ?? existingAgent.gitBranch,
           modelId: dims.modelId ?? existingAgent.modelId,
           ...agentRollup,
-          bytesUploaded: input.totalBytes,
+          // Monotone on append for the same reason as the parent lane: a replayed
+          // earlier chunk carries a smaller total, and letting it regress the
+          // stored value is what makes a later tail slice from an offset the lane
+          // has already passed.
+          bytesUploaded: input.replace
+            ? input.totalBytes
+            : Math.max(Number(existingAgent.bytesUploaded ?? 0), input.totalBytes),
           lastActivityAt: agentLastActivityAt,
           updatedAt: now,
         })
@@ -1038,8 +1074,23 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
       status: "processed",
       processedAt: now,
     });
+
+    return { sessionRowId, turnsInserted: parsed.turns.length };
   });
 
   // Off the commit path: nudge the embed worker (best-effort — never throws).
   signalEmbedWork();
+
+  if (!committed) return { applied: false, reason: "deduped" };
+  const outcome = committed as {
+    skip?: "deduped" | "recovered_skip";
+    sessionRowId?: string;
+    turnsInserted?: number;
+  };
+  if (outcome.skip) return { applied: false, reason: outcome.skip };
+  return {
+    applied: true,
+    sessionRowId: outcome.sessionRowId ?? "",
+    turnsInserted: outcome.turnsInserted ?? 0,
+  };
 }
