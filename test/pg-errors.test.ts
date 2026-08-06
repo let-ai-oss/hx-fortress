@@ -354,4 +354,31 @@ describe("lock_timeout (55P03) joins statement_timeout (57014) as a bounded lock
   test("a bounded-out lock wait stays transient — the txn rolled back, one retry is sound", () => {
     expect(isTransientDbError(new SessionLockTimeoutError(serverError("55P03", "lock")))).toBe(true);
   });
+
+  test("a RAW 55P03 is transient too — the advisory lock is not the only contended statement", () => {
+    // Every concurrent ingest upserts the same user/org/project/repo dimension
+    // rows; under load that row-lock contention trips lock_timeout, not the
+    // advisory lock the positional tag covers. Leaving those un-retried held
+    // the post-deploy failure rate near 37%.
+    const raw = serverError("55P03", "canceling statement due to lock timeout");
+    expect(isTransientDbError(raw)).toBe(true);
+    expect(isTransientDbError(drizzleWrapped(raw))).toBe(true);
+  });
+
+  test("a raw 55P03 IS retried exactly once, and succeeds on the second attempt", async () => {
+    let calls = 0;
+    const out = await retryOnceOnTransientDbError(async () => {
+      calls += 1;
+      if (calls === 1) throw serverError("55P03", "canceling statement due to lock timeout");
+      return "indexed";
+    });
+    expect(out).toBe("indexed");
+    expect(calls).toBe(2);
+  });
+
+  test("57014 on a working statement stays NON-transient — the server proved it too slow", () => {
+    expect(isTransientDbError(serverError("57014", "canceling statement due to statement timeout"))).toBe(
+      false,
+    );
+  });
 });
