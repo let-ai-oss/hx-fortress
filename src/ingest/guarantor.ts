@@ -46,7 +46,10 @@ export interface GuarantorConfig {
    *  canonical, and G's restore cascade already gives orphans their real title. */
   correctExistingTitles?: boolean;
   /** Pacing / caps handed to each reconcile pass. */
-  reconcile?: Pick<ReconcileOptions, "batchDelayMs" | "maxOrphans">;
+  reconcile?: Pick<
+    ReconcileOptions,
+    "batchDelayMs" | "maxOrphans" | "repairStaleIndexes" | "staleRepairCeiling"
+  >;
 }
 
 export interface Guarantor {
@@ -148,6 +151,8 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
         const res = await reconcileOrphans(db, store, {
           batchDelayMs: cfg.reconcile?.batchDelayMs,
           maxOrphans: cfg.reconcile?.maxOrphans,
+          repairStaleIndexes: cfg.reconcile?.repairStaleIndexes,
+          staleRepairCeiling: cfg.reconcile?.staleRepairCeiling,
           correctExistingTitles: firstPass && correctTitles,
           logger: cfg.logger,
         });
@@ -217,6 +222,8 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
       const res = await reconcileOrphans(db, store, {
         batchDelayMs: cfg.reconcile?.batchDelayMs,
         maxOrphans: cfg.reconcile?.maxOrphans,
+        repairStaleIndexes: cfg.reconcile?.repairStaleIndexes,
+        staleRepairCeiling: cfg.reconcile?.staleRepairCeiling,
         correctExistingTitles: firstPass && correctTitles,
         logger: cfg.logger,
       });

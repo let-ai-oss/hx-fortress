@@ -35,9 +35,15 @@ export interface ReconcileOptions {
   /** Also run the title corrective pass (default true). */
   correctExistingTitles?: boolean;
   /** Re-ingest sessions whose indexed byte count no longer matches their
-   *  canonical. Default false: the pass COUNTS them either way, so the number can
-   *  be read from production before anything acts on it. */
+   *  canonical. Default TRUE — a session the fortress holds but has only half
+   *  indexed is exactly what the guarantor exists to repair. The pass counts them
+   *  either way, so turning this off leaves detection intact. */
   repairStaleIndexes?: boolean;
+  /** Refuse to repair when the stale fraction exceeds this share of the corpus
+   *  (default 0.25). A correct byte comparison flags a minority; a BROKEN one
+   *  flags nearly everything, and mass re-ingest is the one outcome that must
+   *  never happen by accident. The pass logs and reports instead. */
+  staleRepairCeiling?: number;
   sleep?: (ms: number) => Promise<void>;
   logger?: {
     warn?(message: string, fields?: Record<string, unknown>): void;
@@ -64,6 +70,11 @@ export interface ReconcileResult {
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Below this many stale sessions the ceiling never applies: a handful of rows
+ *  is a repair job, not a stampede, and refusing it would strand small fortresses
+ *  permanently. */
+const STALE_CEILING_MIN_COUNT = 50;
 
 /** A parent row with ZERO events carries no content: it is either a stub minted
  *  by a pre-0.19.0 agent-lane commit that arrived before its parent, or a restore
@@ -172,6 +183,38 @@ export async function reconcileOrphans(
   for (const r of agents) have.add(`${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`);
 
   const keys: CanonicalEntry[] = await store.listAllCanonicalKeys();
+
+  // Decide ONCE, before touching anything, whether stale repair runs this pass.
+  // The comparison is cheap (both sides are already in memory), and knowing the
+  // total up front is what makes the ceiling meaningful: a byte comparison that
+  // regresses flags nearly the whole corpus, and re-ingesting all of it would be
+  // far worse than the damage being repaired.
+  const staleTotal = keys.reduce((n, k) => {
+    if (k.bytes == null || k.sessionId.includes(AGENT_LANE)) return n;
+    const nat = `${k.userId}/${k.family}/${k.sessionId}`;
+    if (!have.has(nat)) return n;
+    return indexedBytes.get(nat) === k.bytes ? n : n + 1;
+  }, 0);
+  const ceiling = opts.staleRepairCeiling ?? 0.25;
+  const wantRepair = opts.repairStaleIndexes ?? true;
+  // The ceiling guards against ONE thing: a byte comparison that regressed and
+  // now flags the whole corpus, where repairing would re-ingest everything. A
+  // ratio alone cannot express that — on a small fortress two stale sessions out
+  // of three read as 67% and would be refused forever, leaving exactly the
+  // sessions the guarantor exists to fix. So the ratio only applies once the
+  // absolute count is large enough for "mass re-ingest" to mean anything.
+  const repairStale =
+    wantRepair &&
+    (staleTotal < STALE_CEILING_MIN_COUNT ||
+      keys.length === 0 ||
+      staleTotal / keys.length <= ceiling);
+  if (wantRepair && !repairStale) {
+    opts.logger?.warn?.("reconciler: stale-index repair SKIPPED — implausible share of the corpus", {
+      staleTotal,
+      scanned: keys.length,
+      ceiling,
+    });
+  }
   // A parent (`baseSid`) sorts before its lanes (`baseSid:a:…`), so when both are
   // orphaned the parent is fully re-ingested (turns + real title) before a lane's
   // ingestAgentCommit would create a title-less parent stub that shadows it.
@@ -203,7 +246,7 @@ export async function reconcileOrphans(
       if (canonicalBytes == null || key.sessionId.includes(AGENT_LANE)) continue;
       if (indexedBytes.get(natural) === canonicalBytes) continue;
       res.staleIndexes += 1;
-      if (!opts.repairStaleIndexes) continue;
+      if (!repairStale) continue;
       staleRepair = true; // fall through: rebuild it from the whole canonical
     }
     const laneIdx = key.sessionId.indexOf(AGENT_LANE);
