@@ -114,6 +114,34 @@ const DEFAULT_BG_POOL_MAX = 2;
 // long budget. Fully or not at all, with the safety net doing the retry.
 const DEFAULT_INGEST_STATEMENT_TIMEOUT_MS = 30_000;
 
+/** Distinguishes THIS process's pools from another's. Two fortresses can talk to
+ *  the same database during a rolling deploy, and "8 concurrent deletes from a
+ *  serial loop on a 2-connection pool" is unanswerable without knowing whether
+ *  the connections belong to one process or two. Random per boot, short enough to
+ *  read in a pg_stat_activity dump. */
+const INSTANCE_TAG = Math.random().toString(36).slice(2, 8);
+
+/** `application_name` for one pool, e.g. `hx-fortress:rw/3f9a1c`.
+ *
+ *  Every connection this process opens is labelled. Without it every row in
+ *  pg_stat_activity is anonymous, and attributing load between the live write
+ *  path, the read path, background repair, the embed worker and a purge is
+ *  guesswork — which is how the pool-exhaustion diagnosis was wrong three times.
+ *  Postgres truncates at NAMEDATALEN (63 bytes); these are far shorter. */
+export function poolAppName(role: string): string {
+  return `hx-fortress:${role}/${INSTANCE_TAG}`;
+}
+
+/** Labelling is on unless explicitly disabled. `application_name` is a standard
+ *  parameter every pooler I know of accepts, which is why it deliberately does
+ *  NOT ride the statement_timeout=0 hatch — a pooler-fronted deployment is where
+ *  anonymous connections hurt most. But a knob that cannot be turned off is a
+ *  trap, so `FORTRESS_DB_APP_NAME=off` exists for a pooler that rejects it. */
+export function appNameEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const v = env.FORTRESS_DB_APP_NAME?.trim().toLowerCase();
+  return !(v === "off" || v === "0" || v === "false" || v === "no");
+}
+
 /** Which workload a pool serves. The three differ in how much they may spend and
  *  how long they may block — never in what they may see. */
 export type HxPoolRole = "rw" | "ro" | "bg";
@@ -186,7 +214,7 @@ export function backgroundPoolMax(
  *  are `statement_timeout` (always) and `lock_timeout` (live ingest pool only —
  *  absent means lock waits stay bounded by statement_timeout, the pre-fix
  *  behaviour that let one blocked chunk hold a connection for two minutes). */
-export type HxStartupParams = Record<string, number>;
+export type HxStartupParams = Record<string, number | string>;
 
 export interface HxPoolOptions {
   /** Seconds — Bun.SQL's unit for the three lifecycle knobs. */
@@ -229,6 +257,8 @@ export function hxPoolOptions(
     statementTimeoutMs?: number;
     /** Set lock_timeout on this pool (live ingest only). */
     lockTimeoutMs?: number;
+    /** Role label for application_name — omitted leaves the pool anonymous. */
+    appRole?: string;
   } = {},
 ): HxPoolOptions {
   const connectRaw = msEnv(env, "FORTRESS_DB_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS);
@@ -246,14 +276,21 @@ export function hxPoolOptions(
     maxLifetime: msToSec(lifetimeMs),
     max: overrides.max ?? poolMax(env),
   };
+  // application_name is set unconditionally. It is a standard parameter every
+  // pooler accepts, so it does NOT ride the =0 hatch — a fortress behind a
+  // PgBouncer is exactly where anonymous connections hurt most.
+  const connection: HxStartupParams = {};
+  if (overrides.appRole && appNameEnabled(env)) {
+    connection.application_name = poolAppName(overrides.appRole);
+  }
   if (effectiveStatementMs > 0 && Number.isInteger(effectiveStatementMs)) {
-    const connection: HxStartupParams = { statement_timeout: effectiveStatementMs };
-    // lock_timeout rides the same =0 hatch: it is a startup parameter too, so a
-    // pooler that rejects statement_timeout rejects this one identically.
+    connection.statement_timeout = effectiveStatementMs;
+    // lock_timeout DOES ride the hatch: it is a non-standard-to-poolers startup
+    // parameter, so a pooler that rejects statement_timeout rejects it too.
     const lockMs = Math.trunc(overrides.lockTimeoutMs ?? 0);
     if (lockMs > 0 && Number.isInteger(lockMs)) connection.lock_timeout = lockMs;
-    options.connection = connection;
   }
+  if (Object.keys(connection).length > 0) options.connection = connection;
   return options;
 }
 
@@ -277,9 +314,10 @@ export function hxPoolOptionsFor(
     return hxPoolOptions(env, {
       max: backgroundPoolMax(env),
       lockTimeoutMs: backgroundLockTimeoutMs(env),
+      appRole: "bg",
     });
   }
-  if (role === "ro") return hxPoolOptions(env);
+  if (role === "ro") return hxPoolOptions(env, { appRole: "ro" });
   // Live ingest: bound the statement near the caller's own deadline so an
   // abandoned commit stops occupying a connection, and bound the lock wait well
   // under that so a blocked chunk is cheap to retry.
@@ -292,6 +330,7 @@ export function hxPoolOptionsFor(
   return hxPoolOptions(env, {
     lockTimeoutMs: lockTimeoutMs(env),
     statementTimeoutMs: shared === 0 ? 0 : Math.min(shared, ingestStatementTimeoutMs(env)),
+    appRole: "rw",
   });
 }
 
@@ -313,6 +352,7 @@ export function describePool(dsn: string, options: HxPoolOptions): Record<string
     max: options.max,
     statementTimeoutMs: options.connection?.statement_timeout ?? "omitted",
     lockTimeoutMs: options.connection?.lock_timeout ?? "omitted",
+    appName: options.connection?.application_name ?? "anonymous",
   };
 }
 
@@ -333,7 +373,11 @@ export interface PurgeDb {
  *  the shared pools' statement timeout / hard rotation would convert that into a
  *  never-converging park loop that re-burns the same delete work every 2 min. */
 export function createPurgeDb(dsn: string): PurgeDb {
-  const client = new Bun.SQL(dsn, { max: 1, connectionTimeout: 10 });
+  const client = new Bun.SQL(dsn, {
+    max: 1,
+    connectionTimeout: 10,
+    connection: { application_name: poolAppName("purge") },
+  });
   return {
     db: drizzle(client, { schema }),
     close: () => {

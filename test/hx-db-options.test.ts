@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   acquireTimeoutMs,
+  poolAppName,
   backgroundPoolMax,
   describePool,
   hxPoolOptions,
@@ -71,7 +72,7 @@ describe("hxPoolOptions env parsing", () => {
     });
     expect(o.connectionTimeout).toBe(10);
     expect(o.maxLifetime).toBe(3600);
-    expect(o.connection).toEqual({ statement_timeout: 120_000 });
+    expect(o.connection).toMatchObject({ statement_timeout: 120_000 });
   });
 
   test("garbage falls back to defaults", () => {
@@ -81,7 +82,7 @@ describe("hxPoolOptions env parsing", () => {
       FORTRESS_DB_MAX_LIFETIME_MS: "NaN",
     });
     expect(o.connectionTimeout).toBe(10);
-    expect(o.connection).toEqual({ statement_timeout: 120_000 });
+    expect(o.connection).toMatchObject({ statement_timeout: 120_000 });
     expect(o.maxLifetime).toBe(3600);
   });
 
@@ -199,16 +200,16 @@ describe("per-role pool profiles — background repair can never spend the live 
     // ~5 s later instead of ~95 s. Connections held by transactions that had
     // already lost their caller were the dominant failure once lock contention
     // was removed.
-    expect(hxPoolOptionsFor("rw", {}).connection).toEqual({
+    expect(hxPoolOptionsFor("rw", {}).connection).toMatchObject({
       statement_timeout: 30_000,
       lock_timeout: 5000,
     });
     // Reads never take the per-session advisory lock, so they need no bound.
-    expect(hxPoolOptionsFor("ro", {}).connection).toEqual({ statement_timeout: 120_000 });
+    expect(hxPoolOptionsFor("ro", {}).connection).toMatchObject({ statement_timeout: 120_000 });
     // The guarantor holds the lock while rebuilding, so it keeps the long
     // statement budget — but it WAITS for that lock whenever live ingest holds
     // the same session, and unbounded that wait starves its own small pool.
-    expect(hxPoolOptionsFor("bg", {}).connection).toEqual({
+    expect(hxPoolOptionsFor("bg", {}).connection).toMatchObject({
       statement_timeout: 120_000,
       lock_timeout: 15_000,
     });
@@ -217,22 +218,43 @@ describe("per-role pool profiles — background repair can never spend the live 
   test("bg is a small, SEPARATE allocation — the isolation the outage needed", () => {
     expect(hxPoolOptionsFor("bg", {}).max).toBe(2);
     // Bounded, and longer than the live path: a restore is worth queueing for.
-    const bgLock = hxPoolOptionsFor("bg", {}).connection?.lock_timeout ?? 0;
-    const liveLock = hxPoolOptionsFor("rw", {}).connection?.lock_timeout ?? 0;
+    // startup params are string|number now that application_name rides along
+    const num = (v: string | number | undefined) => Number(v ?? 0);
+    const bgLock = num(hxPoolOptionsFor("bg", {}).connection?.lock_timeout);
+    const liveLock = num(hxPoolOptionsFor("rw", {}).connection?.lock_timeout);
     expect(bgLock).toBeGreaterThan(liveLock);
-    expect(bgLock).toBeLessThan(hxPoolOptionsFor("bg", {}).connection?.statement_timeout ?? 0);
+    expect(bgLock).toBeLessThan(num(hxPoolOptionsFor("bg", {}).connection?.statement_timeout));
     expect(hxPoolOptionsFor("bg", { FORTRESS_DB_BG_LOCK_TIMEOUT_MS: "0" }).connection?.lock_timeout).toBeUndefined();
     expect(hxPoolOptionsFor("rw", {}).max).toBe(10);
     expect(hxPoolOptionsFor("bg", { FORTRESS_DB_BG_POOL_MAX: "3" }).max).toBe(3);
   });
 
-  test("the =0 pooler hatch strips lock_timeout too — both are startup params", () => {
+  test("the =0 pooler hatch strips both TIMEOUTS but keeps the label", () => {
+    // application_name is standard and every pooler accepts it, and a
+    // pooler-fronted deployment is exactly where anonymous connections hurt
+    // most — so it deliberately does not ride the hatch.
     const o = hxPoolOptionsFor("rw", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" });
-    expect(o.connection).toBeUndefined();
+    expect(o.connection?.statement_timeout).toBeUndefined();
+    expect(o.connection?.lock_timeout).toBeUndefined();
+    expect(o.connection?.application_name).toBe(poolAppName("rw"));
+  });
+
+  test("…and a pooler that rejects even the label has an escape", () => {
+    const o = hxPoolOptionsFor("rw", { FORTRESS_DB_APP_NAME: "off" });
+    expect(o.connection?.application_name).toBeUndefined();
+    expect(o.connection?.statement_timeout).toBe(30_000);
+  });
+
+  test("every role is labelled, and the label distinguishes the process", () => {
+    for (const role of ["rw", "ro", "bg"] as const) {
+      expect(hxPoolOptionsFor(role, {}).connection?.application_name).toBe(poolAppName(role));
+    }
+    expect(poolAppName("rw")).toMatch(/^hx-fortress:rw\/[a-z0-9]{4,8}$/);
+    expect(poolAppName("rw")).not.toBe(poolAppName("ro"));
   });
 
   test("lock_timeout=0 omits just that param, leaving statement_timeout intact", () => {
-    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_LOCK_TIMEOUT_MS: "0" }).connection).toEqual({
+    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_LOCK_TIMEOUT_MS: "0" }).connection).toMatchObject({
       statement_timeout: 30_000,
     });
   });
@@ -261,8 +283,11 @@ describe("per-role pool profiles — background repair can never spend the live 
       hxPoolOptionsFor("rw", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "5000" }).connection
         ?.statement_timeout,
     ).toBe(5000);
-    // …and the =0 pooler hatch still strips every startup parameter.
-    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection).toBeUndefined();
+    // …and the =0 pooler hatch still strips every TIMEOUT (the label stays — see
+    // the hatch test above).
+    expect(
+      hxPoolOptionsFor("rw", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection?.statement_timeout,
+    ).toBeUndefined();
   });
 
   test("the ingest bound sits ABOVE the RPC deadline so the caller's typed error wins", () => {

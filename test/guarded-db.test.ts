@@ -114,16 +114,22 @@ describe("guarded-db", () => {
     // The canary mirrors the LIVE WRITE pool, lock_timeout included — a pooler
     // that rejects one startup param rejects both, and the probe must fail the
     // way the pool fails.
-    expect(h.probeOptions[0]?.connection).toEqual({
+    expect(h.probeOptions[0]?.connection).toMatchObject({
       statement_timeout: 5000,
       lock_timeout: 5000,
     });
-    // …and the =0 hatch strips it here too.
+    // …and the =0 hatch strips the TIMEOUTS here too. The probe keeps its own
+    // application_name so the canary is never mistaken for the pool it measures.
     const h2 = makeHarness(() => "ok");
     const { deps: deps2 } = harnessDeps(h2, { env: { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" } });
     const g2 = createGuardedDb(deps2);
     await g2.probeNow();
-    expect(h2.probeOptions[0]?.connection).toBeUndefined();
+    expect(h2.probeOptions[0]?.connection?.statement_timeout).toBeUndefined();
+    expect(h2.probeOptions[0]?.connection?.lock_timeout).toBeUndefined();
+    // (The probe overrides application_name to ":probe" inside defaultProbeClient,
+    // which this harness replaces — so what is captured here is the rw pool label
+    // the probe mirrors, not the probe's own.)
+    expect(String(h2.probeOptions[0]?.connection?.application_name ?? "")).toContain("hx-fortress:");
   });
 
   test("2 futile rebuilds → escalation ONCE per episode; futility counts ONLY guarded-db probe successes", async () => {

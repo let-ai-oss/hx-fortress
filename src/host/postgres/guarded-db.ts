@@ -20,6 +20,7 @@ import {
   createHxDb,
   describePool,
   hxPoolOptionsFor,
+  poolAppName,
   type HxDb,
   type HxPoolOptions,
   type HxPoolRole,
@@ -109,7 +110,9 @@ function defaultProbeClient(dsn: string, options: HxPoolOptions): ProbeClient {
     connectionTimeout: options.connectionTimeout,
     // MIRROR the pools' startup params — the canary must fail the way the
     // pools fail (incl. a pooler rejecting statement_timeout).
-    ...(options.connection ? { connection: options.connection } : {}),
+    // Mirror the pools' startup params, but label this connection as the PROBE —
+    // otherwise the canary is indistinguishable from the pool it is measuring.
+    connection: { ...(options.connection ?? {}), application_name: poolAppName("probe") },
   });
   return {
     selectOne: async () => {
