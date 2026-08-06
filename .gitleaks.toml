@@ -27,3 +27,10 @@ regexTarget = "secret"
 regexes = [
   '''^0123456789abcdef0123456789abcdef$''',
 ]
+
+[[allowlists]]
+description = "AWS's canonical DOCUMENTATION example secret key (published in AWS's own docs), used in test/console-read-api.test.ts as the input to an assertion that redactCredentials() REDACTS it. Scoped to the exact secret VALUE rather than the path, so that file stays fully scanned for anything real."
+regexTarget = "secret"
+regexes = [
+  '''^wJalrXUtnFEMI/K7MDENG/bPx''',
+]

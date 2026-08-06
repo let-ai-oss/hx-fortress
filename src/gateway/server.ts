@@ -57,6 +57,9 @@ export interface GatewayDeps {
   ownOrgId?: () => Promise<string | null>;
   /** True once the local Postgres is accepting connections. */
   postgresReady: () => boolean;
+  /** True while the live pool is rejecting queries for want of a connection.
+   *  Reported on /readyz; never a readiness failure — see the handler. */
+  postgresSaturated?: () => boolean;
   /** RW Drizzle handle on the bundled hx-db (the DML `hx_app_rw` role) — the
    *  ingest write path. Null before Postgres is ready. */
   db: () => HxDb | null;
@@ -379,7 +382,17 @@ export function startGatewayServer(deps: GatewayDeps): GatewayHandle {
       // this to gate traffic; /healthz to gate liveness.
       if (req.method === "GET" && url.pathname === "/readyz") {
         const ready = deps.store() !== null && deps.postgresReady();
-        return json({ ok: ready, ready }, ready ? 200 : 503);
+        // Pool saturation is REPORTED, never used to fail readiness: this
+        // fortress runs single-replica, so a 503 would pull the only instance
+        // out of rotation and turn a degraded ingest path into no ingest path
+        // at all. The alertable signal is the "hx-db pool saturated" error line;
+        // this field is what makes the state visible to a human hitting the URL,
+        // which is exactly what was missing for ~13 hours on 2026-08-05.
+        const saturated = deps.postgresSaturated?.() ?? false;
+        return json(
+          saturated ? { ok: ready, ready, saturated: true } : { ok: ready, ready },
+          ready ? 200 : 503,
+        );
       }
 
       // MCP server (A5). Key-authed like every other route, but handled BEFORE

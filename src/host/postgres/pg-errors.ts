@@ -4,11 +4,13 @@
 // Field layout (empirically pinned on Bun 1.3.14 + PG 18; the FORTRESS_PG_CI_DSN
 // lane re-pins it against a real server so a driver upgrade fails loudly):
 //   • server-raised errors:  { code: "ERR_POSTGRES_SERVER_ERROR", errno: "<SQLSTATE>" }
-//     — the SQLSTATE ("57014", "23505", …) lives in `.errno`; `.code` is the
-//     same constant for EVERY server error, so reading `.code` for a SQLSTATE
+//     — the SQLSTATE ("57014", "55P03", "23505", …) lives in `.errno`; `.code` is
+//     the same constant for EVERY server error, so reading `.code` for a SQLSTATE
 //     never matches.
 //   • connection-lifecycle kills: { code: "ERR_POSTGRES_CONNECTION_CLOSED" |
-//     "…CONNECTION_TIMEOUT" | "…IDLE_TIMEOUT" | "…LIFETIME_TIMEOUT" } with NO errno.
+//     "…CONNECTION_TIMEOUT" | "…LIFETIME_TIMEOUT" } with NO errno.
+//   • pool exhaustion: { code: "ERR_POSTGRES_IDLE_TIMEOUT" } with NO errno —
+//     see isPoolExhaustedDbError, which is NOT a kill and NOT transient.
 //
 // Wrapping (also pinned): a kill through drizzle's `db.execute` arrives WRAPPED
 // in DrizzleQueryError (the PostgresError on `.cause`); a kill through
@@ -16,12 +18,23 @@
 // Every classifier therefore unwraps-if-wrapped, then reads `.code`/`.errno`
 // on whichever it holds.
 
+import { signalPoolExhausted } from "./pool-signal";
+
 const KILL_CODES = new Set([
   "ERR_POSTGRES_CONNECTION_CLOSED",
   "ERR_POSTGRES_CONNECTION_TIMEOUT",
-  "ERR_POSTGRES_IDLE_TIMEOUT",
   "ERR_POSTGRES_LIFETIME_TIMEOUT",
 ]);
+
+/** Bun raises this when a query waited longer than the pool's `idleTimeout` for
+ *  a connection to become available. Despite the name it is NOT an idle socket
+ *  being reaped — see the DEFAULT_ACQUIRE_TIMEOUT_MS note in db.ts. */
+const POOL_EXHAUSTED_CODE = "ERR_POSTGRES_IDLE_TIMEOUT";
+
+/** Server cancelled the statement because statement_timeout elapsed. */
+const SQLSTATE_STATEMENT_TIMEOUT = "57014";
+/** Server refused the lock because lock_timeout elapsed while WAITING for it. */
+const SQLSTATE_LOCK_TIMEOUT = "55P03";
 
 /** The underlying driver error beneath drizzle's query wrapper (identified
  *  structurally — `.query` string + `.params` array — never by class name,
@@ -39,14 +52,33 @@ export function unwrapDbError(err: unknown): unknown {
   return err;
 }
 
+function errCode(err: unknown): string | null {
+  const code = (unwrapDbError(err) as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : null;
+}
+
 /** Connection-lifecycle kill: the pool closed/rotated/timed out under the query.
  *  The statement may or may not have committed server-side, which is exactly-once
  *  safe here (in-txn dedupe + per-session advisory lock), so ONE retry is sound.
  *  57014 (a server-side statement_timeout cancel) is DELIBERATELY not kill-class:
- *  retrying a statement the server just proved too slow doubles the damage. */
+ *  retrying a statement the server just proved too slow doubles the damage.
+ *  ERR_POSTGRES_IDLE_TIMEOUT is likewise excluded — it means the POOL had nothing
+ *  to give, and retrying into a full pool is the same mistake in a new costume. */
 export function isKillClassDbError(err: unknown): boolean {
-  const code = (unwrapDbError(err) as { code?: unknown } | null)?.code;
-  return typeof code === "string" && KILL_CODES.has(code);
+  const code = errCode(err);
+  return code !== null && KILL_CODES.has(code);
+}
+
+/** The pool's checkout queue rejected this query: every connection was busy for
+ *  longer than the acquire bound. This is CAPACITY, not a broken connection.
+ *
+ *  It must never be retried in-process (that adds load to a pool already proven
+ *  to have none to spare — the 2026-08-05 outage was this exact amplifier: the
+ *  code called it a kill, retried immediately, and every failure doubled the
+ *  offered load). Surface it typed so the caller sheds and the cloud's durable
+ *  replay picks the work up once there is capacity again. */
+export function isPoolExhaustedDbError(err: unknown): boolean {
+  return errCode(err) === POOL_EXHAUSTED_CODE;
 }
 
 /** SQLSTATE of a (possibly wrapped) server error, or null for anything else. */
@@ -59,7 +91,13 @@ export function dbSqlState(err: unknown): string | null {
 
 /** Server cancelled the statement via statement_timeout (SQLSTATE 57014). */
 export function isStatementTimeoutDbError(err: unknown): boolean {
-  return dbSqlState(err) === "57014";
+  return dbSqlState(err) === SQLSTATE_STATEMENT_TIMEOUT;
+}
+
+/** Server refused a lock because lock_timeout elapsed (SQLSTATE 55P03). Raised
+ *  only while WAITING — the statement never ran, so a retry is always sound. */
+export function isLockTimeoutDbError(err: unknown): boolean {
+  return dbSqlState(err) === SQLSTATE_LOCK_TIMEOUT;
 }
 
 /** PgBouncer-class poolers reject unknown startup parameters with this literal
@@ -75,8 +113,10 @@ export function isUnsupportedStartupParamError(err: unknown): boolean {
 }
 
 /** Positional marker: the per-session advisory-lock ACQUISITION (the first
- *  statement of an ingest/tombstone txn) was 57014-cancelled while WAITING for
- *  the lock — e.g. a live chunk queued behind a long same-session restore txn.
+ *  statement of an ingest/tombstone txn) failed while WAITING for the lock —
+ *  e.g. a live chunk queued behind a long same-session restore txn. Two server
+ *  shapes reach here: 55P03 (lock_timeout — the bound the live pool now sets)
+ *  and 57014 (statement_timeout, when the lock_timeout hatch is disengaged).
  *  Tagging at the await site is shape-proof (no `.query` sniffing); the txn
  *  rolled back atomically, so retrying it once is exactly-once safe. */
 export class SessionLockTimeoutError extends Error {
@@ -85,18 +125,23 @@ export class SessionLockTimeoutError extends Error {
   }
 }
 
-/** Re-throw `err` as a SessionLockTimeoutError when it is a 57014 cancel —
- *  used by the try/catch that wraps ONLY the advisory-lock statement. */
+/** Re-throw `err` as a SessionLockTimeoutError when the lock WAIT was bounded
+ *  out — used by the try/catch that wraps ONLY the advisory-lock statement. */
 export function tagLockTimeout(err: unknown): never {
-  if (isStatementTimeoutDbError(err)) throw new SessionLockTimeoutError(err);
+  if (isLockTimeoutDbError(err) || isStatementTimeoutDbError(err)) {
+    throw new SessionLockTimeoutError(err);
+  }
   throw err;
 }
 
 /** True for the two transient classes worth exactly one whole-operation retry:
- *  a connection-lifecycle kill, or a 57014 that cancelled the advisory-lock
- *  WAIT (tagged positionally). A plain 57014 on a working statement is NOT
- *  transient — the server proved the statement too slow. */
+ *  a connection-lifecycle kill, or a bounded-out advisory-lock WAIT (tagged
+ *  positionally). A plain 57014 on a working statement is NOT transient — the
+ *  server proved the statement too slow. Pool exhaustion is NOT transient either:
+ *  the pool is the resource being retried FOR, so an immediate retry can only
+ *  make it scarcer. */
 export function isTransientDbError(err: unknown): boolean {
+  if (isPoolExhaustedDbError(err)) return false;
   return isKillClassDbError(err) || err instanceof SessionLockTimeoutError;
 }
 
@@ -108,6 +153,13 @@ export async function retryOnceOnTransientDbError<T>(fn: () => Promise<T>): Prom
   try {
     return await fn();
   } catch (err) {
+    // Report starvation before deciding: this is the only place every ingest
+    // write path funnels through, and the healer cannot see the checkout queue
+    // any other way (its probe holds its own connection).
+    if (isPoolExhaustedDbError(err)) {
+      signalPoolExhausted();
+      throw err;
+    }
     if (!isTransientDbError(err)) throw err;
     return await fn();
   }

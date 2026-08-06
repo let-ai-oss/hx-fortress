@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { createGuardedDb, type ProbeClient } from "../src/host/postgres/guarded-db";
+import { signalPoolExhausted } from "../src/host/postgres/pool-signal";
 import type { HxDb, HxPoolOptions } from "../src/host/postgres/db";
 
 /** A controllable probe-client factory: each tick's verdict comes off the
@@ -110,7 +111,13 @@ describe("guarded-db", () => {
     const { deps } = harnessDeps(h, { env: { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "5000" } });
     const g = createGuardedDb(deps);
     await g.probeNow();
-    expect(h.probeOptions[0]?.connection).toEqual({ statement_timeout: 5000 });
+    // The canary mirrors the LIVE WRITE pool, lock_timeout included — a pooler
+    // that rejects one startup param rejects both, and the probe must fail the
+    // way the pool fails.
+    expect(h.probeOptions[0]?.connection).toEqual({
+      statement_timeout: 5000,
+      lock_timeout: 5000,
+    });
     // …and the =0 hatch strips it here too.
     const h2 = makeHarness(() => "ok");
     const { deps: deps2 } = harnessDeps(h2, { env: { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" } });
@@ -172,5 +179,83 @@ describe("guarded-db", () => {
     // Reaching this line at all IS the assertion — Bun exits(1) on any
     // unhandled rejection, which would abort the whole test run.
     expect(true).toBe(true);
+  });
+});
+
+
+describe("pool saturation — the failure mode the probe structurally cannot see", () => {
+  test("background pool is a SEPARATE handle from the live write pool", () => {
+    const h = makeHarness(() => "ok");
+    const { deps } = harnessDeps(h);
+    const g = createGuardedDb(deps);
+    const rw = g.db();
+    const ro = g.dbRead();
+    const bg = g.dbBackground();
+    expect(rw).not.toBe(bg);
+    expect(ro).not.toBe(bg);
+    // …and each memoizes independently.
+    expect(g.dbBackground()).toBe(bg);
+    expect(g.db()).toBe(rw);
+  });
+
+  test("sustained starvation rebuilds the pools EVEN WHILE THE PROBE SUCCEEDS", async () => {
+    // This is the 2026-08-05 shape exactly: the canary holds its own connection,
+    // so it answers instantly while every real query times out in the queue.
+    const h = makeHarness(() => "ok");
+    const { deps, rebuilds } = harnessDeps(h, {
+      saturationPerTickThreshold: 3,
+      saturationBreachThreshold: 2,
+    });
+    const g = createGuardedDb(deps);
+    g.start();
+    try {
+      for (let i = 0; i < 3; i += 1) signalPoolExhausted();
+      expect(await g.probeNow()).toBe(true); // probe is HEALTHY
+      expect(rebuilds.length).toBe(0); // one bad tick is a burst
+      expect(g.saturated()).toBe(true); // …but it is already visible
+
+      for (let i = 0; i < 3; i += 1) signalPoolExhausted();
+      expect(await g.probeNow()).toBe(true);
+      expect(rebuilds.length).toBe(1); // second consecutive tick → release
+    } finally {
+      await g.stop();
+    }
+  });
+
+  test("a burst under the threshold never rebuilds, and clears the streak", async () => {
+    const h = makeHarness(() => "ok");
+    const { deps, rebuilds } = harnessDeps(h, {
+      saturationPerTickThreshold: 3,
+      saturationBreachThreshold: 2,
+    });
+    const g = createGuardedDb(deps);
+    g.start();
+    try {
+      for (let i = 0; i < 3; i += 1) signalPoolExhausted();
+      await g.probeNow();
+      expect(g.saturated()).toBe(true);
+
+      signalPoolExhausted(); // below threshold — a quiet tick
+      await g.probeNow();
+      expect(g.saturated()).toBe(false);
+      expect(rebuilds.length).toBe(0);
+
+      for (let i = 0; i < 3; i += 1) signalPoolExhausted();
+      await g.probeNow();
+      expect(rebuilds.length).toBe(0); // streak restarted, not resumed
+    } finally {
+      await g.stop();
+    }
+  });
+
+  test("stop() unwires the feed — a late emit cannot touch a stopped healer", async () => {
+    const h = makeHarness(() => "ok");
+    const { deps } = harnessDeps(h, { saturationPerTickThreshold: 1 });
+    const g = createGuardedDb(deps);
+    g.start();
+    await g.stop();
+    signalPoolExhausted(); // must not throw, must not count
+    await g.probeNow();
+    expect(g.saturated()).toBe(false);
   });
 });

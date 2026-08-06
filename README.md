@@ -109,7 +109,11 @@ re-`hello` with the saved credential instead of re-enrolling).
 | `FORTRESS_DB_CONNECT_TIMEOUT_MS` | no | Pool connect bound (default `10000`; `0` ⇒ default — never disableable). |
 | `FORTRESS_DB_STATEMENT_TIMEOUT_MS` | no | Server-side `statement_timeout` startup parameter on every fortress pool (default `120000`). **`0` OMITS the parameter entirely on every consumer — the pooled-DSN escape hatch** (see upgrade note below). |
 | `FORTRESS_DB_MAX_LIFETIME_MS` | no | Hard connection rotation (default `3600000` — one hour; `0` ⇒ default — rotation is the last-resort poisoned-pool healer behind the 60 s probe's rebuild path, and a guarantor restore of a very large session must fit one connection lifetime). Kills a still-running statement at rotation (the txn rolls back atomically); purges are exempt (own client). |
-| `FORTRESS_DB_PROBE_INTERVAL_MS` | no | hx-db liveness probe cadence (default `60000`; `0` disables — mirrors the store probe). 3 consecutive breaches rebuild the pools; 2 futile rebuilds escalate per `FORTRESS_STORE_EXIT_ON_WEDGE`. |
+| `FORTRESS_DB_ACQUIRE_TIMEOUT_MS` | no | How long a query may wait in the pool's CHECKOUT QUEUE before it is rejected (default `10000`; `0` ⇒ default — an unbounded queue is never correct). This is Bun's `idleTimeout`, which is **not** an idle-connection reaper: it bounds waiting *for* a connection. Keep it below `FORTRESS_DB_RPC_DEADLINE_MS` (25 s) so a starved pool sheds load while the caller is still listening. |
+| `FORTRESS_DB_LOCK_TIMEOUT_MS` | no | `lock_timeout` startup parameter on the LIVE INGEST pool only (default `5000`; `0` omits it, so lock waits fall back to `statement_timeout`). A lock wait counts against `statement_timeout`, so without this a live chunk queued behind a long same-session restore holds a connection for the whole statement budget doing nothing. Rides the `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0` pooler hatch. |
+| `FORTRESS_DB_POOL_MAX` | no | Connection ceiling for the live rw/ro pools (default `10`). |
+| `FORTRESS_DB_BG_POOL_MAX` | no | Connection ceiling for the background guarantor/reconciler pool (default `2`). Separate from the live pools by design: whole-transcript restores must never be able to spend the write path's budget. |
+| `FORTRESS_DB_PROBE_INTERVAL_MS` | no | hx-db liveness probe cadence (default `60000`; `0` disables — mirrors the store probe, **and disables pool-saturation detection with it**). 3 consecutive breaches rebuild the pools; 2 futile rebuilds escalate per `FORTRESS_STORE_EXIT_ON_WEDGE`. Sustained pool saturation also rebuilds, independently of the probe verdict. |
 | `FORTRESS_DB_MIGRATION_TIMEOUT_MS` | no | Per-statement bound inside every migration batch (default `300000`; validated integer). **Each single migration must fit this budget** — per-migration journaling converges incrementally across attempts, one too-slow migration never does; raise it for backfill-class migrations. |
 | `FORTRESS_GUARANTOR_INTERVAL_MS` | no | Reconcile sweep interval (default `3600000`; `0` ⇒ default — use `FORTRESS_GUARANTOR_DISABLED` to turn the guarantor off). |
 
@@ -122,6 +126,38 @@ naming the remedy: set `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0` to omit the
 parameter everywhere. Note the `=0` semantics deliberately differ per knob
 (statement-timeout `0` = omit; max-lifetime/guarantor `0` = default;
 probe-interval `0` = disable) — each row above states its own.
+
+**Upgrade note — pool saturation (v0.18.0, fixing a v0.17.0 regression):**
+v0.17.0 set Bun's `idleTimeout` to 60 s believing it reaped idle connections.
+It does not: Bun documents it as *"maximum time in seconds to wait for
+connection to become available"* — the pool CHECKOUT-QUEUE bound, defaulting to
+0 (wait forever). The practical effect was that a busy pool queued every query
+for a full minute and then failed it with
+`ERR_POSTGRES_IDLE_TIMEOUT: Idle timeout reached after 1m`, which the classifier
+in turn treated as a connection kill and retried immediately — adding load to a
+pool already proven to have none to spare.
+
+Three things kept that self-sustaining once it started. A lock wait counts
+against `statement_timeout`, so a live chunk queued behind a long same-session
+guarantor restore held one of ten connections for the full 120 s doing nothing.
+The vault RPC abandons at 25 s but never cancels, so the abandoned transaction
+kept its connection for the remaining ~95 s while the cloud enqueued a durable
+replay that queued behind it. And the healer could not see any of it: its probe
+is a standalone one-connection canary, so it answered instantly throughout and
+`/healthz` and `/readyz` stayed green for ~13 hours.
+
+v0.18.0 addresses each: the acquire bound is 10 s (under the 25 s RPC deadline,
+so a starved pool sheds while the caller is still listening);
+`ERR_POSTGRES_IDLE_TIMEOUT` is classified as capacity, never retried in-process;
+the live ingest pool sets `lock_timeout` (default 5 s) so a blocked chunk is
+cheap to retry instead of hoarding a connection; the guarantor runs on its own
+2-connection pool and can no longer spend the write path's budget; and sustained
+saturation now feeds the same breach accounting the probe uses, so the pools are
+rebuilt — which force-closes the retired pool and releases exactly those held
+connections — and `/readyz` reports `"saturated": true` while it lasts.
+
+Restarting does NOT fix a pool in this state: the backlog survives the restart
+and the ratchet re-engages within about two minutes. Upgrade instead.
 
 Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rules new
 enrolls provision automatically; add them once so the minutely write-probe's
