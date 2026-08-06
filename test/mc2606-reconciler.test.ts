@@ -5,7 +5,12 @@ import { createHxDb, type HxDb } from "../src/host/postgres/db";
 import { runMigrations } from "../src/host/postgres/migrate";
 import { migrations } from "../src/host/postgres/migrations/manifest";
 import { makeMigrationExec } from "../src/host/postgres/sql-exec";
-import { IndexAdvancedError, ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
+import {
+  IndexAdvancedError,
+  LanePrefixMismatchError,
+  ingestCommit,
+  type IngestAttribution,
+} from "../src/ingest/ingest";
 import { markSessionDeleted } from "../src/ingest/delete";
 import { reconcileOrphans } from "../src/ingest/reconciler";
 import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
@@ -656,5 +661,143 @@ describe.if(!!DSN)("Component G — integrity of a repaired session", () => {
     const l = await lane(key);
     expect(l.turns).toBe(10);
     expect(l.dense).toBe(true);
+  });
+});
+
+
+// The guarantor's correctness contract. Each of these encodes a defect that
+// reached production or was one deploy away from it.
+describe.if(!!DSN)("Component G — repair can always run, and can never destroy", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`turn ${i}`)).join("\n")}\n`;
+  const repairKey = () => `reconcile-full:${crypto.randomUUID()}`;
+
+  async function seed(nHead: number) {
+    const key: SessionKey = {
+      userId: `contract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const head = body(nHead);
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    return { key, headBytes: Buffer.byteLength(head) };
+  }
+  async function lane(key: SessionKey) {
+    const [row] = await db
+      .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const turns = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    return { bytes: Number(row!.bytes ?? 0), turns: turns.length };
+  }
+
+  test("a session can be rebuilt MORE THAN ONCE — the constant repair key froze it forever", async () => {
+    const { key } = await seed(5);
+    const whole = body(5);
+    const opts = {
+      replace: true as const, chunkText: whole, totalBytes: Buffer.byteLength(whole),
+      componentCount: 1, meta: null, attribution: ATTR, recovered: true as const, rebuild: true as const,
+    };
+    const first = await ingestCommit(db, { key, chunkId: repairKey(), ...opts });
+    const second = await ingestCommit(db, { key, chunkId: repairKey(), ...opts });
+    expect(first.applied).toBe(true);
+    expect(second.applied).toBe(true);
+    expect((await lane(key)).turns).toBe(5);
+  });
+
+  test("a commit that does NOTHING says so — a dedupe hit is not success", async () => {
+    const { key } = await seed(3);
+    const whole = body(3);
+    const opts = {
+      chunkId: "a-fixed-key", replace: true as const, chunkText: whole,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null,
+      attribution: ATTR, recovered: true as const, rebuild: true as const,
+    };
+    expect((await ingestCommit(db, { key, ...opts })).applied).toBe(true);
+    const again = await ingestCommit(db, { key, ...opts });
+    expect(again.applied).toBe(false);
+    expect(again).toMatchObject({ reason: "deduped" });
+  });
+
+  test("bytes_uploaded is MONOTONE on append — a replayed chunk cannot regress it", async () => {
+    // The regression is what lets a later tail repair slice from an offset the
+    // lane has already passed, duplicating turns invisibly.
+    const { key, headBytes } = await seed(3);
+    const whole = body(10);
+    await ingestCommit(db, {
+      key, chunkId: "c2", replace: false,
+      chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const live = await lane(key);
+    await ingestCommit(db, {
+      key, chunkId: "c1-replay", replace: false, chunkText: "",
+      totalBytes: headBytes, componentCount: 1, meta: null, attribution: ATTR,
+    });
+    expect((await lane(key)).bytes).toBe(live.bytes);
+  });
+
+  test("a tail sliced from a stale prefix is REFUSED — the byte CAS alone cannot see it", async () => {
+    const { key, headBytes } = await seed(3);
+    const whole = body(10);
+    await ingestCommit(db, {
+      key, chunkId: "c2", replace: false,
+      chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const before = await lane(key);
+    let caught: unknown = null;
+    try {
+      await ingestCommit(db, {
+        key, chunkId: `reconcile-tail:${crypto.randomUUID()}`, replace: false,
+        chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+        totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+        recovered: true, rebuild: true,
+        // Both sides agree — and both are wrong. Only the turn count catches it.
+        expectIndexedBytes: before.bytes, expectPriorTurns: 3,
+      });
+    } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(LanePrefixMismatchError);
+    expect((await lane(key)).turns).toBe(before.turns);
+  });
+
+  test("a stale full rebuild cannot WIPE turns a live commit just wrote", async () => {
+    const { key, headBytes } = await seed(3);
+    const scanBytes = headBytes; // what the sweep observed before reading the canonical
+    const whole = body(10);
+    await ingestCommit(db, {
+      key, chunkId: "live-later", replace: false,
+      chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const live = await lane(key);
+    const stale = body(3);
+    let caught: unknown = null;
+    try {
+      await ingestCommit(db, {
+        key, chunkId: `reconcile-full:${crypto.randomUUID()}`, replace: true, chunkText: stale,
+        totalBytes: Buffer.byteLength(stale), componentCount: 1, meta: null, attribution: ATTR,
+        recovered: true, rebuild: true, expectIndexedBytes: scanBytes,
+      });
+    } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(IndexAdvancedError);
+    // Without the CAS this lane would be back to 3 turns, permanently.
+    expect((await lane(key)).turns).toBe(live.turns);
   });
 });

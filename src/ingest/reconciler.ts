@@ -24,7 +24,13 @@ import { hxUsers } from "../host/postgres/schema/dimensions";
 import type { CanonicalEntry, SessionKey, SessionStore } from "../modules/session-vault/store/types";
 import { correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
-import { IndexAdvancedError, ingestAgentCommit, ingestCommit } from "./ingest";
+import {
+  IndexAdvancedError,
+  LanePrefixMismatchError,
+  ingestAgentCommit,
+  ingestCommit,
+} from "./ingest";
+import { parseChunk } from "./parse";
 
 const AGENT_LANE = ":a:";
 
@@ -79,6 +85,19 @@ export interface ReconcileResult {
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
    *  that leaves damage behind. Each one is logged with its id at error level. */
   integrityFailures: number;
+  /** Repairs whose commit reported it did NOT apply — a dedupe hit or a guard.
+   *  This is the counter that would have surfaced the constant-repair-key freeze
+   *  on its first pass instead of a week later; a non-zero value means the
+   *  guarantor believes it repaired something and did nothing. */
+  noOpRepairs: number;
+  /** Tail repairs refused because the lane did not hold the prefix the slice was
+   *  cut from — a regressed byte count or a rewritten canonical. Escalates to a
+   *  full rebuild, which is canonical-faithful by construction. */
+  prefixMismatches: number;
+  /** Existing sessions whose canonical size the store did not report, so
+   *  completeness could not be judged at all. Counted so "we checked nothing"
+   *  can never read as "we found nothing". */
+  unjudgeable: number;
   /** Tail repairs abandoned because a live commit advanced the lane while the
    *  sweep was working. Not damage and not an error — the live write is the more
    *  current truth, and the next pass re-checks. */
@@ -96,6 +115,23 @@ export interface ReconcileResult {
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** A repair's dedupe key must be UNIQUE per attempt.
+ *
+ *  A constant chunkId ("reconcile") made `alreadyIngested` match on the second
+ *  attempt, so ingestCommit returned without doing anything and the guarantor
+ *  could repair a given session exactly once, ever — one session sat frozen for
+ *  a week and 2,202 more had the key already burned. Content-addressing does not
+ *  fix it either: any damage that leaves the canonical unchanged (a lane wiped by
+ *  a racing rebuild, a seq hole, manual surgery) hashes the same and freezes
+ *  again.
+ *
+ *  Dedupe carries no correctness here: the reconciler never retries inside a
+ *  pass, its own detection is the idempotency gate, `replace` is idempotent, and
+ *  the tail is guarded by two compare-and-swaps under the advisory lock. Live
+ *  chunk dedupe — where exactly-once genuinely matters — is untouched. */
+const repairChunkId = (kind: "full" | "tail"): string =>
+  `reconcile-${kind}:${crypto.randomUUID()}`;
 
 /** Proof that a session's PARENT lane is whole, not merely present.
  *
@@ -233,6 +269,9 @@ export async function reconcileOrphans(
     staleIndexes: 0,
     gappedLanes: 0,
     liveRaces: 0,
+    noOpRepairs: 0,
+    prefixMismatches: 0,
+    unjudgeable: 0,
     repairedTail: 0,
     repairedFull: 0,
     verifyFallbacks: 0,
@@ -347,6 +386,10 @@ export async function reconcileOrphans(
     // so the ingest-time existence re-check below must not veto the repair.
     let staleRepair = false;
     let alreadyIndexedBytes = 0;
+    // What the row held when this pass started — the value every compare-and-swap
+    // below is anchored to. Distinct from the tail offset, which is forced to 0
+    // for a holed lane so it takes the full rebuild.
+    let scanBytes: number | undefined;
     if (have.has(natural)) {
       // The row exists — but does it cover the whole transcript? An index that is
       // BEHIND its canonical (a chunk whose commit failed while earlier ones
@@ -354,6 +397,7 @@ export async function reconcileOrphans(
       // it. Byte counts are only compared when the store reported one.
       const canonicalBytes = key.bytes ?? null;
       if (key.sessionId.includes(AGENT_LANE)) continue;
+      if (canonicalBytes == null) res.unjudgeable += 1;
       const holed = gapped.has(natural);
       if (holed) res.gappedLanes += 1;
       // Only BEHIND is damage. A live session can legitimately run ahead of the
@@ -365,8 +409,9 @@ export async function reconcileOrphans(
       if (behind) res.staleIndexes += 1;
       if (!repairStale) continue;
       staleRepair = true;
+      scanBytes = indexedBytes.get(natural) ?? 0;
       // A hole in the middle cannot be appended away — force the full rebuild.
-      alreadyIndexedBytes = holed ? 0 : (indexedBytes.get(natural) ?? 0);
+      alreadyIndexedBytes = holed ? 0 : scanBytes;
     }
     const laneIdx = key.sessionId.indexOf(AGENT_LANE);
     const baseSid = laneIdx >= 0 ? key.sessionId.slice(0, laneIdx) : key.sessionId;
@@ -388,7 +433,7 @@ export async function reconcileOrphans(
       }
       const chunkText = await store.readCanonicalText(key);
       const base = {
-        chunkId: "reconcile",
+        chunkId: repairChunkId("full"),
         replace: true as const,
         chunkText,
         totalBytes: Buffer.byteLength(chunkText),
@@ -413,6 +458,9 @@ export async function reconcileOrphans(
           key: { userId: key.userId, family: key.family, sessionId: baseSid },
           agentId: key.sessionId.slice(laneIdx + AGENT_LANE.length),
         });
+        // NOTE: agent lanes are still restore-only — they are not completeness
+        // checked and this write is not verified. Tracked as D3; do not read
+        // repairedFull here as proof the lane is whole.
         res.restored += 1;
         res.repairedFull += 1;
       } else {
@@ -431,72 +479,113 @@ export async function reconcileOrphans(
           alreadyIndexedBytes > 0 &&
           alreadyIndexedBytes < buf.length &&
           buf[alreadyIndexedBytes - 1] === 0x0a;
+
         if (canAppendTail) {
-          let advanced = false;
+          // Parse the prefix OUTSIDE the transaction (pure CPU) and assert the
+          // count INSIDE it, under the advisory lock: the lane must hold exactly
+          // the prefix this tail was cut from, or appending splices unrelated
+          // content onto it.
+          const expectPriorTurns = parseChunk(
+            buf.subarray(0, alreadyIndexedBytes).toString("utf8"),
+          ).turns.length;
+          let outcome: Awaited<ReturnType<typeof ingestCommit>> | null = null;
           try {
-            await ingestCommit(db, {
+            outcome = await ingestCommit(db, {
               ...base,
               key,
-              chunkId: "reconcile-tail", // distinguishable in hx.ingest_events
+              chunkId: repairChunkId("tail"),
               replace: false,
               chunkText: buf.subarray(alreadyIndexedBytes).toString("utf8"),
-              totalBytes: canonicalBytes,
-              // …only if the lane is still exactly where the slice was cut.
+              totalBytes: canonicalBytes ?? buf.length,
               expectIndexedBytes: alreadyIndexedBytes,
+              expectPriorTurns,
             });
           } catch (err) {
-            if (!(err instanceof IndexAdvancedError)) throw err;
-            // A live commit beat us to it. Never append from a stale offset —
-            // that duplicates turns, and a duplicated lane is still dense and
-            // still covers the canonical, so nothing downstream would catch it.
-            advanced = true;
-            res.liveRaces += 1;
-            opts.logger?.info?.("reconciler: session advanced under the sweep — deferring to the live write", {
-              sessionId: key.sessionId,
-              family: key.family,
-              slicedFrom: err.expected,
-              nowIndexed: err.actual,
+            if (err instanceof IndexAdvancedError) {
+              // A live commit beat us to it. The live write is the more current
+              // truth; re-check next pass rather than writing from a stale slice.
+              res.liveRaces += 1;
+              opts.logger?.info?.("reconciler: session advanced under the sweep — deferring to the live write", {
+                sessionId: key.sessionId, family: key.family,
+                slicedFrom: err.expected, nowIndexed: err.actual,
+              });
+              if (delay > 0) await sleep(delay);
+              continue;
+            }
+            if (!(err instanceof LanePrefixMismatchError)) throw err;
+            // The lane does not hold the prefix — a byte count that regressed
+            // under a replayed chunk, or a canonical that was rewritten rather
+            // than appended. Both are repaired correctly by a full rebuild.
+            res.prefixMismatches += 1;
+            opts.logger?.warn?.("reconciler: lane does not hold the sliced prefix — rebuilding in full", {
+              sessionId: key.sessionId, family: key.family,
+              expectedTurns: err.expectedTurns, actualTurns: err.actualTurns,
+              slicedFrom: alreadyIndexedBytes,
             });
           }
-          if (advanced) { if (delay > 0) await sleep(delay); continue; }
-          // VERIFY — never trust the fast path. Bytes prove it covers the whole
-          // canonical; seq density proves it left no hole behind.
-          const v = await verifyLane(db, key, canonicalBytes, store);
-          if (v.ok) {
-            landed = true;
-            res.repairedTail += 1;
-          } else {
-            res.verifyFallbacks += 1;
-            opts.logger?.warn?.("reconciler: tail repair did not verify — rebuilding in full", {
-              sessionId: key.sessionId,
-              family: key.family,
-              indexedBytes: v.bytes,
-              canonicalBytes,
-              turns: v.turns,
-              dense: v.dense,
+
+          if (outcome && !outcome.applied) {
+            // The commit reported it did nothing. Never treat that as repaired.
+            res.noOpRepairs += 1;
+            opts.logger?.warn?.("reconciler: tail repair reported NO-OP", {
+              sessionId: key.sessionId, family: key.family, reason: outcome.reason,
             });
+          } else if (outcome) {
+            const v = await verifyLane(db, key, canonicalBytes, store);
+            if (v.ok) {
+              landed = true;
+              res.repairedTail += 1;
+            } else {
+              res.verifyFallbacks += 1;
+              opts.logger?.warn?.("reconciler: tail repair did not verify — rebuilding in full", {
+                sessionId: key.sessionId, family: key.family,
+                indexedBytes: v.bytes, canonicalBytes, turns: v.turns, dense: v.dense,
+              });
+            }
           }
         }
 
-        // SLOW PATH — rebuild the whole lane from the canonical. Either the tail
-        // was not safely sliceable, or it was and did not verify.
+        // SLOW PATH — rebuild the whole lane from the canonical.
         if (!landed) {
-          await ingestCommit(db, { ...base, key });
-          const v = await verifyLane(db, key, canonicalBytes, store);
-          if (v.ok) {
-            res.repairedFull += 1;
-          } else {
-            // The one outcome that leaves damage behind. Named loudly, with the
-            // id, so it is greppable in logs and joinable in the database.
-            res.integrityFailures += 1;
-            opts.logger?.warn?.("reconciler: SESSION STILL INCOMPLETE after a full rebuild", {
-              sessionId: key.sessionId,
-              family: key.family,
-              indexedBytes: v.bytes,
-              canonicalBytes,
-              turns: v.turns,
-              dense: v.dense,
+          let full: Awaited<ReturnType<typeof ingestCommit>>;
+          try {
+            full = await ingestCommit(db, {
+              ...base,
+              key,
+              // A rebuild DELETES the lane and reinserts from text read before
+              // the lock was taken. Without this CAS a chunk that committed in
+              // that window is deleted and never restored — the guarantor
+              // destroying data that was fine. Only meaningful when the row
+              // already existed; an orphan restore has nothing to compare.
+              ...(scanBytes !== undefined ? { expectIndexedBytes: scanBytes } : {}),
             });
+          } catch (err) {
+            if (!(err instanceof IndexAdvancedError)) throw err;
+            res.liveRaces += 1;
+            opts.logger?.info?.("reconciler: session advanced before its rebuild — deferring to the live write", {
+              sessionId: key.sessionId, family: key.family,
+              expected: err.expected, nowIndexed: err.actual,
+            });
+            if (delay > 0) await sleep(delay);
+            continue;
+          }
+
+          if (!full.applied) {
+            res.noOpRepairs += 1;
+            opts.logger?.warn?.("reconciler: full rebuild reported NO-OP", {
+              sessionId: key.sessionId, family: key.family, reason: full.reason,
+            });
+          } else {
+            const v = await verifyLane(db, key, canonicalBytes, store);
+            if (v.ok) {
+              res.repairedFull += 1;
+            } else {
+              res.integrityFailures += 1;
+              opts.logger?.warn?.("reconciler: SESSION STILL INCOMPLETE after a full rebuild", {
+                sessionId: key.sessionId, family: key.family,
+                indexedBytes: v.bytes, canonicalBytes, turns: v.turns, dense: v.dense,
+              });
+            }
           }
         }
         res.restored += 1;
