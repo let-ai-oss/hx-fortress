@@ -5,7 +5,7 @@ import { createHxDb, type HxDb } from "../src/host/postgres/db";
 import { runMigrations } from "../src/host/postgres/migrate";
 import { migrations } from "../src/host/postgres/migrations/manifest";
 import { makeMigrationExec } from "../src/host/postgres/sql-exec";
-import { ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
+import { IndexAdvancedError, ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
 import { markSessionDeleted } from "../src/ingest/delete";
 import { reconcileOrphans } from "../src/ingest/reconciler";
 import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
@@ -575,6 +575,45 @@ describe.if(!!DSN)("Component G — integrity of a repaired session", () => {
     expect(l.turns).toBe(10);
     expect(l.dense).toBe(true);
     expect(l.bytes).toBe(Buffer.byteLength(whole));
+  });
+
+  test("a stale tail slice is REFUSED when a live commit got there first", async () => {
+    // The reconciler cuts a tail at the byte count it saw at scan time, minutes
+    // before the repair runs. If a live chunk commits in between, appending that
+    // slice re-inserts turns the live write already indexed — and the result is
+    // still dense and still covers the canonical, so NOTHING downstream can see
+    // it. Without the compare-and-swap this leaves 17 turns where 10 belong.
+    const canonicals = new Map<string, string>();
+    const { key, whole } = await halfIndexed(3, 10, canonicals);
+    const sliceFrom = (await lane(key)).bytes;
+
+    // The live client catches up first.
+    await ingestCommit(db, {
+      key, chunkId: "live-2", replace: false,
+      chunkText: Buffer.from(whole).subarray(sliceFrom).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const live = await lane(key);
+    expect(live.turns).toBe(10);
+
+    // Now the guarantor's stale slice arrives, carrying the offset it was cut at.
+    let caught: unknown = null;
+    try {
+      await ingestCommit(db, {
+        key, chunkId: "reconcile-tail", replace: false,
+        chunkText: Buffer.from(whole).subarray(sliceFrom).toString("utf8"),
+        totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+        recovered: true, rebuild: true, expectIndexedBytes: sliceFrom,
+      });
+    } catch (err) { caught = err; }
+
+    expect(caught).toBeInstanceOf(IndexAdvancedError);
+    expect((caught as IndexAdvancedError).expected).toBe(sliceFrom);
+    expect((caught as IndexAdvancedError).actual).toBe(live.bytes);
+
+    const after = await lane(key);
+    expect(after.turns).toBe(10);   // not 17
+    expect(after.dense).toBe(true);
   });
 
   test("a session that grew UNDER the sweep is complete, not damaged", async () => {
