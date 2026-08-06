@@ -85,6 +85,13 @@ export interface ReconcileResult {
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
    *  that leaves damage behind. Each one is logged with its id at error level. */
   integrityFailures: number;
+  /** Repairs the no-clobber guard REFUSED because a live row was already there —
+   *  the guard working as intended, not a defect. Counted apart from noOpRepairs
+   *  so the bug signal stays a bug signal. */
+  protectedSkips: number;
+  /** Canonicals that genuinely contain no events, already restored, left alone.
+   *  Neither damage nor work — recorded so an unexpected volume is visible. */
+  emptyCanonicals: number;
   /** Repairs whose commit reported it did NOT apply — a dedupe hit or a guard.
    *  This is the counter that would have surfaced the constant-repair-key freeze
    *  on its first pass instead of a week later; a non-zero value means the
@@ -332,6 +339,8 @@ export async function reconcileOrphans(
     gappedLanes: 0,
     liveRaces: 0,
     noOpRepairs: 0,
+    protectedSkips: 0,
+    emptyCanonicals: 0,
     prefixMismatches: 0,
     unjudgeable: 0,
     repairedTail: 0,
@@ -563,26 +572,37 @@ export async function reconcileOrphans(
       res.deferred += 1; // parent failed this pass → defer the lane to the next sweep
       continue;
     }
-    // A canonical that parses to NOTHING restores to a zero-event row, which
-    // the INDEXED gate then excludes from `have` — so it looks like an orphan
-    // again on the very next pass, forever. Under the old constant repair key
-    // that loop was free (iteration 2+ deduped to a no-op); with unique keys
-    // every iteration is a real replace txn, a fresh ingest-event row, and a
-    // slot of the per-pass cap. Recognise "already restored, and the canonical
-    // genuinely holds nothing" and leave it alone.
-    // …that is: a row already exists, it covers the canonical, and it has no
-    // hole — it is restored, and the canonical genuinely holds no events.
-    // Rebuilding it again would write a fresh ingest-event row and spend a slot
-    // of the per-pass cap, every hour, indefinitely.
-    const alreadyRestoredEmpty = (() => {
+    // A canonical that parses to NOTHING restores to a zero-event row, which the
+    // INDEXED gate then excludes from `have` — so it looks orphaned again on the
+    // very next pass, forever. Under the old constant repair key that loop was
+    // free (iteration 2+ deduped to a no-op); with unique keys every iteration is
+    // a real replace txn, a fresh ingest-event row, and a slot of the per-pass
+    // cap. So such a row is a CANDIDATE to leave alone.
+    //
+    // But covering bytes are NOT proof the canonical is empty. A chunk that
+    // parsed to no events can commit carrying a totalBytes spanning content whose
+    // own commits never landed, leaving a zero-event row over a content-BEARING
+    // canonical. Skipping that would permanently ignore real content the pre-fix
+    // code would have restored — trading an hourly wasted write for silent data
+    // loss, which is the wrong way round.
+    //
+    // Hence: zero bytes cannot hold an event and is free to skip; an UNKNOWN size
+    // never skips (that is what `unjudgeable` records); anything else must be read
+    // and PARSED before we are allowed to ignore it — decided below, where the
+    // canonical is already in hand.
+    const coveredByRow = (() => {
       if (staleRepair) return false;
       const isLane = key.sessionId.includes(AGENT_LANE);
       const m = isLane ? anyLaneBytes : anyRowBytes;
       if (!m.has(natural)) return false;
       if (gapped.has(natural)) return false;
-      return (m.get(natural) ?? 0) >= (key.bytes ?? 0);
+      if (key.bytes == null) return false;
+      return (m.get(natural) ?? 0) >= key.bytes;
     })();
-    if (alreadyRestoredEmpty) continue;
+    if (coveredByRow && key.bytes === 0) {
+      res.emptyCanonicals += 1;
+      continue;
+    }
     res.orphans += 1;
     try {
       // Re-check at ingest time so we don't redundantly rebuild a row that
@@ -595,6 +615,14 @@ export async function reconcileOrphans(
         continue;
       }
       const chunkText = await store.readCanonicalText(key);
+      // The candidate from above, decided on CONTENT rather than on bytes.
+      // Parsing to anything at all means this is masked damage, not an empty
+      // canonical — fall through and restore it.
+      if (coveredByRow && parseChunk(chunkText).eventCount === 0) {
+        res.emptyCanonicals += 1;
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
       const base = {
         chunkId: repairChunkId("full"),
         replace: true as const,
@@ -642,10 +670,19 @@ export async function reconcileOrphans(
           continue;
         }
         if (!laneOutcome.applied) {
-          res.noOpRepairs += 1;
-          opts.logger?.warn?.("reconciler: lane repair reported NO-OP", {
-            sessionId: baseSid, agentId, family: key.family, reason: laneOutcome.reason,
-          });
+          if (laneOutcome.reason === "recovered_skip") {
+            // The guard refused because a live lane is already there: working as
+            // intended, not the "believed it repaired something" bug signal.
+            res.protectedSkips += 1;
+            opts.logger?.info?.("reconciler: lane already live — restore stood down", {
+              sessionId: baseSid, agentId, family: key.family,
+            });
+          } else {
+            res.noOpRepairs += 1;
+            opts.logger?.warn?.("reconciler: lane repair reported NO-OP", {
+              sessionId: baseSid, agentId, family: key.family, reason: laneOutcome.reason,
+            });
+          }
         } else {
           const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, key);
           if (v.ok) {
@@ -751,6 +788,28 @@ export async function reconcileOrphans(
         // CAS to the stale scan value could never match, so the escalation always
         // aborted as a phantom live race and the promised rebuild never ran.
         if (!landed) {
+          // The text in hand was read before any of this iteration's writes. If
+          // the canonical has GROWN since, rebuilding from that text deletes the
+          // lane and reinstates a prefix — a real, if self-healing, wipe. A
+          // verify-triggered escalation is precisely the "canonical grew" case,
+          // so re-stat and defer rather than rebuild from something stale.
+          if (tailApplied && canonicalBytes != null) {
+            let freshBytes: number | null = null;
+            try {
+              freshBytes = await store.statCanonical(key);
+            } catch {
+              // unreadable — fall through and let the CAS decide
+            }
+            if (freshBytes != null && freshBytes > canonicalBytes) {
+              res.liveRaces += 1;
+              opts.logger?.info?.("reconciler: canonical grew mid-repair — deferring the rebuild", {
+                sessionId: key.sessionId, family: key.family,
+                readAt: canonicalBytes, nowBytes: freshBytes,
+              });
+              if (delay > 0) await sleep(delay);
+              continue;
+            }
+          }
           const rebuildAnchor = tailApplied ? await currentBytes(db, key) : scanBytes;
           let full: Awaited<ReturnType<typeof ingestCommit>>;
           try {
@@ -778,10 +837,17 @@ export async function reconcileOrphans(
           if (!full.applied) {
             // A no-op is not a repair. Counting it toward `restored` would also
             // spend a slot of the per-pass cap on work that did nothing.
-            res.noOpRepairs += 1;
-            opts.logger?.warn?.("reconciler: full rebuild reported NO-OP", {
-              sessionId: key.sessionId, family: key.family, reason: full.reason,
-            });
+            if (full.reason === "recovered_skip") {
+              res.protectedSkips += 1;
+              opts.logger?.info?.("reconciler: session already live — restore stood down", {
+                sessionId: key.sessionId, family: key.family,
+              });
+            } else {
+              res.noOpRepairs += 1;
+              opts.logger?.warn?.("reconciler: full rebuild reported NO-OP", {
+                sessionId: key.sessionId, family: key.family, reason: full.reason,
+              });
+            }
           } else {
             res.restored += 1;
             const v = await verifyLane(db, key, canonicalBytes, store);

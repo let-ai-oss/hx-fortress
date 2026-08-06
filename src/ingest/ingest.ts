@@ -288,9 +288,6 @@ export class ParentSessionNotIndexedError extends Error {
   }
 }
 
-/** A live write landed between the reconciler slicing a tail and the repair
- *  reaching the lock, so the offset the slice was taken from is no longer the
- *  indexed length. Appending anyway would duplicate turns. */
 /** What a commit actually DID. Every early return inside ingestCommit used to be
  *  indistinguishable from success — a dedupe hit, a recovered-write guard and a
  *  clean index all returned void. The guarantor therefore could not tell "repaired"
@@ -309,6 +306,10 @@ export class LanePrefixMismatchError extends Error {
   }
 }
 
+/** A live write landed between the reconciler observing this row and the repair
+ *  reaching the advisory lock, so the value the repair was planned against is no
+ *  longer current. Writing anyway would append from a stale offset, or delete a
+ *  lane and reinstate text that predates the live commit. */
 export class IndexAdvancedError extends Error {
   constructor(public readonly expected: number, public readonly actual: number) {
     super("index_advanced");
@@ -952,7 +953,14 @@ export async function ingestAgentCommit(
     // (behind its canonical, or holed). Without the override every lane repair
     // was a silent no-op on the FIRST attempt — the same shape as the constant
     // repair key, but total.
-    if (input.recovered && !input.rebuild && existingAgent) {
+    // The eventCount clause is load-bearing and mirrors the parent guard at the
+    // top of ingestCommit. Without it a CONTENT-LESS lane row (eventCount 0)
+    // blocks its own repair: the reconciler reaches it via the orphan path, where
+    // `rebuild` is deliberately false (an orphan restore must not be able to
+    // clobber a live row), and the guard then refuses the one write that would
+    // fix it — forever. The protection this guard exists for is against a
+    // CONTENT-BEARING lane materialising in the window, which the clause keeps.
+    if (input.recovered && !input.rebuild && existingAgent && (existingAgent.eventCount ?? 0) > 0) {
       return { skip: "recovered_skip" as const };
     }
 

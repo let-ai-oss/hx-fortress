@@ -890,7 +890,10 @@ describe.if(!!DSN)("Component G — agent lanes are checked and repaired like pa
     // …and then it must stop. A loop here silently eats the repair budget.
     expect(second.restored).toBe(0);
     expect(third.restored).toBe(0);
-    expect(second.orphans).toBe(0);
+    // It is still EXAMINED each pass (the decision is now made on parsed content,
+    // which requires the read) — but it does no work and writes nothing.
+    expect(second.emptyCanonicals).toBe(1);
+    expect(second.noOpRepairs).toBe(0);
   });
 
   test("a partially indexed LANE is detected and fully repaired", async () => {
@@ -950,5 +953,142 @@ describe.if(!!DSN)("Component G — agent lanes are checked and repaired like pa
     const after = await laneState();
     expect(after.turns).toBe(8);
     expect(after.bytes).toBe(Buffer.byteLength(laneWhole));
+  });
+});
+
+
+// The two directions of the empty-canonical skip. Getting the second one wrong
+// trades an hourly wasted write for silent data loss.
+describe.if(!!DSN)("Component G — a zero-event row is only ignored when the canonical really is empty", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+
+  async function zeroEventRowOver(canonicalText: string, declaredBytes: number | null) {
+    const key: SessionKey = {
+      userId: `mask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    // A committed chunk that parses to nothing, but claims to cover everything —
+    // the shape that makes covering bytes a lie about emptiness.
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: "\n\n",
+      totalBytes: Math.max(declaredBytes ?? 0, Buffer.byteLength(canonicalText)),
+      componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const canonicals = new Map<string, string>([[canonicalObject(key), canonicalText]]);
+    const store = {
+      ...memStore(canonicals),
+      listAllCanonicalKeys: async () => [
+        declaredBytes === null ? { ...key } : { ...key, bytes: declaredBytes },
+      ],
+      statCanonical: async () => Buffer.byteLength(canonicalText),
+    } as unknown as SessionStore;
+    const turns = async () => {
+      const [row] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const t = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+      return t.length;
+    };
+    return { key, store, turns };
+  }
+
+  test("REAL CONTENT behind a covering zero-event row is RESTORED, never skipped", async () => {
+    const real = body(6);
+    const { store, turns } = await zeroEventRowOver(real, Buffer.byteLength(real));
+    expect(await turns()).toBe(0); // indexed as nothing, bytes claim full coverage
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    // Deciding on bytes alone would skip this forever and lose 6 records.
+    expect(res.emptyCanonicals).toBe(0);
+    expect(await turns()).toBe(6);
+  });
+
+  test("an UNKNOWN canonical size never takes the skip", async () => {
+    const real = body(4);
+    const { store, turns } = await zeroEventRowOver(real, null);
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    expect(res.emptyCanonicals).toBe(0);
+    expect(res.unjudgeable).toBeGreaterThanOrEqual(0);
+    expect(await turns()).toBe(4);
+  });
+});
+
+// The lane twin of the parent guard. Without the eventCount clause the repair of
+// a content-less lane dies at the guard instead of the gates above it.
+describe.if(!!DSN)("Component G — a content-less LANE row does not block its own repair", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+  const AGENT = "agent-x";
+
+  test("zero-event lane row + content-bearing lane canonical → repaired", async () => {
+    const key: SessionKey = {
+      userId: `laneguard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const parentText = body(3);
+    const laneWhole = body(5);
+    await ingestCommit(db, {
+      key, chunkId: "p1", replace: false, chunkText: parentText,
+      totalBytes: Buffer.byteLength(parentText), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    // A lane commit that parses to NOTHING leaves a zero-event lane row.
+    await ingestAgentCommit(db, {
+      key, agentId: AGENT, chunkId: "a1", replace: false, chunkText: "\n\n",
+      totalBytes: 2, componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const laneTurns = async () => {
+      const [row] = await db
+        .select({ id: hxSessionAgents.id })
+        .from(hxSessionAgents)
+        .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      if (!row) return -1;
+      const t = await db.select({ seq: hxTurns.seq }).from(hxTurns).where(eq(hxTurns.agentId, row.id));
+      return t.length;
+    };
+    expect(await laneTurns()).toBe(0);
+
+    const store = {
+      listAllCanonicalKeys: async () => [
+        { ...key, bytes: Buffer.byteLength(parentText) },
+        { ...key, sessionId: `${key.sessionId}:a:${AGENT}`, bytes: Buffer.byteLength(laneWhole) },
+      ],
+      readCanonicalText: async (k: SessionKey) =>
+        k.sessionId.includes(":a:") ? laneWhole : parentText,
+      statCanonical: async (k: SessionKey) =>
+        Buffer.byteLength(k.sessionId.includes(":a:") ? laneWhole : parentText),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    // Without the eventCount clause on the lane guard this is a recovered_skip
+    // every pass and the lane stays empty forever.
+    expect(res.noOpRepairs).toBe(0);
+    expect(await laneTurns()).toBe(5);
   });
 });
