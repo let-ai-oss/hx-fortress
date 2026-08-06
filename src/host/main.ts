@@ -128,6 +128,11 @@ export async function runFortressHost(
   let guardedDb: GuardedDb | null = null;
   const resolveHxDb = (): HxDb | null => guardedDb?.db() ?? null;
   const resolveHxDbRead = (): HxDb | null => guardedDb?.dbRead() ?? null;
+  // Background repair runs on its OWN small pool. Sharing the live RW pool is
+  // what let one reconcile pass of whole-transcript restores hold the
+  // per-session advisory locks that live chunks then queued behind, until the
+  // write path had no connections left (2026-08-05).
+  const resolveHxDbBackground = (): HxDb | null => guardedDb?.dbBackground() ?? null;
   // Late-bound recovery hooks (the worker/guarantor are built after guarded-db).
   const dbHealth = { onRebuild: (): void => {}, onRecovered: (): void => {} };
   // Fortress→cloud realtime bridge (MC-2415): ingest paths emit invalidations
@@ -399,6 +404,7 @@ export async function runFortressHost(
       ownOrgId: () => credentialStore.load().then((c) => c?.orgId ?? null).catch(() => null),
       store: () => vaultModule.getStore(),
       postgresReady: () => postgres.isReady(),
+      postgresSaturated: () => guardedDb?.saturated() ?? false,
       // RW handle for the ingest write path; RO handle for the /mcp read tools.
       db: resolveHxDb,
       dbRead: resolveHxDbRead,
@@ -462,7 +468,8 @@ export async function runFortressHost(
     const batchDelayMs =
       Number.isFinite(batchDelayRaw) && batchDelayRaw >= 0 ? Math.trunc(batchDelayRaw) : undefined;
     guarantor = createGuarantor({
-      db: resolveHxDb,
+      // The background pool — never the live ingest one.
+      db: resolveHxDbBackground,
       store: () => vaultModule.getStore(),
       logger: bus.scopeFor("guarantor"),
       correctExistingTitles: parseBooleanEnv(process.env.FORTRESS_CORRECT_TITLES),

@@ -19,10 +19,12 @@ import type { ScopedLogger } from "../types";
 import {
   createHxDb,
   describePool,
-  hxPoolOptions,
+  hxPoolOptionsFor,
   type HxDb,
   type HxPoolOptions,
+  type HxPoolRole,
 } from "./db";
+import { setPoolExhaustedHandler } from "./pool-signal";
 import { isUnsupportedStartupParamError } from "./pg-errors";
 import { sanitizeDbError } from "./sanitize";
 
@@ -50,6 +52,12 @@ export interface GuardedDbDeps {
   probeTimeoutMs?: number;
   breachThreshold?: number;
   futileRebuildThreshold?: number;
+  /** Pool-exhaustion rejections within ONE probe interval that make the tick
+   *  count as a saturation breach. */
+  saturationPerTickThreshold?: number;
+  /** Consecutive saturated ticks before the pools are rebuilt to release the
+   *  connections that abandoned transactions are still holding. */
+  saturationBreachThreshold?: number;
   /** Test seams. */
   makeDb?: (dsn: string, options: HxPoolOptions) => HxDb;
   makeProbeClient?: (dsn: string, options: HxPoolOptions) => ProbeClient;
@@ -62,6 +70,14 @@ export interface GuardedDb {
   db(): HxDb | null;
   /** SELECT-only RO resolver. */
   dbRead(): HxDb | null;
+  /** Background (guarantor / reconciler) resolver — its own small pool, so a
+   *  reconcile pass of whole-transcript restores can never spend the live
+   *  ingest budget. Same RW credentials, separate allocation. */
+  dbBackground(): HxDb | null;
+  /** True while the live pool is rejecting queries for want of a connection.
+   *  Surfaced on /readyz so a starved fortress stops reporting itself perfectly
+   *  healthy the way it did for ~13 hours on 2026-08-05. */
+  saturated(): boolean;
   start(): void;
   stop(): Promise<void>;
   /** One probe cycle now (tests). Resolves to the probe verdict, or null when
@@ -73,6 +89,8 @@ const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 const DEFAULT_BREACH_THRESHOLD = 3;
 const DEFAULT_FUTILE_REBUILD_THRESHOLD = 2;
 const HUNG_CLOSE_GAUGE_WARN = 8;
+const DEFAULT_SATURATION_PER_TICK = 5;
+const DEFAULT_SATURATION_BREACH_THRESHOLD = 2;
 
 /** Probe cadence (ms): set-but-empty ⇒ default 60 000; an explicit 0 disables
  *  (store-probe precedent — probing is detection, not a data path). */
@@ -122,6 +140,7 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
 
   let rw: HxDb | null = null;
   let ro: HxDb | null = null;
+  let bg: HxDb | null = null;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let probeBusy = false;
@@ -135,15 +154,24 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
   let hungCloseWarned = false;
   let poolerMisconfigWarned = false;
   let bootLineLogged = false;
+  let bgLineLogged = false;
+  let exhaustedSinceTick = 0;
+  let saturationStreak = 0;
+  const saturationPerTick = deps.saturationPerTickThreshold ?? DEFAULT_SATURATION_PER_TICK;
+  const saturationBreaches = deps.saturationBreachThreshold ?? DEFAULT_SATURATION_BREACH_THRESHOLD;
 
-  const options = (): HxPoolOptions => hxPoolOptions(env);
+  // The canary mirrors the LIVE WRITE pool: that is the pool whose startup
+  // params (statement_timeout, and now lock_timeout) a pooler would reject.
+  const options = (): HxPoolOptions => hxPoolOptionsFor("rw", env);
 
-  const resolve = (role: "rw" | "ro"): HxDb | null => {
-    const current = role === "rw" ? rw : ro;
+  const resolve = (role: HxPoolRole): HxDb | null => {
+    const current = role === "rw" ? rw : role === "ro" ? ro : bg;
     if (current) return current;
-    const dsn = deps.dsn(role);
+    // "bg" is not a credential role — it is the RW role with a smaller, isolated
+    // allocation, so it resolves the RW DSN.
+    const dsn = deps.dsn(role === "bg" ? "rw" : role);
     if (!dsn) return null;
-    const opts = options();
+    const opts = hxPoolOptionsFor(role, env);
     const built = makeDb(dsn, opts);
     if (role === "rw") {
       rw = built;
@@ -151,8 +179,14 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
         bootLineLogged = true;
         logger?.info("hx-db pool options", describePool(dsn, opts));
       }
-    } else {
+    } else if (role === "ro") {
       ro = built;
+    } else {
+      bg = built;
+      if (!bgLineLogged) {
+        bgLineLogged = true;
+        logger?.info("hx-db background pool options", describePool(dsn, opts));
+      }
     }
     return built;
   };
@@ -172,22 +206,28 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
     void Promise.race([closing, sleep(10_000)]);
   };
 
-  const rebuild = (): void => {
+  const rebuild = (reason = "consecutive probe breaches"): void => {
     if (rotating) return; // rotation mutex — one swap per breach episode step
     rotating = true;
     try {
       const oldRw = rw;
       const oldRo = ro;
+      const oldBg = bg;
       // Swap FIRST: the very next resolver call builds fresh pools; nothing
       // ever awaits the old pool's teardown.
       rw = null;
       ro = null;
+      bg = null;
+      // close({timeout:5}) force-rejects whatever is still in flight, which is
+      // precisely the remedy for a pool whose connections are held by
+      // transactions their callers abandoned long ago.
       closeRetired(oldRw);
       closeRetired(oldRo);
+      closeRetired(oldBg);
       rebuildsSinceProbeSuccess += 1;
       awaitingRecoverySignal = true;
       deps.onRebuild?.();
-      logger?.error("hx-db pools rebuilt after consecutive probe breaches", {
+      logger?.error("hx-db pools rebuilt after " + reason, {
         rebuildsSinceProbeSuccess,
       });
       if (rebuildsSinceProbeSuccess >= futileThreshold && !escalatedThisEpisode) {
@@ -200,6 +240,38 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
       }
     } finally {
       rotating = false;
+    }
+  };
+
+  /** One query was rejected by the checkout queue. Counted, never acted on
+   *  immediately: a single rejection is a burst, a sustained rate is starvation. */
+  const notePoolExhausted = (): void => {
+    exhaustedSinceTick += 1;
+  };
+
+  /** Fold the tick window into breach accounting. Runs on EVERY probe tick,
+   *  independent of the probe verdict — during starvation the canary answers
+   *  perfectly (it holds its own connection), so the probe alone would report
+   *  health right through the outage.
+   *
+   *  The remedy is the rebuild that already exists: swapping the pools
+   *  force-closes the retired ones, releasing the connections held by
+   *  transactions whose callers gave up at the RPC deadline. */
+  const evaluateSaturation = (): void => {
+    const rejected = exhaustedSinceTick;
+    exhaustedSinceTick = 0;
+    if (rejected < saturationPerTick) {
+      saturationStreak = 0;
+      return;
+    }
+    saturationStreak += 1;
+    logger?.error("hx-db pool saturated — queries rejected waiting for a connection", {
+      rejected,
+      saturationStreak,
+    });
+    if (saturationStreak >= saturationBreaches) {
+      saturationStreak = 0;
+      rebuild("sustained pool saturation");
     }
   };
 
@@ -277,6 +349,7 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
       }
       return false;
     } finally {
+      evaluateSaturation();
       probeBusy = false;
     }
   };
@@ -284,10 +357,18 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
   return {
     db: () => resolve("rw"),
     dbRead: () => resolve("ro"),
+    dbBackground: () => resolve("bg"),
+    saturated: () => saturationStreak > 0,
     start() {
       stopped = false;
+      // Subscribe to the query paths. Saturation accounting rides the probe
+      // tick, so disabling the probe disables this detection too — the warning
+      // below is the one place that is stated.
+      setPoolExhaustedHandler(notePoolExhausted);
       if (intervalMs <= 0) {
-        logger?.warn("hx-db probe disabled (FORTRESS_DB_PROBE_INTERVAL_MS=0)");
+        logger?.warn(
+          "hx-db probe disabled (FORTRESS_DB_PROBE_INTERVAL_MS=0) — pool-saturation detection is off with it",
+        );
         return;
       }
       timer = setInterval(() => {
@@ -297,14 +378,19 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
     },
     async stop() {
       stopped = true;
+      // Unwire before teardown so a late emit cannot touch a stopped healer.
+      setPoolExhaustedHandler(null);
       if (timer) clearInterval(timer);
       timer = null;
       const oldRw = rw;
       const oldRo = ro;
+      const oldBg = bg;
       rw = null;
       ro = null;
+      bg = null;
       closeRetired(oldRw);
       closeRetired(oldRo);
+      closeRetired(oldBg);
     },
     probeNow: () => probeTick(),
   };

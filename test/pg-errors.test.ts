@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   dbSqlState,
   isKillClassDbError,
+  isLockTimeoutDbError,
+  isPoolExhaustedDbError,
   isStatementTimeoutDbError,
   isTransientDbError,
   isUnsupportedStartupParamError,
@@ -11,6 +13,7 @@ import {
   tagLockTimeout,
   unwrapDbError,
 } from "../src/host/postgres/pg-errors";
+import { setPoolExhaustedHandler } from "../src/host/postgres/pool-signal";
 import { sanitizeDbError } from "../src/host/postgres/sanitize";
 
 // Fixtures MIRROR the empirically-pinned real shapes (Bun 1.3.14 + PG 18; the
@@ -46,12 +49,15 @@ function drizzleWrapped(cause: Error, query = "select 1", params: unknown[] = []
   return err; // deliberately name === "Error" — the real wrapper's shape
 }
 
+// ERR_POSTGRES_IDLE_TIMEOUT is deliberately ABSENT: despite the name it is not a
+// connection kill but the pool checkout queue giving up, so it is neither
+// kill-class nor transient. See the isPoolExhaustedDbError block below.
 const KILL_CODES = [
   "ERR_POSTGRES_CONNECTION_CLOSED",
   "ERR_POSTGRES_CONNECTION_TIMEOUT",
-  "ERR_POSTGRES_IDLE_TIMEOUT",
   "ERR_POSTGRES_LIFETIME_TIMEOUT",
 ];
+const POOL_EXHAUSTED = "ERR_POSTGRES_IDLE_TIMEOUT";
 
 describe("unwrapDbError", () => {
   test("steps down to the cause of a drizzle-shaped wrapper", () => {
@@ -60,7 +66,7 @@ describe("unwrapDbError", () => {
   });
 
   test("keeps a bare error (txn-path kills arrive UNwrapped)", () => {
-    const bare = killError(KILL_CODES[3], "Max lifetime timeout reached");
+    const bare = killError(KILL_CODES[2], "Max lifetime timeout reached");
     expect(unwrapDbError(bare)).toBe(bare);
   });
 
@@ -213,7 +219,7 @@ describe("sanitizeDbError (DrizzleQueryError collapse)", () => {
   });
 
   test("errno-first: a kill-class cause (no errno) falls back to its code", () => {
-    const wrapped = drizzleWrapped(killError(KILL_CODES[3], "Max lifetime timeout reached"));
+    const wrapped = drizzleWrapped(killError(KILL_CODES[2], "Max lifetime timeout reached"));
     expect(sanitizeDbError(wrapped)).toBe(
       "ERR_POSTGRES_LIFETIME_TIMEOUT: Max lifetime timeout reached",
     );
@@ -243,5 +249,109 @@ describe("sanitizeDbError (DrizzleQueryError collapse)", () => {
     expect(sanitizeDbError(new Error("connect to postgresql://u:pw@db.internal:5432/hx failed"))).toBe(
       "connect to [REDACTED_URL] failed",
     );
+  });
+});
+
+
+describe("isPoolExhaustedDbError — the 2026-08-05 regression, pinned", () => {
+  test("ERR_POSTGRES_IDLE_TIMEOUT is pool exhaustion, wrapped AND bare", () => {
+    const bare = killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+    expect(isPoolExhaustedDbError(bare)).toBe(true);
+    expect(isPoolExhaustedDbError(drizzleWrapped(bare))).toBe(true);
+  });
+
+  test("it is NOT kill-class — the pool is starved, the connection is fine", () => {
+    const err = killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+    expect(isKillClassDbError(err)).toBe(false);
+  });
+
+  test("it is NOT transient — retrying into a full pool is the amplifier", () => {
+    const err = killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+    expect(isTransientDbError(err)).toBe(false);
+  });
+
+  test("a genuine lifecycle kill stays transient (the fix narrows nothing else)", () => {
+    expect(isTransientDbError(killError(KILL_CODES[2], "Max lifetime timeout"))).toBe(true);
+  });
+
+  test("retryOnceOnTransientDbError runs the op EXACTLY once and rethrows", async () => {
+    let calls = 0;
+    await expect(
+      retryOnceOnTransientDbError(async () => {
+        calls += 1;
+        throw killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+      }),
+    ).rejects.toThrow("Idle timeout reached after 1m");
+    expect(calls).toBe(1);
+  });
+
+  test("it reports starvation to the healer exactly once per rejection", async () => {
+    let signals = 0;
+    setPoolExhaustedHandler(() => {
+      signals += 1;
+    });
+    try {
+      await expect(
+        retryOnceOnTransientDbError(async () => {
+          throw killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+        }),
+      ).rejects.toThrow();
+      expect(signals).toBe(1);
+      // A non-exhaustion failure must never inflate the saturation count.
+      await expect(
+        retryOnceOnTransientDbError(async () => {
+          throw serverError("23505", "dup");
+        }),
+      ).rejects.toThrow();
+      expect(signals).toBe(1);
+    } finally {
+      setPoolExhaustedHandler(null);
+    }
+  });
+
+  test("a throwing subscriber never breaks the query path", async () => {
+    setPoolExhaustedHandler(() => {
+      throw new Error("observer blew up");
+    });
+    try {
+      await expect(
+        retryOnceOnTransientDbError(async () => {
+          throw killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+        }),
+      ).rejects.toThrow("Idle timeout reached after 1m");
+    } finally {
+      setPoolExhaustedHandler(null);
+    }
+  });
+});
+
+describe("lock_timeout (55P03) joins statement_timeout (57014) as a bounded lock WAIT", () => {
+  test("55P03 is recognised", () => {
+    expect(isLockTimeoutDbError(serverError("55P03", "canceling statement due to lock timeout"))).toBe(
+      true,
+    );
+    expect(isLockTimeoutDbError(serverError("57014", "canceling statement"))).toBe(false);
+  });
+
+  test("tagLockTimeout tags BOTH shapes as a session-lock timeout", () => {
+    expect(() => tagLockTimeout(serverError("55P03", "lock timeout"))).toThrow(
+      SessionLockTimeoutError,
+    );
+    expect(() => tagLockTimeout(serverError("57014", "statement timeout"))).toThrow(
+      SessionLockTimeoutError,
+    );
+  });
+
+  test("an unrelated server error passes through untagged", () => {
+    expect(() => tagLockTimeout(serverError("23505", "dup"))).toThrow("dup");
+    try {
+      tagLockTimeout(serverError("23505", "dup"));
+    } catch (err) {
+      expect(err instanceof SessionLockTimeoutError).toBe(false);
+    }
+  });
+
+  test("a bounded-out lock wait stays transient — the txn rolled back, one retry is sound", () => {
+    expect(isTransientDbError(new SessionLockTimeoutError(serverError("55P03", "lock")))).toBe(true);
   });
 });

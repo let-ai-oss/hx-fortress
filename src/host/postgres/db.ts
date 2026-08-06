@@ -25,6 +25,19 @@ function msEnv(
   return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : def;
 }
 
+/** Parse a positive-integer env knob (counts, not durations): unset,
+ *  set-but-EMPTY, non-finite, or < 1 all fall back to the default. */
+function countEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  def: number,
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return def;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 ? Math.trunc(n) : def;
+}
+
 /** Bun.SQL wants seconds for its lifecycle knobs; round up so a sub-second
  *  override still yields a bound (min 1 s) instead of 0 = disabled. */
 const msToSec = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
@@ -33,22 +46,111 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_LIFETIME_MS = 3_600_000;
 const DEFAULT_POOL_MAX = 10;
-const DEFAULT_IDLE_TIMEOUT_S = 60;
+
+// ---------------------------------------------------------------------------
+// `idleTimeout` is the pool ACQUIRE timeout — read this before touching it.
+//
+// Bun.SQL's own typings (1.3.14, sql.d.ts):
+//     idleTimeout?: number
+//     "Maximum time in seconds to wait for connection to become available"
+//     @default 0 (no timeout)
+//
+// It is NOT an idle-connection reaper. It bounds how long a query may sit in the
+// pool's CHECKOUT QUEUE before being rejected with ERR_POSTGRES_IDLE_TIMEOUT.
+//
+// v0.17.0 set it to 60 s believing it recycled idle sockets. The real effect: on
+// a saturated pool every query queued for a full minute and then failed, and
+// "ERR_POSTGRES_IDLE_TIMEOUT: Idle timeout reached after 1m" became the signature
+// of the 2026-08-05 ingest outage. That error means POOL EXHAUSTION — never a
+// dead connection — and `pg-errors.ts` classifies it accordingly.
+//
+// The only correct calibration is against the caller's own deadline: the vault
+// RPC abandons at FORTRESS_DB_RPC_DEADLINE_MS (default 25 s). This bound must be
+// long enough to ride out a normal burst, and short enough that real exhaustion
+// is rejected while the caller is still listening — a queue that outlives every
+// request in it is pure waste that keeps the pool busy for the NEXT request too.
+const DEFAULT_ACQUIRE_TIMEOUT_MS = 10_000;
+
+// Lock-wait bound for the LIVE ingest pool (ms). The ingest transaction opens on
+// `pg_advisory_xact_lock(session)`, and in Postgres a lock wait counts against
+// statement_timeout. Without a separate, much shorter lock_timeout a live chunk
+// queued behind a long same-session restore holds one of the pool's connections
+// for the WHOLE 120 s statement budget while doing no work at all.
+//
+// That is the connection hoard that turned one slow commit into a pool-wide
+// outage: the vault RPC gave up at 25 s but never cancels, so the blocked
+// transaction kept its connection for the remaining ~95 s; the cloud then
+// replayed the commit, and the replay queued behind it on the same lock. Failing
+// the lock wait fast (SQLSTATE 55P03, tagged as SessionLockTimeoutError) makes
+// the chunk cheap to retry and hands the connection straight back.
+const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+
+// The background pool (guarantor / reconciler) is deliberately tiny and SEPARATE.
+// Its work is whole-transcript restores that hold the per-session advisory lock
+// for a long time; sharing the live pool let one reconcile pass starve the write
+// path. Two connections keep a restore and its title-correction pass moving while
+// making it structurally impossible to spend the live ingest budget.
+const DEFAULT_BG_POOL_MAX = 2;
+
+/** Which workload a pool serves. The three differ in how much they may spend and
+ *  how long they may block — never in what they may see. */
+export type HxPoolRole = "rw" | "ro" | "bg";
 
 /** Effective server-side statement_timeout (ms). `0` means OMIT the startup
  *  parameter entirely — the pooled-DSN escape hatch: PgBouncer-class poolers
  *  reject unknown startup parameters, so `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0`
  *  must strip it from EVERY consumer (shared pools, the guarded-db probe
- *  canary, and the embed worker's own longer override). */
+ *  canary, and the embed worker's own longer override). lock_timeout rides the
+ *  same hatch — a pooler that rejects one startup param rejects both. */
 export function statementTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
   return msEnv(env, "FORTRESS_DB_STATEMENT_TIMEOUT_MS", DEFAULT_STATEMENT_TIMEOUT_MS);
 }
 
+/** Pool checkout-queue bound (ms) — see the DEFAULT_ACQUIRE_TIMEOUT_MS note.
+ *  `0` ⇒ default: an unbounded checkout queue is what let the outage hide. */
+export function acquireTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = msEnv(env, "FORTRESS_DB_ACQUIRE_TIMEOUT_MS", DEFAULT_ACQUIRE_TIMEOUT_MS);
+  return raw > 0 ? raw : DEFAULT_ACQUIRE_TIMEOUT_MS;
+}
+
+/** Live-ingest lock-wait bound (ms). `0` ⇒ OMIT lock_timeout, falling back to
+ *  the statement_timeout behaviour — an explicit escape hatch for an operator
+ *  who would rather wait than shed, not a value that can be blanked by accident. */
+export function lockTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return msEnv(env, "FORTRESS_DB_LOCK_TIMEOUT_MS", DEFAULT_LOCK_TIMEOUT_MS);
+}
+
+/** Connection ceiling for the live rw/ro pools. */
+export function poolMax(env: Record<string, string | undefined> = process.env): number {
+  return countEnv(env, "FORTRESS_DB_POOL_MAX", DEFAULT_POOL_MAX);
+}
+
+/** Connection ceiling for the background (guarantor) pool. */
+export function backgroundPoolMax(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return countEnv(env, "FORTRESS_DB_BG_POOL_MAX", DEFAULT_BG_POOL_MAX);
+}
+
+/** Postgres startup parameters — millisecond GUCs, passed verbatim to Bun.SQL.
+ *  An open record (not a closed interface) because Bun types this slot as
+ *  `Record<string, string | number | boolean>`; the two keys the fortress sets
+ *  are `statement_timeout` (always) and `lock_timeout` (live ingest pool only —
+ *  absent means lock waits stay bounded by statement_timeout, the pre-fix
+ *  behaviour that let one blocked chunk hold a connection for two minutes). */
+export type HxStartupParams = Record<string, number>;
+
 export interface HxPoolOptions {
   /** Seconds — Bun.SQL's unit for the three lifecycle knobs. */
   connectionTimeout: number;
+  /** Seconds. Bun's name for the pool ACQUIRE timeout, NOT an idle reaper —
+   *  see the DEFAULT_ACQUIRE_TIMEOUT_MS note above before changing it. */
   idleTimeout: number;
   /** Hard rotation: Bun kills a connection (mid-query included — the txn rolls
    *  back atomically) once it reaches this age, which is what heals a poisoned
@@ -57,8 +159,9 @@ export interface HxPoolOptions {
   max: number;
   /** Startup parameters. statement_timeout (ms) bounds every statement
    *  server-side — the only per-query bound Bun.SQL offers (it has no client
-   *  per-query timeout). Absent entirely when the =0 escape hatch is set. */
-  connection?: { statement_timeout: number };
+   *  per-query timeout); lock_timeout bounds just the lock waits inside it.
+   *  Absent entirely when the =0 escape hatch is set. */
+  connection?: HxStartupParams;
 }
 
 /** The shared pool options every fortress Bun.SQL client derives from
@@ -68,35 +171,61 @@ export interface HxPoolOptions {
  *  Env knobs (ms; set-but-empty ⇒ default): FORTRESS_DB_CONNECT_TIMEOUT_MS
  *  (default 10 000; 0 ⇒ default — a connect bound may never be disabled),
  *  FORTRESS_DB_STATEMENT_TIMEOUT_MS (default 120 000; 0 ⇒ omit the startup
- *  param — pooler escape hatch), FORTRESS_DB_MAX_LIFETIME_MS (default
+ *  params — pooler escape hatch), FORTRESS_DB_MAX_LIFETIME_MS (default
  *  3 600 000 — one hour: rotation is the last-resort healer behind the probe's
  *  ~3 min rebuild path, and a guarantor RESTORE of a giant session replays the
  *  whole transcript in one transaction, which must fit inside one connection
  *  lifetime (a 106 MB session hit the old 10 min wall on day one);
- *  0 ⇒ default — never disableable). */
+ *  0 ⇒ default — never disableable), FORTRESS_DB_ACQUIRE_TIMEOUT_MS (default
+ *  10 000; 0 ⇒ default — an unbounded checkout queue is never correct),
+ *  FORTRESS_DB_LOCK_TIMEOUT_MS (default 5 000; 0 ⇒ omit lock_timeout),
+ *  FORTRESS_DB_POOL_MAX (default 10), FORTRESS_DB_BG_POOL_MAX (default 2). */
 export function hxPoolOptions(
   env: Record<string, string | undefined> = process.env,
-  overrides: { max?: number; statementTimeoutMs?: number } = {},
+  overrides: {
+    max?: number;
+    statementTimeoutMs?: number;
+    /** Set lock_timeout on this pool (live ingest only). */
+    lockTimeoutMs?: number;
+  } = {},
 ): HxPoolOptions {
   const connectRaw = msEnv(env, "FORTRESS_DB_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS);
   const connectMs = connectRaw > 0 ? connectRaw : DEFAULT_CONNECT_TIMEOUT_MS;
   const lifetimeRaw = msEnv(env, "FORTRESS_DB_MAX_LIFETIME_MS", DEFAULT_MAX_LIFETIME_MS);
   const lifetimeMs = lifetimeRaw > 0 ? lifetimeRaw : DEFAULT_MAX_LIFETIME_MS;
   const baseStatementMs = statementTimeoutMs(env);
-  // =0 omits the param for EVERY consumer — an override (the embed worker's
+  // =0 omits the params for EVERY consumer — an override (the embed worker's
   // 300 s) applies only while the hatch is not engaged.
   const effectiveStatementMs =
     baseStatementMs === 0 ? 0 : Math.trunc(overrides.statementTimeoutMs ?? baseStatementMs);
   const options: HxPoolOptions = {
     connectionTimeout: msToSec(connectMs),
-    idleTimeout: DEFAULT_IDLE_TIMEOUT_S,
+    idleTimeout: msToSec(acquireTimeoutMs(env)),
     maxLifetime: msToSec(lifetimeMs),
-    max: overrides.max ?? DEFAULT_POOL_MAX,
+    max: overrides.max ?? poolMax(env),
   };
   if (effectiveStatementMs > 0 && Number.isInteger(effectiveStatementMs)) {
-    options.connection = { statement_timeout: effectiveStatementMs };
+    const connection: HxStartupParams = { statement_timeout: effectiveStatementMs };
+    // lock_timeout rides the same =0 hatch: it is a startup parameter too, so a
+    // pooler that rejects statement_timeout rejects this one identically.
+    const lockMs = Math.trunc(overrides.lockTimeoutMs ?? 0);
+    if (lockMs > 0 && Number.isInteger(lockMs)) connection.lock_timeout = lockMs;
+    options.connection = connection;
   }
   return options;
+}
+
+/** Pool options for one workload. The live write path sheds lock waits fast; the
+ *  read path never takes the per-session advisory lock so it needs no
+ *  lock_timeout; the background pool is small, so a reconcile pass can queue on
+ *  itself but never on the write path's connections. */
+export function hxPoolOptionsFor(
+  role: HxPoolRole,
+  env: Record<string, string | undefined> = process.env,
+): HxPoolOptions {
+  if (role === "bg") return hxPoolOptions(env, { max: backgroundPoolMax(env) });
+  if (role === "ro") return hxPoolOptions(env);
+  return hxPoolOptions(env, { lockTimeoutMs: lockTimeoutMs(env) });
 }
 
 /** One DSN-free log line describing an effective pool (boot diagnostics): the
@@ -111,10 +240,12 @@ export function describePool(dsn: string, options: HxPoolOptions): Record<string
   return {
     host,
     connectionTimeoutS: options.connectionTimeout,
-    idleTimeoutS: options.idleTimeout,
+    // Named for what it does, not for Bun's misleading option name.
+    acquireTimeoutS: options.idleTimeout,
     maxLifetimeS: options.maxLifetime,
     max: options.max,
     statementTimeoutMs: options.connection?.statement_timeout ?? "omitted",
+    lockTimeoutMs: options.connection?.lock_timeout ?? "omitted",
   };
 }
 
