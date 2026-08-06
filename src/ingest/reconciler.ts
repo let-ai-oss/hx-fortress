@@ -24,7 +24,7 @@ import { hxUsers } from "../host/postgres/schema/dimensions";
 import type { CanonicalEntry, SessionKey, SessionStore } from "../modules/session-vault/store/types";
 import { correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
-import { ingestAgentCommit, ingestCommit } from "./ingest";
+import { IndexAdvancedError, ingestAgentCommit, ingestCommit } from "./ingest";
 
 const AGENT_LANE = ":a:";
 
@@ -79,6 +79,10 @@ export interface ReconcileResult {
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
    *  that leaves damage behind. Each one is logged with its id at error level. */
   integrityFailures: number;
+  /** Tail repairs abandoned because a live commit advanced the lane while the
+   *  sweep was working. Not damage and not an error — the live write is the more
+   *  current truth, and the next pass re-checks. */
+  liveRaces: number;
   /** Sessions whose PARENT lane has a hole in its seq — turns missing from the
    *  MIDDLE, which a byte comparison cannot see (bytes_uploaded still matches the
    *  canonical). Counted and repaired by full rebuild; a hole cannot be appended
@@ -228,6 +232,7 @@ export async function reconcileOrphans(
     titlesCorrected: 0,
     staleIndexes: 0,
     gappedLanes: 0,
+    liveRaces: 0,
     repairedTail: 0,
     repairedFull: 0,
     verifyFallbacks: 0,
@@ -427,14 +432,33 @@ export async function reconcileOrphans(
           alreadyIndexedBytes < buf.length &&
           buf[alreadyIndexedBytes - 1] === 0x0a;
         if (canAppendTail) {
-          await ingestCommit(db, {
-            ...base,
-            key,
-            chunkId: "reconcile-tail", // distinguishable in hx.ingest_events
-            replace: false,
-            chunkText: buf.subarray(alreadyIndexedBytes).toString("utf8"),
-            totalBytes: canonicalBytes,
-          });
+          let advanced = false;
+          try {
+            await ingestCommit(db, {
+              ...base,
+              key,
+              chunkId: "reconcile-tail", // distinguishable in hx.ingest_events
+              replace: false,
+              chunkText: buf.subarray(alreadyIndexedBytes).toString("utf8"),
+              totalBytes: canonicalBytes,
+              // …only if the lane is still exactly where the slice was cut.
+              expectIndexedBytes: alreadyIndexedBytes,
+            });
+          } catch (err) {
+            if (!(err instanceof IndexAdvancedError)) throw err;
+            // A live commit beat us to it. Never append from a stale offset —
+            // that duplicates turns, and a duplicated lane is still dense and
+            // still covers the canonical, so nothing downstream would catch it.
+            advanced = true;
+            res.liveRaces += 1;
+            opts.logger?.info?.("reconciler: session advanced under the sweep — deferring to the live write", {
+              sessionId: key.sessionId,
+              family: key.family,
+              slicedFrom: err.expected,
+              nowIndexed: err.actual,
+            });
+          }
+          if (advanced) { if (delay > 0) await sleep(delay); continue; }
           // VERIFY — never trust the fast path. Bytes prove it covers the whole
           // canonical; seq density proves it left no hole behind.
           const v = await verifyLane(db, key, canonicalBytes, store);

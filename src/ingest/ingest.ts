@@ -237,6 +237,17 @@ export interface IngestCommitInput {
    *  (authoritative live/mirror/gateway writes) applies incoming attribution
    *  UNCONDITIONALLY — including an authoritative unassign-to-null — unchanged. */
   recovered?: boolean;
+  /** Compare-and-swap for an incremental repair. The reconciler slices the tail
+   *  to append starting at the byte count it observed, but that observation is
+   *  made at scan time — minutes before the repair runs — and a live session may
+   *  have committed more since. Appending from a stale offset would re-insert
+   *  turns the live write already indexed, and a duplicate lane is still dense
+   *  and still covers the canonical, so no verification downstream can see it.
+   *
+   *  Set this to the byte count the slice was taken from. It is re-checked INSIDE
+   *  the transaction, under the per-session advisory lock, and a mismatch aborts
+   *  with IndexAdvancedError so the caller can fall back to a full rebuild. */
+  expectIndexedBytes?: number;
   /** The reconciler has determined this row must be rebuilt (absent,
    *  content-less, or behind its canonical). Lets a recovered write materialise
    *  over an EXISTING row, which the plain recovered guard refuses so a restore
@@ -264,6 +275,15 @@ interface ResolvedDimensions {
 export class ParentSessionNotIndexedError extends Error {
   constructor(public readonly sessionId: string) {
     super("parent_session_not_indexed");
+  }
+}
+
+/** A live write landed between the reconciler slicing a tail and the repair
+ *  reaching the lock, so the offset the slice was taken from is no longer the
+ *  indexed length. Appending anyway would duplicate turns. */
+export class IndexAdvancedError extends Error {
+  constructor(public readonly expected: number, public readonly actual: number) {
+    super("index_advanced");
   }
 }
 
@@ -568,6 +588,16 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // guarantor would find the stub as an orphan (0.19.0 makes it one) and then
     // no-op on arrival, looping forever without ever repairing it.
     if (input.recovered && !input.rebuild && existing && (existing.eventCount ?? 0) > 0) return null;
+
+    // CAS: the slice is only valid if the lane is still exactly where it was when
+    // the tail was cut. Checked here because this is the first point under the
+    // per-session advisory lock, so nothing can move it between check and write.
+    if (input.expectIndexedBytes !== undefined) {
+      const actual = Number(existing?.bytesUploaded ?? 0);
+      if (actual !== input.expectIndexedBytes) {
+        throw new IndexAdvancedError(input.expectIndexedBytes, actual);
+      }
+    }
 
     const prev = input.replace ? undefined : existing;
     const rollup = {
