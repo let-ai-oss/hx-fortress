@@ -820,6 +820,79 @@ describe.if(!!DSN)("Component G — agent lanes are checked and repaired like pa
   const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
   const AGENT = "agent-1";
 
+  test("lane verification measures the LANE's canonical, not the parent's", async () => {
+    // The lane row is found via the parent key, but the object to re-measure is
+    // the `sid:a:agentId` composite. Statting the parent instead compares a lane
+    // against the wrong file: with a parent BIGGER than the lane it reports a
+    // healthy lane as an integrity failure, and with the far commoner tiny parent
+    // it passes trivially and verifies nothing at all.
+    const key: SessionKey = {
+      userId: `lanestat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const parentText = body(20); // deliberately MUCH larger than the lane
+    const laneHead = body(2);
+    const laneWhole = body(8);
+    await ingestCommit(db, {
+      key, chunkId: "p1", replace: false, chunkText: parentText,
+      totalBytes: Buffer.byteLength(parentText), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestAgentCommit(db, {
+      key, agentId: AGENT, chunkId: "a1", replace: false, chunkText: laneHead,
+      totalBytes: Buffer.byteLength(laneHead), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [
+        { ...key, bytes: Buffer.byteLength(parentText) },
+        { ...key, sessionId: `${key.sessionId}:a:${AGENT}`, bytes: Buffer.byteLength(laneWhole) },
+      ],
+      readCanonicalText: async (k: SessionKey) =>
+        k.sessionId.includes(":a:") ? laneWhole : parentText,
+      statCanonical: async (k: SessionKey) =>
+        Buffer.byteLength(k.sessionId.includes(":a:") ? laneWhole : parentText),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    // Statting the parent would make the repaired lane (768 B) look short of the
+    // parent canonical (~1.9 kB) and report a false integrity failure.
+    expect(res.integrityFailures).toBe(0);
+    expect(res.repairedFull).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a canonical that parses to NOTHING is restored once, not every pass forever", async () => {
+    // Unique repair keys removed an accidental loop-breaker: a zero-event row is
+    // excluded by the INDEXED gate, so it looks orphaned again next pass. Under
+    // the old constant key iteration 2+ was a free no-op; now every iteration is
+    // a real replace txn, a fresh ingest-event row, and a slot of the per-pass
+    // repair cap — every hour, indefinitely.
+    const key: SessionKey = {
+      userId: `empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    // Must parse to ZERO events. An unknown record type still counts as one
+    // event, so the row keeps event_count > 0 and never enters the loop; a
+    // whitespace-only canonical is the real shape (bytes > 0, nothing to index).
+    const nothing = "\n\n\n";
+    const canonicals = new Map<string, string>([[canonicalObject(key), nothing]]);
+    const store = {
+      ...memStore(canonicals),
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(nothing) }],
+      statCanonical: async () => Buffer.byteLength(nothing),
+    } as unknown as SessionStore;
+
+    const first = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    const second = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    const third = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(first.restored).toBe(1);
+    // …and then it must stop. A loop here silently eats the repair budget.
+    expect(second.restored).toBe(0);
+    expect(third.restored).toBe(0);
+    expect(second.orphans).toBe(0);
+  });
+
   test("a partially indexed LANE is detected and fully repaired", async () => {
     const key: SessionKey = {
       userId: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

@@ -133,13 +133,39 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const repairChunkId = (kind: "full" | "tail"): string =>
   `reconcile-${kind}:${crypto.randomUUID()}`;
 
+/** The row's byte count right now — used to re-anchor a compare-and-swap after
+ *  an earlier write in the same iteration moved it. */
+async function currentBytes(db: HxDb, key: SessionKey): Promise<number | undefined> {
+  const [row] = await db
+    .select({ bytes: hxSessions.bytesUploaded })
+    .from(hxSessions)
+    .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+    .where(
+      and(
+        eq(hxUsers.externalId, key.userId),
+        eq(hxSessions.family, key.family),
+        eq(hxSessions.sessionId, key.sessionId),
+        isNull(hxSessions.deletedAt),
+      ),
+    )
+    .limit(1);
+  return row ? Number(row.bytes ?? 0) : undefined;
+}
+
 /** Proof that a session's PARENT lane is whole, not merely present.
  *
  *  Two independent facts, because either alone can be satisfied by damaged data:
  *  the row must claim the canonical's full byte count, AND the lane's seq must be
  *  dense (insertTurns assigns 0,1,2… after max(seq), so count === max+1 exactly
  *  when nothing is missing in the middle). A tail repair that mis-sliced shows up
- *  as a byte mismatch; a lost chunk in the middle shows up as a seq hole. */
+ *  as a byte mismatch; turns deleted from a lane show up as a seq hole.
+ *
+ *  KNOWN GAP: neither fact sees a lost CHUNK. insertTurns numbers from
+ *  max(seq)+1, so a chunk whose commit failed while the next one succeeded
+ *  leaves the lane DENSE, and that next chunk carries the full totalBytes, so it
+ *  is also byte-COVERING. Reproduced: a 9-record canonical indexed as 6 turns
+ *  (records 3-5 absent) passes both checks and every detector in this file. Only
+ *  a whole-canonical record count would catch it. */
 async function verifyLane(
   db: HxDb,
   key: SessionKey,
@@ -147,12 +173,17 @@ async function verifyLane(
   store?: SessionStore,
   /** Agent lane to verify. Omitted / null = the parent lane. */
   agentId?: string | null,
+  /** Canonical object to re-measure. For a lane this is the `sid:a:agentId`
+   *  composite, NOT the parent key used to find the row — statting the parent
+   *  compares a lane against the wrong object entirely, and with a median parent
+   *  of one turn that comparison passes trivially. */
+  statKey?: SessionKey,
 ): Promise<{ ok: boolean; bytes: number; turns: number; dense: boolean }> {
   // Re-measure the canonical NOW. The size read at scan time can be minutes old,
   // and for a live session it is already wrong by the time a repair finishes.
   if (store) {
     try {
-      const fresh = await store.statCanonical(key);
+      const fresh = await store.statCanonical(statKey ?? key);
       if (fresh != null) canonicalBytes = fresh;
     } catch {
       // keep the scan-time size — a stat failure must not fail the verification
@@ -228,6 +259,8 @@ const STALE_CEILING_MIN_COUNT = 50;
  *  rebuilds the lane from the whole canonical), so treating it as an orphan is
  *  always safe: a genuinely empty canonical simply rebuilds to the same nothing. */
 const INDEXED = gt(hxSessions.eventCount, 0);
+/** The lane equivalent — a zero-event lane row carries no content either. */
+const LANE_INDEXED = gt(hxSessionAgents.eventCount, 0);
 
 /** The natural key a canonical maps to. Parent lanes key on hx.sessions; agent
  *  lanes (`baseSid:a:agentId`) key on hx.session_agents under their parent, so an
@@ -266,6 +299,9 @@ async function keyExists(db: HxDb, key: SessionKey): Promise<boolean> {
         eq(hxSessionAgents.agentExternalId, agentId),
         isNull(hxSessions.deletedAt),
         isNull(hxSessionAgents.deletedAt),
+        // Same gate as the bulk query: a content-less lane must not veto the
+        // restore of the canonical it is masking.
+        LANE_INDEXED,
       ),
     )
     .limit(1);
@@ -353,7 +389,13 @@ export async function reconcileOrphans(
       .innerJoin(hxTurns, eq(hxTurns.sessionId, hxSessions.id))
       // turns carry the lane ROW id; the sweep keys on the EXTERNAL id.
       .innerJoin(hxSessionAgents, eq(hxSessionAgents.id, hxTurns.agentId))
-      .where(and(isNull(hxSessions.deletedAt), isNotNull(hxTurns.agentId)))
+      .where(
+        and(
+          isNull(hxSessions.deletedAt),
+          isNull(hxSessionAgents.deletedAt),
+          isNotNull(hxTurns.agentId),
+        ),
+      )
       .groupBy(hxUsers.externalId, hxSessions.family, hxSessions.sessionId, hxSessionAgents.agentExternalId)
       .having(dsql`count(*) <> max(${hxTurns.seq}) + 1`);
     for (const h of laneHoles) {
@@ -385,6 +427,42 @@ export async function reconcileOrphans(
     );
   // Lanes hold ~a third of all indexed content, so they get the same byte-level
   // completeness check as parents — keyed on their OWN bytes_uploaded.
+  // Every parent row, gate or no gate. A canonical that parses to nothing leaves
+  // a zero-event row which the INDEXED gate excludes — without this it looks
+  // orphaned again on every pass, forever.
+  const anyRowBytes = new Map<string, number>(
+    (
+      await db
+        .select({
+          ext: hxUsers.externalId,
+          family: hxSessions.family,
+          sessionId: hxSessions.sessionId,
+          bytesUploaded: hxSessions.bytesUploaded,
+        })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(isNull(hxSessions.deletedAt))
+    ).map((r) => [`${r.ext}/${r.family}/${r.sessionId}`, Number(r.bytesUploaded ?? 0)]),
+  );
+  const anyLaneBytes = new Map<string, number>(
+    (
+      await db
+        .select({
+          ext: hxUsers.externalId,
+          family: hxSessions.family,
+          sessionId: hxSessions.sessionId,
+          agentId: hxSessionAgents.agentExternalId,
+          bytesUploaded: hxSessionAgents.bytesUploaded,
+        })
+        .from(hxSessionAgents)
+        .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionAgents.deletedAt)))
+    ).map((r) => [
+      `${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`,
+      Number(r.bytesUploaded ?? 0),
+    ]),
+  );
   const laneBytes = new Map<string, number>();
   for (const r of agents) {
     const k = `${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`;
@@ -400,10 +478,11 @@ export async function reconcileOrphans(
   // regresses flags nearly the whole corpus, and re-ingesting all of it would be
   // far worse than the damage being repaired.
   const staleTotal = keys.reduce((n, k) => {
-    if (k.bytes == null || k.sessionId.includes(AGENT_LANE)) return n;
+    if (k.bytes == null) return n;
     const nat = `${k.userId}/${k.family}/${k.sessionId}`;
     if (!have.has(nat)) return n;
-    return (indexedBytes.get(nat) ?? 0) < k.bytes ? n + 1 : n;
+    const m = k.sessionId.includes(AGENT_LANE) ? laneBytes : indexedBytes;
+    return (m.get(nat) ?? 0) < k.bytes ? n + 1 : n;
   }, 0);
   const ceiling = opts.staleRepairCeiling ?? 0.25;
   const wantRepair = opts.repairStaleIndexes ?? true;
@@ -436,8 +515,10 @@ export async function reconcileOrphans(
   // Base session keys whose PARENT re-ingest threw this pass. ingestAgentCommit
   // inserts a title/turn-less parent stub when the parent row is absent, and that
   // stub would then enter the `have`/keyExists gate and block the parent's real
-  // re-ingest forever (permanent content loss). So if a parent failed this pass,
-  // defer its agent lanes — the parent (still orphaned) retries next sweep first.
+  // re-ingest forever. ingestAgentCommit now throws ParentSessionNotIndexedError
+  // instead of minting one, but the ordering still matters: a lane is only
+  // meaningful under an indexed parent, so if a parent failed this pass, defer
+  // its agent lanes — the parent (still orphaned) retries next sweep first.
   const failedParents = new Set<string>();
   for (const key of keys) {
     res.scanned += 1;
@@ -482,6 +563,26 @@ export async function reconcileOrphans(
       res.deferred += 1; // parent failed this pass → defer the lane to the next sweep
       continue;
     }
+    // A canonical that parses to NOTHING restores to a zero-event row, which
+    // the INDEXED gate then excludes from `have` — so it looks like an orphan
+    // again on the very next pass, forever. Under the old constant repair key
+    // that loop was free (iteration 2+ deduped to a no-op); with unique keys
+    // every iteration is a real replace txn, a fresh ingest-event row, and a
+    // slot of the per-pass cap. Recognise "already restored, and the canonical
+    // genuinely holds nothing" and leave it alone.
+    // …that is: a row already exists, it covers the canonical, and it has no
+    // hole — it is restored, and the canonical genuinely holds no events.
+    // Rebuilding it again would write a fresh ingest-event row and spend a slot
+    // of the per-pass cap, every hour, indefinitely.
+    const alreadyRestoredEmpty = (() => {
+      if (staleRepair) return false;
+      const isLane = key.sessionId.includes(AGENT_LANE);
+      const m = isLane ? anyLaneBytes : anyRowBytes;
+      if (!m.has(natural)) return false;
+      if (gapped.has(natural)) return false;
+      return (m.get(natural) ?? 0) >= (key.bytes ?? 0);
+    })();
+    if (alreadyRestoredEmpty) continue;
     res.orphans += 1;
     try {
       // Re-check at ingest time so we don't redundantly rebuild a row that
@@ -508,10 +609,11 @@ export async function reconcileOrphans(
           deviceId: null,
         },
         recovered: true as const,
-        // The reconciler has already decided this row must be rebuilt (missing,
-        // content-less, or behind its canonical), so the recovered-write guard —
-        // which exists to stop a restore clobbering a LIVE upload — must yield.
-        rebuild: true as const,
+        // Only a repair of an EXISTING row needs the no-clobber guard lifted. An
+        // orphan restore has nothing to override, and passing it there would
+        // strip the protection against a live row materialising between the
+        // existence re-check and the advisory lock.
+        rebuild: staleRepair,
       };
       if (laneIdx >= 0) {
         // Agent lane → the parent session key + the agentId. Lanes get the same
@@ -545,7 +647,7 @@ export async function reconcileOrphans(
             sessionId: baseSid, agentId, family: key.family, reason: laneOutcome.reason,
           });
         } else {
-          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId);
+          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, key);
           if (v.ok) {
             res.repairedFull += 1;
           } else {
@@ -556,8 +658,8 @@ export async function reconcileOrphans(
               turns: v.turns, dense: v.dense,
             });
           }
+          res.restored += 1;
         }
-        res.restored += 1;
       } else {
         const canonicalBytes = key.bytes ?? Buffer.byteLength(chunkText);
 
@@ -567,6 +669,7 @@ export async function reconcileOrphans(
         // end at a newline would slice a record in half, and half a record is the
         // gap this must never create — so that case takes the slow path instead.
         let landed = false;
+        let tailApplied = false;
         const buf = Buffer.from(chunkText, "utf8");
         const canAppendTail =
           (opts.repairTails ?? true) &&
@@ -626,6 +729,7 @@ export async function reconcileOrphans(
               sessionId: key.sessionId, family: key.family, reason: outcome.reason,
             });
           } else if (outcome) {
+            tailApplied = true;
             const v = await verifyLane(db, key, canonicalBytes, store);
             if (v.ok) {
               landed = true;
@@ -641,7 +745,13 @@ export async function reconcileOrphans(
         }
 
         // SLOW PATH — rebuild the whole lane from the canonical.
+        //
+        // If a tail APPLIED and then failed verification, the row's byte count is
+        // no longer what the sweep observed — the tail moved it. Anchoring this
+        // CAS to the stale scan value could never match, so the escalation always
+        // aborted as a phantom live race and the promised rebuild never ran.
         if (!landed) {
+          const rebuildAnchor = tailApplied ? await currentBytes(db, key) : scanBytes;
           let full: Awaited<ReturnType<typeof ingestCommit>>;
           try {
             full = await ingestCommit(db, {
@@ -652,7 +762,7 @@ export async function reconcileOrphans(
               // that window is deleted and never restored — the guarantor
               // destroying data that was fine. Only meaningful when the row
               // already existed; an orphan restore has nothing to compare.
-              ...(scanBytes !== undefined ? { expectIndexedBytes: scanBytes } : {}),
+              ...(rebuildAnchor !== undefined ? { expectIndexedBytes: rebuildAnchor } : {}),
             });
           } catch (err) {
             if (!(err instanceof IndexAdvancedError)) throw err;
@@ -666,11 +776,14 @@ export async function reconcileOrphans(
           }
 
           if (!full.applied) {
+            // A no-op is not a repair. Counting it toward `restored` would also
+            // spend a slot of the per-pass cap on work that did nothing.
             res.noOpRepairs += 1;
             opts.logger?.warn?.("reconciler: full rebuild reported NO-OP", {
               sessionId: key.sessionId, family: key.family, reason: full.reason,
             });
           } else {
+            res.restored += 1;
             const v = await verifyLane(db, key, canonicalBytes, store);
             if (v.ok) {
               res.repairedFull += 1;
@@ -682,8 +795,9 @@ export async function reconcileOrphans(
               });
             }
           }
+        } else {
+          res.restored += 1; // the tail landed and verified
         }
-        res.restored += 1;
       }
     } catch (err) {
       // A parse failure, a missing canonical, or a transient DB/store error must
