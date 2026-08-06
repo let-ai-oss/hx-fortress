@@ -205,13 +205,23 @@ describe("per-role pool profiles — background repair can never spend the live 
     });
     // Reads never take the per-session advisory lock, so they need no bound.
     expect(hxPoolOptionsFor("ro", {}).connection).toEqual({ statement_timeout: 120_000 });
-    // The guarantor HOLDS the lock during a restore — bounding its wait would
-    // just make it abandon its own work.
-    expect(hxPoolOptionsFor("bg", {}).connection).toEqual({ statement_timeout: 120_000 });
+    // The guarantor holds the lock while rebuilding, so it keeps the long
+    // statement budget — but it WAITS for that lock whenever live ingest holds
+    // the same session, and unbounded that wait starves its own small pool.
+    expect(hxPoolOptionsFor("bg", {}).connection).toEqual({
+      statement_timeout: 120_000,
+      lock_timeout: 15_000,
+    });
   });
 
   test("bg is a small, SEPARATE allocation — the isolation the outage needed", () => {
     expect(hxPoolOptionsFor("bg", {}).max).toBe(2);
+    // Bounded, and longer than the live path: a restore is worth queueing for.
+    const bgLock = hxPoolOptionsFor("bg", {}).connection?.lock_timeout ?? 0;
+    const liveLock = hxPoolOptionsFor("rw", {}).connection?.lock_timeout ?? 0;
+    expect(bgLock).toBeGreaterThan(liveLock);
+    expect(bgLock).toBeLessThan(hxPoolOptionsFor("bg", {}).connection?.statement_timeout ?? 0);
+    expect(hxPoolOptionsFor("bg", { FORTRESS_DB_BG_LOCK_TIMEOUT_MS: "0" }).connection?.lock_timeout).toBeUndefined();
     expect(hxPoolOptionsFor("rw", {}).max).toBe(10);
     expect(hxPoolOptionsFor("bg", { FORTRESS_DB_BG_POOL_MAX: "3" }).max).toBe(3);
   });
