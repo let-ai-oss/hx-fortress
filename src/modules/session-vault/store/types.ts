@@ -73,6 +73,13 @@ export interface DeleteSessionOptions {
   batchLimit?: number;
 }
 
+/** One canonical object as the store LISTS it. `bytes` is the object size the
+ *  list response already carries (GCS File.metadata.size, S3 Contents[].Size), so
+ *  it costs no extra round-trip — it lets the guarantor ask whether an index is
+ *  COMPLETE relative to its transcript, not merely whether a row exists. Optional
+ *  because a store may not report it; absent simply means "cannot judge". */
+export type CanonicalEntry = SessionKey & { bytes?: number };
+
 export interface SessionStore {
   /** Mint a signed PUT URL for a staging chunk. The caller PUTs raw NDJSON bytes. */
   signStagingUpload(key: SessionKey, chunkId: string): Promise<SignedUpload>;
@@ -107,7 +114,7 @@ export interface SessionStore {
    *  name-only (no metadata read / no download) — the discovery primitive for
    *  the G reconciler's orphan anti-join. Whole-bucket scan; agent lanes appear
    *  as their `:a:` composite sessionId. */
-  listAllCanonicalKeys(): Promise<SessionKey[]>;
+  listAllCanonicalKeys(): Promise<CanonicalEntry[]>;
   /** Prove the bucket + credentials actually work: write→read→delete a
    *  throwaway probe object. Throws on any failure. Run at enroll time (so a
    *  bad bucket/permission surfaces immediately, not at the first session) and

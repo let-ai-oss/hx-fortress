@@ -92,6 +92,28 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 // making it structurally impossible to spend the live ingest budget.
 const DEFAULT_BG_POOL_MAX = 2;
 
+// Server-side statement bound for the LIVE INGEST pool (ms).
+//
+// The shared 120 s budget is right for the read path (hx_text_occurrences is a
+// deliberately uncapped corpus count) and for background restores (a whole
+// transcript replayed in one transaction). It is badly wrong for live ingest,
+// because the vault RPC abandons at FORTRESS_DB_RPC_DEADLINE_MS (25 s) and
+// racePgPhase never cancels: a commit nobody is waiting for any more kept its
+// pooled connection for up to another 95 s. That is why, once lock contention
+// was removed, the dominant remaining failure in production was the pool's own
+// acquire bound — connections held by transactions that had already lost their
+// caller.
+//
+// 30 s sits just ABOVE the RPC deadline, so the caller still wins the race and
+// returns a typed error, and the server then reclaims the connection ~5 s later
+// instead of ~95 s. Live chunks are deltas measured in milliseconds, so this is
+// enormous headroom for them. The one shape that can exceed it — a
+// whole-transcript writeCanonical producer — is exactly the shape whose failure
+// path is already safe: the canonical is persisted first, the RPC acks anyway,
+// and the guarantor rebuilds the index on the BACKGROUND pool, which keeps the
+// long budget. Fully or not at all, with the safety net doing the retry.
+const DEFAULT_INGEST_STATEMENT_TIMEOUT_MS = 30_000;
+
 /** Which workload a pool serves. The three differ in how much they may spend and
  *  how long they may block — never in what they may see. */
 export type HxPoolRole = "rw" | "ro" | "bg";
@@ -129,6 +151,16 @@ export function lockTimeoutMs(
 /** Connection ceiling for the live rw/ro pools. */
 export function poolMax(env: Record<string, string | undefined> = process.env): number {
   return countEnv(env, "FORTRESS_DB_POOL_MAX", DEFAULT_POOL_MAX);
+}
+
+/** Server-side statement_timeout (ms) for the live ingest pool. Falls back to
+ *  the shared statement timeout when set to 0 or when the shared one is disabled
+ *  (=0 pooler hatch), so a single knob still strips every startup parameter. */
+export function ingestStatementTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = msEnv(env, "FORTRESS_DB_INGEST_STATEMENT_TIMEOUT_MS", DEFAULT_INGEST_STATEMENT_TIMEOUT_MS);
+  return raw > 0 ? raw : DEFAULT_INGEST_STATEMENT_TIMEOUT_MS;
 }
 
 /** Connection ceiling for the background (guarantor) pool. */
@@ -225,7 +257,19 @@ export function hxPoolOptionsFor(
 ): HxPoolOptions {
   if (role === "bg") return hxPoolOptions(env, { max: backgroundPoolMax(env) });
   if (role === "ro") return hxPoolOptions(env);
-  return hxPoolOptions(env, { lockTimeoutMs: lockTimeoutMs(env) });
+  // Live ingest: bound the statement near the caller's own deadline so an
+  // abandoned commit stops occupying a connection, and bound the lock wait well
+  // under that so a blocked chunk is cheap to retry.
+  //
+  // The ingest bound only ever TIGHTENS the shared one, never loosens it: an
+  // operator who lowers FORTRESS_DB_STATEMENT_TIMEOUT_MS is bounding the whole
+  // fortress and must not find the write path quietly exempt, and the =0 pooler
+  // hatch must still strip every startup parameter.
+  const shared = statementTimeoutMs(env);
+  return hxPoolOptions(env, {
+    lockTimeoutMs: lockTimeoutMs(env),
+    statementTimeoutMs: shared === 0 ? 0 : Math.min(shared, ingestStatementTimeoutMs(env)),
+  });
 }
 
 /** One DSN-free log line describing an effective pool (boot diagnostics): the

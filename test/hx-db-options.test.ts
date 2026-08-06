@@ -193,9 +193,14 @@ describe("migration bounding", () => {
 
 
 describe("per-role pool profiles — background repair can never spend the live budget", () => {
-  test("rw (live ingest) carries lock_timeout; ro and bg do not", () => {
+  test("rw (live ingest) carries lock_timeout AND a statement bound near the RPC deadline", () => {
+    // 30 s sits just above FORTRESS_DB_RPC_DEADLINE_MS (25 s): the caller still
+    // wins the race and returns typed, and the server reclaims the connection
+    // ~5 s later instead of ~95 s. Connections held by transactions that had
+    // already lost their caller were the dominant failure once lock contention
+    // was removed.
     expect(hxPoolOptionsFor("rw", {}).connection).toEqual({
-      statement_timeout: 120_000,
+      statement_timeout: 30_000,
       lock_timeout: 5000,
     });
     // Reads never take the per-session advisory lock, so they need no bound.
@@ -218,7 +223,43 @@ describe("per-role pool profiles — background repair can never spend the live 
 
   test("lock_timeout=0 omits just that param, leaving statement_timeout intact", () => {
     expect(hxPoolOptionsFor("rw", { FORTRESS_DB_LOCK_TIMEOUT_MS: "0" }).connection).toEqual({
-      statement_timeout: 120_000,
+      statement_timeout: 30_000,
     });
+  });
+
+  test("the ingest statement bound is tunable, and stays under the shared read budget", () => {
+    expect(
+      hxPoolOptionsFor("rw", { FORTRESS_DB_INGEST_STATEMENT_TIMEOUT_MS: "45000" }).connection
+        ?.statement_timeout,
+    ).toBe(45_000);
+    // 0 means the default, never "unbounded" — an abandoned commit must always
+    // hand its connection back.
+    expect(
+      hxPoolOptionsFor("rw", { FORTRESS_DB_INGEST_STATEMENT_TIMEOUT_MS: "0" }).connection
+        ?.statement_timeout,
+    ).toBe(30_000);
+    // The read path keeps the long budget: hx_text_occurrences is a deliberately
+    // uncapped corpus count, and background restores replay whole transcripts.
+    expect(hxPoolOptionsFor("ro", {}).connection?.statement_timeout).toBe(120_000);
+    expect(hxPoolOptionsFor("bg", {}).connection?.statement_timeout).toBe(120_000);
+  });
+
+  test("the ingest bound only TIGHTENS the shared one, never loosens it", () => {
+    // An operator lowering the fortress-wide bound must not find the write path
+    // quietly exempt from it.
+    expect(
+      hxPoolOptionsFor("rw", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "5000" }).connection
+        ?.statement_timeout,
+    ).toBe(5000);
+    // …and the =0 pooler hatch still strips every startup parameter.
+    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection).toBeUndefined();
+  });
+
+  test("the ingest bound sits ABOVE the RPC deadline so the caller's typed error wins", () => {
+    const DEADLINE_MS = 25_000; // FORTRESS_DB_RPC_DEADLINE_MS default
+    const ingest = hxPoolOptionsFor("rw", {}).connection?.statement_timeout ?? 0;
+    expect(ingest).toBeGreaterThan(DEADLINE_MS);
+    // …but nowhere near the shared 120 s that let abandoned commits squat.
+    expect(ingest).toBeLessThan(120_000);
   });
 });
