@@ -134,14 +134,26 @@ export function tagLockTimeout(err: unknown): never {
   throw err;
 }
 
-/** True for the two transient classes worth exactly one whole-operation retry:
- *  a connection-lifecycle kill, or a bounded-out advisory-lock WAIT (tagged
- *  positionally). A plain 57014 on a working statement is NOT transient — the
- *  server proved the statement too slow. Pool exhaustion is NOT transient either:
- *  the pool is the resource being retried FOR, so an immediate retry can only
- *  make it scarcer. */
+/** True for the transient classes worth exactly one whole-operation retry: a
+ *  connection-lifecycle kill, or ANY bounded-out lock WAIT.
+ *
+ *  55P03 is transient wherever in the transaction it fires, not only on the
+ *  advisory lock the positional tag covers. lock_timeout is raised strictly
+ *  while WAITING, so the statement never ran and the transaction rolled back
+ *  atomically — a retry is sound by construction. This matters because the
+ *  advisory lock is NOT the contended statement in practice: every concurrent
+ *  ingest upserts the same user/org/project/repo dimension rows, and under load
+ *  that row-lock contention is what trips the bound. Tagging only the advisory
+ *  lock left those surfacing raw and un-retried, which held the post-deploy
+ *  failure rate near 37% until this was widened.
+ *
+ *  A plain 57014 on a working statement is still NOT transient — the server
+ *  proved that statement too slow, and retrying doubles the damage. Pool
+ *  exhaustion is not transient either: the pool is the resource being retried
+ *  FOR, so an immediate retry can only make it scarcer. */
 export function isTransientDbError(err: unknown): boolean {
   if (isPoolExhaustedDbError(err)) return false;
+  if (isLockTimeoutDbError(err)) return true;
   return isKillClassDbError(err) || err instanceof SessionLockTimeoutError;
 }
 
