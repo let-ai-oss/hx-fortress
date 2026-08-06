@@ -14,6 +14,7 @@
 import { Storage, type StorageOptions, type Bucket } from "@google-cloud/storage";
 import type {
   AppendOptions,
+  CanonicalEntry,
   ComposeResult,
   DeleteSessionOptions,
   DeleteSessionResult,
@@ -244,20 +245,25 @@ export class GcsStore implements SessionStore {
     return out;
   }
 
-  async listAllCanonicalKeys(): Promise<SessionKey[]> {
-    const out: SessionKey[] = [];
+  async listAllCanonicalKeys(): Promise<CanonicalEntry[]> {
+    const out: CanonicalEntry[] = [];
     const bucket = this.bucket();
     // Name-only whole-bucket scan (no getMetadata / no download), paginated.
     let query: Record<string, unknown> | null = { autoPaginate: false, maxResults: 1000 };
     while (query) {
       const res = (await bucket.getFiles(query as never)) as unknown as [
-        Array<{ name: string }>,
+        Array<{ name: string; metadata?: { size?: string | number } }>,
         Record<string, unknown> | null,
         unknown,
       ];
       for (const file of res[0]) {
         const key = parseCanonicalKey(file.name);
-        if (key) out.push(key);
+        // The list response already carries size — still no getMetadata, no
+        // download; we just stop throwing the field away.
+        if (key) {
+          const size = Number(file.metadata?.size);
+          out.push(Number.isFinite(size) ? { ...key, bytes: size } : key);
+        }
       }
       query = res[1] ?? null;
     }

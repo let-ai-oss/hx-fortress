@@ -237,6 +237,11 @@ export interface IngestCommitInput {
    *  (authoritative live/mirror/gateway writes) applies incoming attribution
    *  UNCONDITIONALLY — including an authoritative unassign-to-null — unchanged. */
   recovered?: boolean;
+  /** The reconciler has determined this row must be rebuilt (absent,
+   *  content-less, or behind its canonical). Lets a recovered write materialise
+   *  over an EXISTING row, which the plain recovered guard refuses so a restore
+   *  can never clobber a live upload. */
+  rebuild?: boolean;
 }
 
 export interface IngestAgentCommitInput extends IngestCommitInput {
@@ -562,7 +567,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // recovered write MUST be allowed to materialise over it. Without this the
     // guarantor would find the stub as an orphan (0.19.0 makes it one) and then
     // no-op on arrival, looping forever without ever repairing it.
-    if (input.recovered && existing && (existing.eventCount ?? 0) > 0) return null;
+    if (input.recovered && !input.rebuild && existing && (existing.eventCount ?? 0) > 0) return null;
 
     const prev = input.replace ? undefined : existing;
     const rollup = {

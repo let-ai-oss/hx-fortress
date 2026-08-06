@@ -17,6 +17,7 @@
 
 import type {
   AppendOptions,
+  CanonicalEntry,
   ComposeResult,
   DeleteSessionOptions,
   DeleteSessionResult,
@@ -219,7 +220,7 @@ export class GuardedStore implements SessionStore {
     // sessions on a direct-gateway list legitimately exceeds the heavy budget.
     return this.guard("listSessionMetadata", this.scanTimeoutMs, (s) => s.listSessionMetadata(userId));
   }
-  listAllCanonicalKeys(): Promise<SessionKey[]> {
+  listAllCanonicalKeys(): Promise<CanonicalEntry[]> {
     return this.guard("listAllCanonicalKeys", this.scanTimeoutMs, (s) => s.listAllCanonicalKeys());
   }
   selfTest(): Promise<void> {

@@ -20,7 +20,7 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import type { HxDb } from "../host/postgres/db";
 import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
 import { hxUsers } from "../host/postgres/schema/dimensions";
-import type { SessionKey, SessionStore } from "../modules/session-vault/store/types";
+import type { CanonicalEntry, SessionKey, SessionStore } from "../modules/session-vault/store/types";
 import { correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
 import { ingestAgentCommit, ingestCommit } from "./ingest";
@@ -34,6 +34,10 @@ export interface ReconcileOptions {
   maxOrphans?: number;
   /** Also run the title corrective pass (default true). */
   correctExistingTitles?: boolean;
+  /** Re-ingest sessions whose indexed byte count no longer matches their
+   *  canonical. Default false: the pass COUNTS them either way, so the number can
+   *  be read from production before anything acts on it. */
+  repairStaleIndexes?: boolean;
   sleep?: (ms: number) => Promise<void>;
   logger?: {
     warn?(message: string, fields?: Record<string, unknown>): void;
@@ -52,6 +56,11 @@ export interface ReconcileResult {
   deferred: number;
   errors: number;
   titlesCorrected: number;
+  /** Sessions whose row exists but whose indexed byte count differs from the
+   *  canonical the store holds — an index that is BEHIND its transcript, which
+   *  the existence-only scan cannot see. Counted always; repaired only when
+   *  repairStaleIndexes is on. */
+  staleIndexes: number;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -128,6 +137,7 @@ export async function reconcileOrphans(
     deferred: 0,
     errors: 0,
     titlesCorrected: 0,
+    staleIndexes: 0,
   };
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
@@ -137,11 +147,17 @@ export async function reconcileOrphans(
       ext: hxUsers.externalId,
       family: hxSessions.family,
       sessionId: hxSessions.sessionId,
+      bytesUploaded: hxSessions.bytesUploaded,
     })
     .from(hxSessions)
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
     .where(and(isNull(hxSessions.deletedAt), INDEXED));
   const have = new Set(parents.map((r) => `${r.ext}/${r.family}/${r.sessionId}`));
+  // What each indexed PARENT was built from, so a canonical that has grown past
+  // its index can be recognised. Lanes stay existence-only for now.
+  const indexedBytes = new Map(
+    parents.map((r) => [`${r.ext}/${r.family}/${r.sessionId}`, Number(r.bytesUploaded ?? 0)]),
+  );
   const agents = await db
     .select({
       ext: hxUsers.externalId,
@@ -155,7 +171,7 @@ export async function reconcileOrphans(
     .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionAgents.deletedAt)));
   for (const r of agents) have.add(`${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`);
 
-  const keys = await store.listAllCanonicalKeys();
+  const keys: CanonicalEntry[] = await store.listAllCanonicalKeys();
   // A parent (`baseSid`) sorts before its lanes (`baseSid:a:…`), so when both are
   // orphaned the parent is fully re-ingested (turns + real title) before a lane's
   // ingestAgentCommit would create a title-less parent stub that shadows it.
@@ -173,7 +189,23 @@ export async function reconcileOrphans(
   for (const key of keys) {
     res.scanned += 1;
     if (opts.maxOrphans != null && opts.maxOrphans > 0 && res.restored >= opts.maxOrphans) break;
-    if (have.has(`${key.userId}/${key.family}/${key.sessionId}`)) continue;
+    const natural = `${key.userId}/${key.family}/${key.sessionId}`;
+    // Set when this entry is being rebuilt because its index is BEHIND its
+    // canonical rather than missing. The row exists by definition in that case,
+    // so the ingest-time existence re-check below must not veto the repair.
+    let staleRepair = false;
+    if (have.has(natural)) {
+      // The row exists — but does it cover the whole transcript? An index that is
+      // BEHIND its canonical (a chunk whose commit failed while earlier ones
+      // landed) is invisible to an existence check, and no sweep would ever find
+      // it. Byte counts are only compared when the store reported one.
+      const canonicalBytes = key.bytes;
+      if (canonicalBytes == null || key.sessionId.includes(AGENT_LANE)) continue;
+      if (indexedBytes.get(natural) === canonicalBytes) continue;
+      res.staleIndexes += 1;
+      if (!opts.repairStaleIndexes) continue;
+      staleRepair = true; // fall through: rebuild it from the whole canonical
+    }
     const laneIdx = key.sessionId.indexOf(AGENT_LANE);
     const baseSid = laneIdx >= 0 ? key.sessionId.slice(0, laneIdx) : key.sessionId;
     const baseKey = `${key.userId}/${key.family}/${baseSid}`;
@@ -185,8 +217,9 @@ export async function reconcileOrphans(
     try {
       // Re-check at ingest time so we don't redundantly rebuild a row that
       // Component C or a live upload created since the bulk gate was read
-      // (idempotent, avoids wasted re-embeds).
-      if (await keyExists(db, key)) continue;
+      // (idempotent, avoids wasted re-embeds). A stale repair is the one case
+      // where the row is SUPPOSED to be there — skipping the check is the point.
+      if (!staleRepair && (await keyExists(db, key))) continue;
       if (await isSessionDeleted(db, key.userId, key.sessionId)) {
         res.skippedTombstoned += 1;
         continue;
@@ -206,6 +239,10 @@ export async function reconcileOrphans(
           deviceId: null,
         },
         recovered: true as const,
+        // The reconciler has already decided this row must be rebuilt (missing,
+        // content-less, or behind its canonical), so the recovered-write guard —
+        // which exists to stop a restore clobbering a LIVE upload — must yield.
+        rebuild: true as const,
       };
       if (laneIdx >= 0) {
         // Agent lane → the parent session key + the agentId.

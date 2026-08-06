@@ -303,8 +303,10 @@ describe.if(DSN !== "")("PG resilience pins (real Postgres)", () => {
     const [row] = await c`show lock_timeout`;
     // 5 s default, as the profile declares — proving the startup param lands.
     expect(String((row as { lock_timeout: string }).lock_timeout)).toBe("5s");
+    // The live write path is bounded near the caller deadline (25 s), not at the
+    // shared 2 min read budget: an abandoned commit must hand its connection back.
     const [st] = await c`show statement_timeout`;
-    expect(String((st as { statement_timeout: string }).statement_timeout)).toBe("2min");
+    expect(String((st as { statement_timeout: string }).statement_timeout)).toBe("30s");
   });
 
   test("the read profile carries NO lock_timeout (reads never take the session lock)", async () => {

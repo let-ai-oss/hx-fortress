@@ -33,6 +33,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type {
+  CanonicalEntry,
   AppendOptions,
   ComposeResult,
   DeleteSessionOptions,
@@ -263,8 +264,8 @@ export class S3Store implements SessionStore {
     return out;
   }
 
-  async listAllCanonicalKeys(): Promise<SessionKey[]> {
-    const out: SessionKey[] = [];
+  async listAllCanonicalKeys(): Promise<CanonicalEntry[]> {
+    const out: CanonicalEntry[] = [];
     let token: string | undefined;
     do {
       const page = await this.s3.send(
@@ -272,7 +273,7 @@ export class S3Store implements SessionStore {
       );
       for (const obj of page.Contents ?? []) {
         const key = parseCanonicalKey(obj.Key ?? "");
-        if (key) out.push(key);
+        if (key) out.push(typeof obj.Size === "number" ? { ...key, bytes: obj.Size } : key);
       }
       token = page.IsTruncated ? page.NextContinuationToken : undefined;
     } while (token);
