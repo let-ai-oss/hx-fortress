@@ -459,6 +459,12 @@ export async function runFortressHost(
   // opts into the one-time backfill of pre-existing fallback/empty titles (off by
   // default — it re-reads every such canonical, and restores already get their
   // real title from the cascade).
+  // parseBooleanEnv answers "is this truthy", which cannot express "unset means
+  // ON" — reading it that way silently defaults the repair OFF. Unset or
+  // set-but-empty means ON here; only an explicit falsey value disables it.
+  const repairStaleFromEnv = (raw: string | undefined): boolean =>
+    raw === undefined || raw.trim() === "" ? true : parseBooleanEnv(raw);
+
   let guarantor: Guarantor | null = null;
   if (guarantorEnabled()) {
     const maxOrphansRaw = Number(process.env.FORTRESS_GUARANTOR_MAX_ORPHANS_PER_PASS);
@@ -473,7 +479,14 @@ export async function runFortressHost(
       store: () => vaultModule.getStore(),
       logger: bus.scopeFor("guarantor"),
       correctExistingTitles: parseBooleanEnv(process.env.FORTRESS_CORRECT_TITLES),
-      reconcile: { maxOrphans, batchDelayMs },
+      reconcile: {
+        maxOrphans,
+        batchDelayMs,
+        // ON by default: a half-indexed session is precisely what the guarantor
+        // exists to repair. FORTRESS_GUARANTOR_REPAIR_STALE=false leaves the
+        // detection (staleIndexes in every pass) but stops it acting.
+        repairStaleIndexes: repairStaleFromEnv(process.env.FORTRESS_GUARANTOR_REPAIR_STALE),
+      },
     });
     guarantor.start();
     // A known best-effort-mirror failure (PG down / index threw after the

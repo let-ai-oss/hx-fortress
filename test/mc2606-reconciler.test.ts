@@ -338,3 +338,141 @@ describe.if(!!DSN)("Component G — reconciler full restore (MC-2606)", () => {
     expect(agent).toBeTruthy();
   });
 });
+
+
+// A session can be indexed FULLY or NOT AT ALL within one chunk (one
+// transaction), but nothing makes chunk N+1 atomic with chunk N — so a commit
+// that fails after earlier ones landed leaves an index BEHIND its canonical.
+// That row has eventCount > 0, so an existence check calls it indexed and no
+// sweep would ever find it. These pin the completeness check that does.
+describe.if(!!DSN)("Component G — partially indexed sessions (index behind canonical)", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+
+  const uniq = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  /** memStore, but reporting each canonical's SIZE the way a real listing does
+   *  (GCS File.metadata.size / S3 Contents[].Size). */
+  function sizedStore(canonicals: Map<string, string>): SessionStore {
+    const base = memStore(canonicals);
+    return {
+      ...base,
+      listAllCanonicalKeys: async () => {
+        const out: Array<SessionKey & { bytes?: number }> = [];
+        for (const [name, text] of canonicals) {
+          const k = parseCanonicalKey(name);
+          if (k) out.push({ ...k, bytes: Buffer.byteLength(text) });
+        }
+        return out;
+      },
+    } as SessionStore;
+  }
+
+  /** Index only the HEAD of a transcript, then present the store with the WHOLE
+   *  thing — exactly the state a failed tail-chunk commit leaves behind. */
+  async function halfIndexed(user: string, canonicals: Map<string, string>) {
+    const key: SessionKey = { userId: user, family: "claude-cli", sessionId: crypto.randomUUID() };
+    const head = JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: "head" }] } });
+    const whole = `${head}\n${JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: "tail" }] } })}`;
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    canonicals.set(canonicalObject(key), whole);
+    return key;
+  }
+
+  const events = async (key: SessionKey) => {
+    const [row] = await db
+      .select({ n: hxSessions.eventCount })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    return Number(row?.n ?? 0);
+  };
+
+  test("counted as staleIndexes, and repaired by DEFAULT", async () => {
+    const canonicals = new Map<string, string>();
+    const key = await halfIndexed(`stale-default-${uniq()}`, canonicals);
+    expect(await events(key)).toBe(1);
+
+    const res = await reconcileOrphans(db, sizedStore(canonicals), {
+      batchDelayMs: 0,
+      correctExistingTitles: false,
+    });
+    expect(res.staleIndexes).toBe(1);
+    expect(res.restored).toBe(1);
+    // Rebuilt from the WHOLE canonical, through the ordinary restore path.
+    expect(await events(key)).toBe(2);
+  });
+
+  test("repairStaleIndexes:false still DETECTS — turning repair off never blinds the sweep", async () => {
+    const canonicals = new Map<string, string>();
+    const key = await halfIndexed(`stale-off-${uniq()}`, canonicals);
+    const res = await reconcileOrphans(db, sizedStore(canonicals), {
+      batchDelayMs: 0,
+      correctExistingTitles: false,
+      repairStaleIndexes: false,
+    });
+    expect(res.staleIndexes).toBe(1);
+    expect(res.restored).toBe(0);
+    expect(await events(key)).toBe(1);
+  });
+
+  test("a store that reports no size is never judged stale", async () => {
+    const canonicals = new Map<string, string>();
+    const key = await halfIndexed(`stale-nosize-${uniq()}`, canonicals);
+    // memStore's listing carries no bytes — absent means "cannot judge", never
+    // "rebuild it".
+    const res = await reconcileOrphans(db, memStore(canonicals), {
+      batchDelayMs: 0,
+      correctExistingTitles: false,
+    });
+    expect(res.staleIndexes).toBe(0);
+    expect(await events(key)).toBe(1);
+  });
+
+  test("the ceiling refuses a MASS mismatch — a regressed comparison must not re-ingest the corpus", async () => {
+    const canonicals = new Map<string, string>();
+    const user = `stale-mass-${uniq()}`;
+    const keys: SessionKey[] = [];
+    for (let i = 0; i < 60; i += 1) keys.push(await halfIndexed(user, canonicals));
+
+    const refused = await reconcileOrphans(db, sizedStore(canonicals), {
+      batchDelayMs: 0,
+      correctExistingTitles: false,
+    });
+    expect(refused.staleIndexes).toBe(60);
+    expect(refused.restored).toBe(0); // 100% stale — the shape of a broken comparison
+    expect(await events(keys[0]!)).toBe(1);
+
+    // …and yields when an operator raises the ceiling deliberately.
+    const allowed = await reconcileOrphans(db, sizedStore(canonicals), {
+      batchDelayMs: 0,
+      correctExistingTitles: false,
+      staleRepairCeiling: 1,
+    });
+    expect(allowed.restored).toBe(60);
+    expect(await events(keys[0]!)).toBe(2);
+  }, 60_000);
+
+  test("a HANDFUL is always repaired — the ceiling must never strand a small fortress", async () => {
+    const canonicals = new Map<string, string>();
+    const user = `stale-small-${uniq()}`;
+    const key = await halfIndexed(user, canonicals);
+    // 1 of 1 is 100%, far above the 0.25 ratio: only the absolute-count floor
+    // keeps this repairable, which is the case a ratio-only guard got wrong.
+    const res = await reconcileOrphans(db, sizedStore(canonicals), {
+      batchDelayMs: 0,
+      correctExistingTitles: false,
+      staleRepairCeiling: 0,
+    });
+    expect(res.restored).toBe(1);
+    expect(await events(key)).toBe(2);
+  });
+});
