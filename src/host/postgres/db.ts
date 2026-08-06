@@ -163,6 +163,16 @@ export function ingestStatementTimeoutMs(
   return raw > 0 ? raw : DEFAULT_INGEST_STATEMENT_TIMEOUT_MS;
 }
 
+/** Lock-wait bound for the BACKGROUND pool (ms). Longer than the live one — a
+ *  restore is worth queueing for — but bounded, so a repair blocked behind live
+ *  ingest sheds and retries on the next sweep instead of holding a connection
+ *  the sweep needs. `0` omits it (unbounded), the pre-fix behaviour. */
+export function backgroundLockTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return msEnv(env, "FORTRESS_DB_BG_LOCK_TIMEOUT_MS", 15_000);
+}
+
 /** Connection ceiling for the background (guarantor) pool. */
 export function backgroundPoolMax(
   env: Record<string, string | undefined> = process.env,
@@ -255,7 +265,20 @@ export function hxPoolOptionsFor(
   role: HxPoolRole,
   env: Record<string, string | undefined> = process.env,
 ): HxPoolOptions {
-  if (role === "bg") return hxPoolOptions(env, { max: backgroundPoolMax(env) });
+  // Background repair needs a lock bound too. It HOLDS the per-session advisory
+  // lock while rebuilding, which is why it gets a longer statement budget — but
+  // it also WAITS for that lock whenever live ingest holds the same session, and
+  // unbounded that wait squats one of only a couple of connections for the whole
+  // statement budget. Two such waits exhaust the pool and the sweep starves
+  // itself: exactly the "Idle timeout reached after 10s" that stalled the first
+  // stale-repair pass in production. Longer than the live bound (a restore is
+  // worth waiting for) but nowhere near the statement budget.
+  if (role === "bg") {
+    return hxPoolOptions(env, {
+      max: backgroundPoolMax(env),
+      lockTimeoutMs: backgroundLockTimeoutMs(env),
+    });
+  }
   if (role === "ro") return hxPoolOptions(env);
   // Live ingest: bound the statement near the caller's own deadline so an
   // abandoned commit stops occupying a connection, and bound the lock wait well
