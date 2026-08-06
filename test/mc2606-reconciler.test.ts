@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 
 import { createHxDb, type HxDb } from "../src/host/postgres/db";
 import { runMigrations } from "../src/host/postgres/migrate";
@@ -474,5 +474,127 @@ describe.if(!!DSN)("Component G — partially indexed sessions (index behind can
     });
     expect(res.restored).toBe(1);
     expect(await events(key)).toBe(2);
+  });
+});
+
+
+// The integrity contract: after the guarantor touches a session it is FULLY
+// indexed, or the pass says so out loud. A tail that lands with a hole behind it
+// is the one outcome that must be impossible.
+describe.if(!!DSN)("Component G — integrity of a repaired session", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+
+  function sized(canonicals: Map<string, string>): SessionStore {
+    return {
+      ...memStore(canonicals),
+      listAllCanonicalKeys: async () => {
+        const out: Array<SessionKey & { bytes?: number }> = [];
+        for (const [name, text] of canonicals) {
+          const k = parseCanonicalKey(name);
+          if (k) out.push({ ...k, bytes: Buffer.byteLength(text) });
+        }
+        return out;
+      },
+    } as SessionStore;
+  }
+
+  /** Index the first `head` records of an `total`-record transcript, then present
+   *  the store with the whole thing. */
+  async function halfIndexed(head: number, total: number, canonicals: Map<string, string>) {
+    const key: SessionKey = {
+      userId: `integrity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const lines = Array.from({ length: total }, (_, i) => rec(`turn ${i}`));
+    const prefix = `${lines.slice(0, head).join("\n")}\n`;
+    const whole = `${lines.join("\n")}\n`;
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: prefix,
+      totalBytes: Buffer.byteLength(prefix), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    canonicals.set(canonicalObject(key), whole);
+    return { key, whole };
+  }
+
+  /** Turn count, max seq and whether the lane is dense (no holes). */
+  async function lane(key: SessionKey) {
+    const [row] = await db
+      .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const turns = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    const seqs = turns.map((t) => Number(t.seq)).sort((a, b) => a - b);
+    return {
+      id: row!.id,
+      bytes: Number(row!.bytes ?? 0),
+      turns: seqs.length,
+      dense: seqs.length === (seqs[seqs.length - 1] ?? -1) + 1,
+    };
+  }
+
+  test("a cleanly-behind index is repaired by APPENDING the tail, and verified dense", async () => {
+    const canonicals = new Map<string, string>();
+    const { key, whole } = await halfIndexed(3, 10, canonicals);
+    const res = await reconcileOrphans(db, sized(canonicals), { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(res.repairedTail).toBe(1);
+    expect(res.integrityFailures).toBe(0);
+    const l = await lane(key);
+    expect(l.turns).toBe(10);
+    expect(l.dense).toBe(true);
+    expect(l.bytes).toBe(Buffer.byteLength(whole));
+  });
+
+  test("an index ending MID-RECORD is never sliced — it falls back to a full rebuild", async () => {
+    const canonicals = new Map<string, string>();
+    const { key, whole } = await halfIndexed(3, 10, canonicals);
+    // Claim a prefix length that does not land on a newline: slicing there would
+    // append half a record, which is the gap this must never create.
+    const l0 = await lane(key);
+    await db.update(hxSessions).set({ bytesUploaded: l0.bytes - 7 }).where(eq(hxSessions.id, l0.id));
+
+    const res = await reconcileOrphans(db, sized(canonicals), { batchDelayMs: 0, correctExistingTitles: false });
+    expect(res.repairedTail).toBe(0);
+    expect(res.repairedFull).toBe(1);
+    expect(res.integrityFailures).toBe(0);
+    const l = await lane(key);
+    expect(l.turns).toBe(10);
+    expect(l.dense).toBe(true);
+    expect(l.bytes).toBe(Buffer.byteLength(whole));
+  });
+
+  test("a hole in the MIDDLE is detected by seq density — bytes alone cannot see it", async () => {
+    const canonicals = new Map<string, string>();
+    const { key } = await halfIndexed(10, 10, canonicals); // fully indexed…
+    const l0 = await lane(key);
+    expect(l0.dense).toBe(true);
+    // …then lose one turn from the middle. bytes_uploaded still matches the
+    // canonical exactly, so the byte comparison reports nothing wrong.
+    await db.delete(hxTurns).where(and(eq(hxTurns.sessionId, l0.id), isNull(hxTurns.agentId), eq(hxTurns.seq, 4)));
+    expect((await lane(key)).dense).toBe(false);
+
+    const res = await reconcileOrphans(db, sized(canonicals), { batchDelayMs: 0, correctExistingTitles: false });
+    expect(res.gappedLanes).toBe(1);
+    expect(res.staleIndexes).toBe(0); // byte counts agree — density is what caught it
+    expect(res.repairedFull).toBe(1); // a hole cannot be appended away
+    expect(res.integrityFailures).toBe(0);
+
+    const l = await lane(key);
+    expect(l.turns).toBe(10);
+    expect(l.dense).toBe(true);
   });
 });
