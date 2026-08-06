@@ -15,7 +15,7 @@
 // caller's responsibility (the scheduler), non-throwing per session.
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
@@ -56,6 +56,15 @@ export interface ReconcileResult {
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** A parent row with ZERO events carries no content: it is either a stub minted
+ *  by a pre-0.19.0 agent-lane commit that arrived before its parent, or a restore
+ *  that never completed. Such a row must NOT count as "indexed" — otherwise it
+ *  masks its own canonical from the orphan scan and the session stays content-less
+ *  forever (the permanent-loss shape). Re-ingesting is idempotent (replace: true
+ *  rebuilds the lane from the whole canonical), so treating it as an orphan is
+ *  always safe: a genuinely empty canonical simply rebuilds to the same nothing. */
+const INDEXED = gt(hxSessions.eventCount, 0);
+
 /** The natural key a canonical maps to. Parent lanes key on hx.sessions; agent
  *  lanes (`baseSid:a:agentId`) key on hx.session_agents under their parent, so an
  *  already-indexed lane isn't mistaken for an orphan and re-ingested every sweep. */
@@ -72,6 +81,7 @@ async function keyExists(db: HxDb, key: SessionKey): Promise<boolean> {
           eq(hxSessions.family, key.family),
           eq(hxSessions.sessionId, key.sessionId),
           isNull(hxSessions.deletedAt),
+          INDEXED,
         ),
       )
       .limit(1);
@@ -130,7 +140,7 @@ export async function reconcileOrphans(
     })
     .from(hxSessions)
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
-    .where(isNull(hxSessions.deletedAt));
+    .where(and(isNull(hxSessions.deletedAt), INDEXED));
   const have = new Set(parents.map((r) => `${r.ext}/${r.family}/${r.sessionId}`));
   const agents = await db
     .select({

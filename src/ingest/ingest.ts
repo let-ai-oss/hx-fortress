@@ -558,7 +558,11 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // snapshot. G's reconciler already skips existing rows; this closes the
     // check→lock race for a fresh, actively-uploading orphan (the inactive 1,531
     // backlog can never reach it).
-    if (input.recovered && existing) return null;
+    // …but a row with ZERO events is a content-less stub, not a live upload, so a
+    // recovered write MUST be allowed to materialise over it. Without this the
+    // guarantor would find the stub as an orphan (0.19.0 makes it one) and then
+    // no-op on arrival, looping forever without ever repairing it.
+    if (input.recovered && existing && (existing.eventCount ?? 0) > 0) return null;
 
     const prev = input.replace ? undefined : existing;
     const rollup = {
