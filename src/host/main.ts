@@ -478,12 +478,14 @@ export async function runFortressHost(
       Number.isFinite(maxOrphansRaw) && maxOrphansRaw > 0
         ? Math.trunc(maxOrphansRaw)
         : DEFAULT_MAX_ORPHANS_PER_PASS;
-    // Sessions the COUNT sweep proves per pass. This is the only detector for
-    // damage the byte-staleness gate cannot see — a record lost from the middle
-    // of a canonical, duplication, or a watermark stamped larger than what was
-    // indexed. Such a session reads as healthy and is otherwise never
-    // re-examined by anything, so without this the corpus is never provably
-    // whole, only never-observed-to-be-broken.
+    // Sessions the COUNT sweep checks per pass. It is the only detector for
+    // records lost from the MIDDLE of a canonical — the lane stays seq-dense and
+    // byte-covering, so the byte-staleness gate never selects it and nothing
+    // else ever re-examines it.
+    //
+    // Its strength is a LOWER bound, not a proof of wholeness: parseChunk is
+    // stateful across the text, so an append-built lane legally holds more turns
+    // than parse(whole) yields and that direction is reported, never acted on.
     //
     // It costs one canonical read per session, hence a small per-pass cap and an
     // oldest-verified-first rotation rather than a whole-corpus scan.

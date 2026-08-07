@@ -1601,6 +1601,128 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect((await rowOf()).map((r) => r.id).sort()).toEqual(before);
   });
 
+  // C1-ROUND-2 REGRESSION. The tail-repair verify gates a DESTRUCTIVE
+  // escalation. Demanding an exact count there failed a perfectly good tail
+  // append on an append-built Codex lane and rebuilt the session, deleting the
+  // turns the tail had just landed. The count is a lower bound on that path.
+  test("a tail repair on an append-built lane verifies instead of being rebuilt", async () => {
+    const key: SessionKey = {
+      userId: `tailcodex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "codex-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const ri = (t: string, role: string) =>
+      JSON.stringify({
+        type: "response_item", timestamp: TS,
+        payload: { type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text: t }] },
+      }) + "\n";
+    const ev = JSON.stringify({
+      type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: "c" },
+    }) + "\n";
+    const head = ri("a", "assistant") + ri("b", "user");
+    const whole = head + ev;
+    // parse(whole) collapses to fewer turns than the appended pieces yield.
+    expect(parseChunk(whole).turns.length).toBeLessThan(
+      parseChunk(head).turns.length + parseChunk(ev).turns.length,
+    );
+
+    await ingestCommit(db, {
+      key, chunkId: "tc-1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
+    });
+
+    // The tail landed and VERIFIED. A full rebuild here would have deleted the
+    // head's turns and reinserted the collapsed whole-parse.
+    expect(res.repairedTail).toBe(1);
+    expect(res.verifyFallbacks).toBe(0);
+    expect(res.repairedFull).toBe(0);
+
+    const [row] = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const turns = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    // Everything the appends produced is still there.
+    expect(turns.length).toBeGreaterThanOrEqual(parseChunk(head).turns.length);
+  });
+
+  // The rotation cursor is the thing that stops an unprovable row parking itself
+  // at the head of the queue forever. Pin that a FAILED check still advances it
+  // while leaving the row unverified.
+  test("a row the sweep cannot check still advances the rotation cursor", async () => {
+    const key: SessionKey = {
+      userId: `cursor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const text = body(4);
+    await ingestCommit(db, {
+      key, chunkId: "cu-1", replace: false, chunkText: text,
+      totalBytes: Buffer.byteLength(text), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async () => { throw new Error("canonical unreadable"); },
+      statCanonical: async () => null,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+    expect(res.deepErrors).toBeGreaterThanOrEqual(1);
+
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    // Never claimed as checked-clean…
+    expect(row!.ok).toBeNull();
+    // …but the cursor MOVED, or this row sits at the head of the queue forever
+    // and the sweep never reaches another one.
+    expect(row!.tried).not.toBeNull();
+  });
+
+  // The stand-down must happen before the pass does any work at all — a check
+  // after the bulk gate protects nothing, the database has already paid.
+  test("a saturated pass issues no queries and lists no canonicals", async () => {
+    let listed = 0;
+    const store = {
+      listAllCanonicalKeys: async () => { listed += 1; return []; },
+      readCanonicalText: async () => { throw new Error("must not read"); },
+      statCanonical: async () => null,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000, isSaturated: () => true,
+    });
+
+    expect(res.yieldedToLive).toBe(1);   // one stand-down is one event
+    expect(res.scanned).toBe(0);         // the bulk gate never ran
+    expect(listed).toBe(0);              // the bucket was never listed
+    expect(res.deepVerifyBacklog).toBeNull();
+  });
+
   // "Is the corpus whole?" is only answerable if you can see how much of it has
   // never been looked at. A clean pass over a slice proves nothing about the
   // rest, so the backlog is the number that makes convergence observable.

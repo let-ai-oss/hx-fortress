@@ -126,10 +126,17 @@ export interface ReconcileResult {
    *  (the count sweep). Progress, not damage — it is the denominator for the
    *  three counters below. */
   deepVerified: number;
-  /** Deep-verified sessions whose indexed turn count did NOT match the records
-   *  their canonical parses to. THE counter for damage the byte gate cannot see:
-   *  a record lost from the middle, duplication, or an over-stamped watermark.
-   *  Non-zero means real corruption exists that nothing else would have found. */
+  /** Sessions holding FEWER turns than their canonical parses to — records that
+   *  are genuinely missing, which the byte gate cannot see because the lane is
+   *  still seq-dense and byte-covering.
+   *
+   *  Scope, stated precisely because the weaker claim is the true one: this is a
+   *  LOWER-BOUND check. parseChunk is stateful across the text, so an
+   *  append-built lane legally holds MORE than parse(whole) and that direction
+   *  proves nothing. It therefore detects missing records; it does NOT detect
+   *  duplication (that lands in `deepOvercount`, unactioned) and it does NOT
+   *  detect a watermark stamped larger than what was indexed when the turns
+   *  themselves are intact. Those need their own oracles. */
   deepMismatched: number;
   /** Deep-verify mismatches that a rebuild then made whole (count now exact). */
   deepRepaired: number;
@@ -142,16 +149,21 @@ export interface ReconcileResult {
    *  is therefore expected to be non-zero on a healthy corpus and is NOT a
    *  damage signal — detecting genuine duplication needs its own oracle. */
   deepOvercount: number;
-  /** Sessions + lanes that have NEVER been proven against their canonical, or
+  /** Sessions + lanes not yet CHECKED against their canonical's record count, or
    *  `null` when this pass did not measure it (sweep disabled, stood down for
    *  load, or the count query failed).
    *
-   *  Nullable deliberately. This is the honest answer to "is the corpus whole?",
-   *  so "not measured" must never render as `0` — a saturated pass printing
-   *  `deepVerifyBacklog: 0` would read as "fully proven", which is the exact
-   *  opposite of what happened, and it is the case where an operator most needs
-   *  the truth. It rises again as new sessions arrive: they are unproven until
-   *  proven. */
+   *  What zero does and does not mean. Zero means every live row has been
+   *  checked and none was found short of the records its canonical parses to.
+   *  It does NOT mean "provably whole": the check is a lower bound, so a row
+   *  holding the right COUNT of the wrong content, or duplicated content, passes
+   *  it. Read it as "nothing observed missing", which is a real and previously
+   *  unavailable guarantee, not as a proof of wholeness.
+   *
+   *  Nullable deliberately — "not measured" must never render as `0`, because a
+   *  saturated pass printing `0` would read as the strongest possible claim
+   *  after having checked nothing at all. It rises again as new sessions
+   *  arrive: they are unchecked until checked. */
   deepVerifyBacklog: number | null;
   /** Repairs the no-clobber guard REFUSED because a live row was already there —
    *  the guard working as intended, not a defect. Counted apart from noOpRepairs
@@ -248,6 +260,9 @@ async function verifyLane(
   store?: SessionStore,
   /** Agent lane to verify. Omitted / null = the parent lane. */
   agentId?: string | null,
+  /** How to compare `expectedTurns`. `exact` only after a replace, where the
+   *  lane was built from precisely this text; `atLeast` everywhere else. */
+  countMode?: "exact" | "atLeast",
   /** Records the canonical PARSES to for this lane — the only ground truth for
    *  completeness. Bytes and density both miss a lost middle record (a 9-record
    *  canonical indexed as 6 is still seq-dense and can still be byte-covering)
@@ -345,7 +360,21 @@ async function verifyLane(
   // canonical's own record count to what is indexed can. When the caller can
   // supply that count it decides the verdict, with bytes/density kept as the
   // cheap corroborating checks.
-  const countOk = expectedTurns == null || turns === expectedTurns;
+  // How to read the count, and why it is not one rule.
+  //
+  // After a REPLACE the lane was built from exactly this text in one pass, so
+  // `turns === expected` holds by construction and equality is the strongest
+  // check available.
+  //
+  // After a TAIL APPEND it does not. parseChunk is stateful across the whole
+  // text, so a lane built by appending chunks holds the SUM of per-chunk parses,
+  // which is >= parse(whole) — measured: a Codex lane appended as 3 turns parses
+  // whole to 1. Demanding equality there fails a perfectly good tail repair and
+  // escalates to a full rebuild that DELETES those three turns and reinserts
+  // one. The count is a lower bound on that path and nothing more.
+  const countOk =
+    expectedTurns == null ||
+    ((countMode ?? "atLeast") === "exact" ? turns === expectedTurns : turns >= expectedTurns);
   return {
     ok: bytesOk && dense && countOk,
     bytes,
@@ -504,6 +533,19 @@ export async function reconcileOrphans(
     deepVerifyBacklog: null,
   };
 
+  // Stand down before ANY of the pass's work. What follows is the most expensive
+  // thing the guarantor does — a full scan of hx.sessions, two grouped
+  // aggregates over hx.turns (14 GB with two GIN indexes on the reference
+  // deployment), further scans, and a whole-bucket listing from object storage.
+  // A check placed after the bulk gate protects nothing: the database has
+  // already paid. Repair has no caller waiting on it, so on a starved database
+  // the correct move is to do nothing at all and return.
+  if (opts.isSaturated?.()) {
+    res.yieldedToLive += 1;
+    opts.logger?.info?.("reconciler: live pool saturated — pass stood down before any work");
+    return res;
+  }
+
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
   // sessions and agent lanes alike, so neither is re-ingested once indexed.
   const parents = await db
@@ -649,16 +691,6 @@ export async function reconcileOrphans(
     return (m.get(nat) ?? 0) < k.bytes ? n + 1 : n;
   }, 0);
   const ceiling = opts.staleRepairCeiling ?? 0.25;
-  // Stand down BEFORE the bulk gate, not after it. What follows is the most
-  // expensive thing the pass does — a scan of hx.sessions plus grouped
-  // aggregates over hx.turns (14 GB with two GIN indexes on the reference
-  // deployment). Checking saturation only inside the per-key loop meant a
-  // starved database still paid for all of it.
-  if (opts.isSaturated?.()) {
-    res.yieldedToLive += 1;
-    opts.logger?.info?.("reconciler: live pool saturated — pass stood down before the scan");
-    return res;
-  }
   const wantRepair = opts.repairStaleIndexes ?? true;
   // The ceiling guards against ONE thing: a byte comparison that regressed and
   // now flags the whole corpus, where repairing would re-ingest everything. A
@@ -864,7 +896,7 @@ export async function reconcileOrphans(
             });
           }
         } else {
-          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, expectedTurns, key);
+          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, "exact", expectedTurns, key);
           if (v.ok) {
             res.repairedFull += 1;
           } else {
@@ -972,7 +1004,7 @@ export async function reconcileOrphans(
             });
           } else if (outcome) {
             tailApplied = true;
-            const v = await verifyLane(db, key, canonicalBytes, store, null, expectedTurns);
+            const v = await verifyLane(db, key, canonicalBytes, store, null, "atLeast", expectedTurns);
             if (v.ok) {
               landed = true;
               res.repairedTail += 1;
@@ -1055,7 +1087,7 @@ export async function reconcileOrphans(
             }
           } else {
             res.restored += 1;
-            const v = await verifyLane(db, key, canonicalBytes, store, null, expectedTurns);
+            const v = await verifyLane(db, key, canonicalBytes, store, null, "exact", expectedTurns);
             if (v.ok) {
               res.repairedFull += 1;
             } else {
@@ -1103,15 +1135,19 @@ export async function reconcileOrphans(
     if (delay > 0) await sleep(delay);
   }
 
-  // COUNT SWEEP — the only thing that finds damage the byte gate cannot see.
+  // COUNT SWEEP — finds records missing from sessions the byte gate calls fine.
   //
   // Everything above is reached through the staleness gate, which selects a
   // session only when its byte watermark is BEHIND the canonical. That gate is
   // blind by construction to every failure that leaves the byte count looking
-  // right: a record lost from the MIDDLE (the lane stays seq-dense AND
-  // byte-covering), duplication (more turns than records), and a watermark
-  // stamped larger than what was actually indexed. Such a session reads as
-  // healthy, is never selected, and so is never re-examined by anything.
+  // right: records lost from the MIDDLE of a canonical, where the lane stays
+  // seq-dense AND byte-covering. Such a session reads as healthy, is never
+  // selected, and so is never re-examined by anything.
+  //
+  // What it does NOT cover, stated so the counter is not over-read: the oracle
+  // is a LOWER bound (parseChunk is stateful, so an append-built lane legally
+  // holds more than parse(whole)), which means duplication and an over-stamped
+  // watermark with intact turns both pass it. Those need their own detectors.
   //
   // The canonical's own record count is the only detector, and it costs one
   // object read per session — far too much for the whole corpus every pass. So
@@ -1247,10 +1283,23 @@ async function deepVerifySweep(
       res.deepVerified += 1;
 
       if (statBytes != null && statBytes > readBytes) {
-        res.shortReads += 1;
-        opts.logger?.warn?.("reconciler: count sweep read short of the canonical — cannot judge", {
-          sessionId: key.sessionId, family: key.family, readBytes, statBytes,
-        });
+        // The stat is taken AFTER the read, so a session written to in between
+        // legitimately stats larger. That is growth, not a short read, and
+        // conflating them would fire a store-fault alert for every actively
+        // written session on every pass. Either way we cannot judge this text,
+        // so advance the cursor and re-read next rotation.
+        const grew = anchor !== undefined && (await currentBytes(db, key)) !== anchor;
+        if (grew) {
+          res.liveRaces += 1;
+          opts.logger?.info?.("reconciler: session grew during the count read — re-reading next pass", {
+            sessionId: key.sessionId, family: key.family, readBytes, statBytes,
+          });
+        } else {
+          res.shortReads += 1;
+          opts.logger?.warn?.("reconciler: count sweep read short of the canonical — cannot judge", {
+            sessionId: key.sessionId, family: key.family, readBytes, statBytes,
+          });
+        }
         await stampAttempted(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
@@ -1289,6 +1338,16 @@ async function deepVerifySweep(
         canonicalRecords: expected,
         kind: "missing_records",
       });
+
+      // FORTRESS_GUARANTOR_REPAIR_STALE=false is documented as "detection keeps
+      // running, acting stops". It must brake THIS repair too, or an operator
+      // reaching for it to stop a guarantor that is damaging data finds it does
+      // nothing.
+      if (!(opts.repairStaleIndexes ?? true)) {
+        await stampAttempted(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
 
       // Systematic-bug ceiling. If MOST of what we prove comes back mismatched,
       // the likelier explanation is that the comparison itself is wrong — a
@@ -1340,6 +1399,7 @@ async function deepVerifySweep(
           sessionId: key.sessionId, family: key.family,
           expected: err.expected, nowIndexed: err.actual,
         });
+        await stampAttempted(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
@@ -1349,6 +1409,7 @@ async function deepVerifySweep(
         opts.logger?.warn?.("reconciler: count repair reported NO-OP", {
           sessionId: key.sessionId, family: key.family, reason: outcome.reason,
         });
+        await stampAttempted(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
@@ -1454,10 +1515,20 @@ async function deepVerifyLanes(
       res.deepVerified += 1;
 
       if (statBytes != null && statBytes > readBytes) {
-        res.shortReads += 1;
-        opts.logger?.warn?.("reconciler: count sweep read a lane short of its canonical — cannot judge", {
-          sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
-        });
+        // Growth during the read, not a short read — see the parent path.
+        const grew =
+          laneAnchor !== undefined && (await currentLaneBytes(db, row.laneRowId)) !== laneAnchor;
+        if (grew) {
+          res.liveRaces += 1;
+          opts.logger?.info?.("reconciler: lane grew during the count read — re-reading next pass", {
+            sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
+          });
+        } else {
+          res.shortReads += 1;
+          opts.logger?.warn?.("reconciler: count sweep read a lane short of its canonical — cannot judge", {
+            sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
+          });
+        }
         await stampLaneAttempted(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
@@ -1479,6 +1550,12 @@ async function deepVerifyLanes(
         kind: "missing_records",
       });
 
+      if (!(opts.repairStaleIndexes ?? true)) {
+        await stampLaneAttempted(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
       if (
         res.deepMismatched >= DEEP_MISMATCH_CEILING_MIN_COUNT &&
         res.deepMismatched > res.deepVerified * DEEP_MISMATCH_CEILING_RATIO
@@ -1486,6 +1563,11 @@ async function deepVerifyLanes(
         opts.logger?.warn?.("reconciler: count sweep mismatch rate implausible — repairs stood down", {
           mismatched: res.deepMismatched, verified: res.deepVerified,
         });
+        // Advance the cursor even here. The ceiling is armed by counters shared
+        // with the parent sweep, so in the very situation it exists for the lane
+        // loop can trip it on its first row — and leaving every lane unstamped
+        // pins the rotation to the same lanes forever.
+        await stampLaneAttempted(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
@@ -1518,6 +1600,7 @@ async function deepVerifyLanes(
           sessionId: row.sessionId, agentId: row.agentId,
           expected: err.expected, nowIndexed: err.actual,
         });
+        await stampLaneAttempted(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
@@ -1527,6 +1610,7 @@ async function deepVerifyLanes(
         opts.logger?.warn?.("reconciler: lane count repair reported NO-OP", {
           sessionId: row.sessionId, agentId: row.agentId, reason: outcome.reason,
         });
+        await stampLaneAttempted(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
       }

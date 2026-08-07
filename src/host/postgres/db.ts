@@ -124,6 +124,11 @@ const DEFAULT_BG_ACQUIRE_TIMEOUT_MS = 300_000;
  *  maxLifetime, which would otherwise rotate the connection mid-rebuild. */
 const DEFAULT_BG_STATEMENT_TIMEOUT_MS = 600_000;
 
+/** Headroom between the background statement budget and the connection's
+ *  maxLifetime, so a rebuild that fits the budget is not guillotined by a
+ *  rotation that was always going to arrive first. */
+const BG_LIFETIME_MARGIN_MS = 60_000;
+
 // Server-side statement bound for the LIVE INGEST pool (ms).
 //
 // The shared 120 s budget is right for the read path (hx_text_occurrences is a
@@ -218,6 +223,13 @@ export function backgroundAcquireTimeoutMs(
 /** Statement bound for background repair — see DEFAULT_BG_STATEMENT_TIMEOUT_MS.
  *  The =0 pooler hatch still wins: when the shared bound is disabled, no startup
  *  parameters are sent at all and this is not consulted. */
+/** The effective maxLifetime (ms) — the same resolution hxPoolOptions performs,
+ *  exposed so the background budget can be clamped under it. */
+function lifetimeMsFor(env: Record<string, string | undefined>): number {
+  const raw = msEnv(env, "FORTRESS_DB_MAX_LIFETIME_MS", DEFAULT_MAX_LIFETIME_MS);
+  return raw > 0 ? raw : DEFAULT_MAX_LIFETIME_MS;
+}
+
 export function backgroundStatementTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
@@ -340,10 +352,18 @@ export function hxPoolOptionsFor(
       // repair must not be quietly exempt from that. So the background budget
       // applies only while it is the more permissive reading of a default
       // shared bound; an explicitly lowered shared bound wins.
-      statementTimeoutMs:
+      // …and never above what a connection can survive. maxLifetime is measured
+      // from ESTABLISHMENT, not from statement start, and Bun kills the
+      // connection mid-query when it elapses — so a statement budget larger than
+      // the connection lifetime guarantees that some rebuilds are guillotined
+      // part-way regardless. Clamping keeps the budget honest when an operator
+      // shortens maxLifetime.
+      statementTimeoutMs: Math.min(
         statementTimeoutMs(env) < DEFAULT_STATEMENT_TIMEOUT_MS
           ? statementTimeoutMs(env)
           : backgroundStatementTimeoutMs(env),
+        Math.max(1, lifetimeMsFor(env) - BG_LIFETIME_MARGIN_MS),
+      ),
     });
   }
   if (role === "ro") return hxPoolOptions(env);

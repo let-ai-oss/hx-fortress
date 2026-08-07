@@ -20,8 +20,8 @@ import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "t
 import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
 import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { type: "text" };
-import sql0015FkIndexes from "./0015_fk_indexes.sql" with { type: "text" };
-import sql0016DeepVerifyCursor from "./0016_deep_verify_cursor.sql" with { type: "text" };
+import sql0015DeepVerifyCursor from "./0015_deep_verify_cursor.sql" with { type: "text" };
+import sql0016FkIndexes from "./0016_fk_indexes.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -62,10 +62,19 @@ export const migrations: Migration[] = [
   // every cascading delete scan the whole child table ONCE PER DELETED ROW —
   // this is what made guarantor rebuilds run to the statement timeout and starve
   // the background pool. NOT gated. See the file header for the full account.
-  { name: "0015_fk_indexes", sql: sql0015FkIndexes },
-  // Cursor for the count-based completeness sweep. The byte-staleness gate
-  // cannot see a lost middle record, duplication, or an over-stamped watermark;
-  // only the canonical's record count can, and that costs one read per session.
-  // The sweep is therefore incremental and stamps its progress here. NOT gated.
-  { name: "0016_deep_verify_cursor", sql: sql0016DeepVerifyCursor },
+  // ORDER MATTERS, and this pair is deliberately this way round.
+  //
+  // The cursor columns are declared in the drizzle schema, and drizzle expands
+  // `select().from(hxSessions)` into the full declared column list — so LIVE
+  // INGEST fails with "column does not exist" until they are added. They must
+  // therefore land before anything that can fail.
+  //
+  // The index build is the one migration in this repo whose own header warns it
+  // may exceed FORTRESS_DB_MIGRATION_TIMEOUT_MS on a large corpus. If it rolls
+  // back un-journalled with the cursor migration behind it, the provider never
+  // reaches ready and the fortress stops ingesting entirely. Two instant
+  // ADD COLUMNs go first; the risky build goes second, where a rollback costs
+  // only the indexes it was trying to create.
+  { name: "0015_deep_verify_cursor", sql: sql0015DeepVerifyCursor },
+  { name: "0016_fk_indexes", sql: sql0016FkIndexes },
 ];
