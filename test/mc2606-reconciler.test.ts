@@ -1509,4 +1509,43 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)));
     expect(rows.length).toBe(0);
   });
+
+  // "Is the corpus whole?" is only answerable if you can see how much of it has
+  // never been looked at. A clean pass over a slice proves nothing about the
+  // rest, so the backlog is the number that makes convergence observable.
+  test("the backlog reports what has never been proven, and falls as the sweep runs", async () => {
+    const key: SessionKey = {
+      userId: `backlog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(5);
+    await ingestCommit(db, {
+      key, chunkId: "bk-c1", replace: false, chunkText: whole,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    // A pass that proves NOTHING still reports the backlog, so an operator can
+    // never mistake "found nothing" for "everything is verified".
+    const idle = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
+    });
+    expect(idle.deepVerified).toBe(0);
+    expect(idle.deepVerifyBacklog).toBeGreaterThan(0);
+
+    const swept = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    // Everything reachable got proven, so the backlog strictly fell.
+    expect(swept.deepVerifyBacklog).toBeLessThan(idle.deepVerifyBacklog);
+  });
 });

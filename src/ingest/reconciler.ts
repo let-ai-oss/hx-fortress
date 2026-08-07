@@ -136,6 +136,15 @@ export interface ReconcileResult {
   /** Deep verifications that could not be completed (unreadable canonical,
    *  transient DB error). NOT stamped, so they are retried next pass. */
   deepErrors: number;
+  /** Sessions + lanes that have NEVER been proven against their canonical.
+   *
+   *  This is the honest answer to "is the corpus whole?" — until it reaches
+   *  zero, the guarantor has not looked at everything, and a clean pass means
+   *  only that nothing was found in the slice it examined. Watching this fall
+   *  is how an operator sees the corpus converge instead of taking it on faith.
+   *  It rises again whenever new sessions arrive, which is correct: they are
+   *  unproven until proven. */
+  deepVerifyBacklog: number;
   /** Repairs the no-clobber guard REFUSED because a live row was already there —
    *  the guard working as intended, not a defect. Counted apart from noOpRepairs
    *  so the bug signal stays a bug signal. */
@@ -482,6 +491,7 @@ export async function reconcileOrphans(
     deepMismatched: 0,
     deepRepaired: 0,
     deepErrors: 0,
+    deepVerifyBacklog: 0,
   };
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
@@ -1095,6 +1105,17 @@ export async function reconcileOrphans(
     }
     await deepVerifySweep(db, store, opts, res, sleep, delay);
     await deepVerifyLanes(db, store, opts, res, sleep, delay, opts.deepVerifyPerPass ?? 0);
+    // How much of the corpus has still never been proven. Reported every pass so
+    // convergence is observable rather than assumed.
+    const [pending] = await db
+      .select({ n: dsql<number>`count(*)::int` })
+      .from(hxSessions)
+      .where(and(isNull(hxSessions.deletedAt), isNull(hxSessions.deepVerifiedAt)));
+    const [pendingLanes] = await db
+      .select({ n: dsql<number>`count(*)::int` })
+      .from(hxSessionAgents)
+      .where(and(isNull(hxSessionAgents.deletedAt), isNull(hxSessionAgents.deepVerifiedAt)));
+    res.deepVerifyBacklog = Number(pending?.n ?? 0) + Number(pendingLanes?.n ?? 0);
   } catch (err) {
     // Never discard the repair stats already gathered. A stand-down is not a
     // failure and must not be logged as one.

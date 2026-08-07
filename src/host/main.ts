@@ -488,7 +488,14 @@ export async function runFortressHost(
     // It costs one canonical read per session, hence a small per-pass cap and an
     // oldest-verified-first rotation rather than a whole-corpus scan.
     // FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS=0 turns it off.
-    const DEFAULT_DEEP_VERIFY_PER_PASS = 25;
+    // Sized so a FIRST full rotation completes in days, not weeks. The corpus
+    // is sessions + agent lanes (~14.5k on the reference deployment); at the
+    // hourly sweep, 25/pass would take ~24 days to prove everything once, during
+    // which "the corpus is whole" would simply be unknown. 100/pass brings that
+    // under a week, and the pass yields entirely when live ingest is starved, so
+    // the extra reads never come at the live path's expense. `deepVerifyBacklog`
+    // in every pass log is how you watch it converge.
+    const DEFAULT_DEEP_VERIFY_PER_PASS = 100;
     const deepVerifyRaw = Number(process.env.FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS);
     const deepVerifyPerPass = Number.isFinite(deepVerifyRaw)
       ? Math.max(0, Math.trunc(deepVerifyRaw))
