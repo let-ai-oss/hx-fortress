@@ -48,7 +48,11 @@ export interface GuarantorConfig {
   /** Pacing / caps handed to each reconcile pass. */
   reconcile?: Pick<
     ReconcileOptions,
-    "batchDelayMs" | "maxOrphans" | "repairStaleIndexes" | "staleRepairCeiling"
+    | "batchDelayMs"
+    | "maxOrphans"
+    | "repairStaleIndexes"
+    | "staleRepairCeiling"
+    | "deepVerifyPerPass"
   >;
 }
 
@@ -152,6 +156,7 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
           batchDelayMs: cfg.reconcile?.batchDelayMs,
           maxOrphans: cfg.reconcile?.maxOrphans,
           repairStaleIndexes: cfg.reconcile?.repairStaleIndexes,
+          deepVerifyPerPass: cfg.reconcile?.deepVerifyPerPass,
           staleRepairCeiling: cfg.reconcile?.staleRepairCeiling,
           correctExistingTitles: firstPass && correctTitles,
           logger: cfg.logger,

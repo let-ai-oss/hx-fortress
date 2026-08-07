@@ -478,6 +478,21 @@ export async function runFortressHost(
       Number.isFinite(maxOrphansRaw) && maxOrphansRaw > 0
         ? Math.trunc(maxOrphansRaw)
         : DEFAULT_MAX_ORPHANS_PER_PASS;
+    // Sessions the COUNT sweep proves per pass. This is the only detector for
+    // damage the byte-staleness gate cannot see — a record lost from the middle
+    // of a canonical, duplication, or a watermark stamped larger than what was
+    // indexed. Such a session reads as healthy and is otherwise never
+    // re-examined by anything, so without this the corpus is never provably
+    // whole, only never-observed-to-be-broken.
+    //
+    // It costs one canonical read per session, hence a small per-pass cap and an
+    // oldest-verified-first rotation rather than a whole-corpus scan.
+    // FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS=0 turns it off.
+    const DEFAULT_DEEP_VERIFY_PER_PASS = 25;
+    const deepVerifyRaw = Number(process.env.FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS);
+    const deepVerifyPerPass = Number.isFinite(deepVerifyRaw)
+      ? Math.max(0, Math.trunc(deepVerifyRaw))
+      : DEFAULT_DEEP_VERIFY_PER_PASS;
     const batchDelayRaw = Number(process.env.FORTRESS_GUARANTOR_BATCH_DELAY_MS);
     const batchDelayMs =
       Number.isFinite(batchDelayRaw) && batchDelayRaw >= 0 ? Math.trunc(batchDelayRaw) : undefined;
@@ -494,6 +509,7 @@ export async function runFortressHost(
         // exists to repair. FORTRESS_GUARANTOR_REPAIR_STALE=false leaves the
         // detection (staleIndexes in every pass) but stops it acting.
         repairStaleIndexes: repairStaleFromEnv(process.env.FORTRESS_GUARANTOR_REPAIR_STALE),
+        deepVerifyPerPass,
       },
     });
     guarantor.start();

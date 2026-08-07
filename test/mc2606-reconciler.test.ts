@@ -1253,4 +1253,155 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
     expect(rows.length).toBe(10);
   });
+
+  // THE case the byte gate cannot see. A canonical holding 9 records indexed as
+  // 6 is seq-dense (0..5, no holes) and its watermark covers the canonical, so
+  // the staleness gate never selects it and every detector calls it healthy.
+  // Only the canonical's own record count reveals it.
+  test("the count sweep finds records missing from a session the byte gate calls healthy", async () => {
+    const key: SessionKey = {
+      userId: `deep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(9);
+    const short = body(6);
+
+    // Index only 6 records but stamp the FULL canonical size — the exact shape a
+    // lost middle chunk leaves behind: dense, byte-covering, and 3 records light.
+    await ingestCommit(db, {
+      key, chunkId: "deep-c1", replace: false, chunkText: short,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    // Key-aware: this suite shares one database, so a store that answered for
+    // EVERY session would make the sweep judge unrelated rows against this
+    // canonical and trip the systematic-bug ceiling.
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const rowOf = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const t = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)));
+      return t.length;
+    };
+
+    // Pre-state: byte-covering and dense, so the ordinary path has nothing to do.
+    expect(await rowOf()).toBe(6);
+    const blind = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+    });
+    expect(blind.staleIndexes).toBe(0);   // the byte gate sees nothing wrong…
+    expect(await rowOf()).toBe(6);        // …and nothing is repaired
+
+    // With the sweep on, the count is the authority.
+    const swept = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 50,
+    });
+    expect(swept.deepMismatched).toBeGreaterThanOrEqual(1);
+    expect(swept.deepRepaired).toBeGreaterThanOrEqual(1);
+    expect(await rowOf()).toBe(9); // the three missing records are now indexed
+  });
+
+  // A healthy session must be proven and then LEFT ALONE — the sweep must not
+  // rewrite the corpus just because it is looking at it.
+  test("the count sweep stamps a matching session and rebuilds nothing", async () => {
+    const key: SessionKey = {
+      userId: `deepok-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(7);
+    await ingestCommit(db, {
+      key, chunkId: "deepok-c1", replace: false, chunkText: whole,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 50,
+    });
+    // Counters are corpus-wide and this suite shares one database, so the
+    // load-bearing assertions are about THIS session: it stays exactly as it
+    // was, and it gets stamped.
+    expect(res.deepVerified).toBeGreaterThanOrEqual(1);
+
+    const [me] = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const mine = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, me!.id), isNull(hxTurns.agentId)));
+    expect(mine.length).toBe(7); // untouched — proving is not rewriting
+
+    // Proven means stamped, so the rotation moves on instead of re-reading it.
+    const [row] = await db
+      .select({ at: hxSessions.deepVerifiedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.at).not.toBeNull();
+  });
+
+  // A repair that fails to reach the canonical's count must NOT be stamped —
+  // stamping would retire a still-damaged session from the sweep, which is the
+  // exact failure the sweep exists to prevent.
+  test("the count sweep never stamps a session it could not make whole", async () => {
+    const key: SessionKey = {
+      userId: `deepfail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(4);
+    await ingestCommit(db, {
+      key, chunkId: "deepfail-c1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    // An unreadable canonical: the sweep cannot prove anything, so it must
+    // record the failure and leave the row unstamped for the next pass.
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async () => { throw new Error("canonical unreadable"); },
+      statCanonical: async () => Buffer.byteLength(indexed),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 50,
+    });
+    expect(res.deepErrors).toBeGreaterThanOrEqual(1);
+
+    const [row] = await db
+      .select({ at: hxSessions.deepVerifiedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.at).toBeNull();
+  });
 });

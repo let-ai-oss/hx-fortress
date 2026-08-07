@@ -39,6 +39,12 @@ export interface ReconcileOptions {
   batchDelayMs?: number;
   /** Cap on orphans re-ingested this pass (0/undefined = no cap). */
   maxOrphans?: number;
+  /** Sessions the count sweep proves per pass (0 disables it).
+   *
+   *  The sweep costs ONE canonical read per session, which is why it is capped
+   *  and incremental rather than a whole-corpus scan: it works oldest-verified
+   *  first and rotates through the corpus over many passes. */
+  deepVerifyPerPass?: number;
   /** Also run the title corrective pass (default true). */
   correctExistingTitles?: boolean;
   /** Re-ingest sessions whose indexed byte count no longer matches their
@@ -106,6 +112,20 @@ export interface ReconcileResult {
    *  every pass would spend another full rebuild proving the same thing. A
    *  non-zero value means investigate the STORE, not the indexer. */
   shortReads: number;
+  /** Sessions whose record count was PROVEN against their canonical this pass
+   *  (the count sweep). Progress, not damage — it is the denominator for the
+   *  three counters below. */
+  deepVerified: number;
+  /** Deep-verified sessions whose indexed turn count did NOT match the records
+   *  their canonical parses to. THE counter for damage the byte gate cannot see:
+   *  a record lost from the middle, duplication, or an over-stamped watermark.
+   *  Non-zero means real corruption exists that nothing else would have found. */
+  deepMismatched: number;
+  /** Deep-verify mismatches that a rebuild then made whole (count now exact). */
+  deepRepaired: number;
+  /** Deep verifications that could not be completed (unreadable canonical,
+   *  transient DB error). NOT stamped, so they are retried next pass. */
+  deepErrors: number;
   /** Repairs the no-clobber guard REFUSED because a live row was already there —
    *  the guard working as intended, not a defect. Counted apart from noOpRepairs
    *  so the bug signal stays a bug signal. */
@@ -158,7 +178,7 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  *  pass, its own detection is the idempotency gate, `replace` is idempotent, and
  *  the tail is guarded by two compare-and-swaps under the advisory lock. Live
  *  chunk dedupe — where exactly-once genuinely matters — is untouched. */
-const repairChunkId = (kind: "full" | "tail"): string =>
+const repairChunkId = (kind: "full" | "tail" | "count"): string =>
   `reconcile-${kind}:${crypto.randomUUID()}`;
 
 /** The row's byte count right now — used to re-anchor a compare-and-swap after
@@ -444,6 +464,10 @@ export async function reconcileOrphans(
     verifyFallbacks: 0,
     integrityFailures: 0,
     shortReads: 0,
+    deepVerified: 0,
+    deepMismatched: 0,
+    deepRepaired: 0,
+    deepErrors: 0,
   };
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
@@ -1028,6 +1052,27 @@ export async function reconcileOrphans(
     if (delay > 0) await sleep(delay);
   }
 
+  // COUNT SWEEP — the only thing that finds damage the byte gate cannot see.
+  //
+  // Everything above is reached through the staleness gate, which selects a
+  // session only when its byte watermark is BEHIND the canonical. That gate is
+  // blind by construction to every failure that leaves the byte count looking
+  // right: a record lost from the MIDDLE (the lane stays seq-dense AND
+  // byte-covering), duplication (more turns than records), and a watermark
+  // stamped larger than what was actually indexed. Such a session reads as
+  // healthy, is never selected, and so is never re-examined by anything.
+  //
+  // The canonical's own record count is the only detector, and it costs one
+  // object read per session — far too much for the whole corpus every pass. So
+  // this is incremental: prove the least-recently-verified rows, stamp them,
+  // and rotate. A failure never stamps, so it is retried rather than skipped.
+  try {
+    await deepVerifySweep(db, store, opts, res, sleep, delay);
+  } catch (err) {
+    // Never discard the repair stats already gathered.
+    opts.logger?.warn?.("reconciler: count sweep failed", { err: sanitizeDbError(err) });
+  }
+
   if (opts.correctExistingTitles !== false) {
     // A failure here must not discard the orphan-restore stats already gathered.
     try {
@@ -1039,4 +1084,204 @@ export async function reconcileOrphans(
   }
 
   return res;
+}
+
+
+/** Default sessions proven per pass. One canonical read each, so this paces the
+ *  store: at the hourly sweep it works through a few thousand sessions a day and
+ *  then keeps rotating, which is the right shape for "prove the corpus and keep
+ *  it proven" rather than a one-shot audit that is stale the moment it ends. */
+const DEFAULT_DEEP_VERIFY_PER_PASS = 25;
+
+/** Above this share of deep-verified sessions coming back mismatched, the sweep
+ *  stops REPAIRING (it keeps detecting and reporting). A corpus does not rot at
+ *  that rate; a comparison bug does. */
+const DEEP_MISMATCH_CEILING_RATIO = 0.5;
+/** …but never below this many, so a genuinely damaged handful is always
+ *  repaired rather than stranded by a ratio computed on tiny numbers. */
+const DEEP_MISMATCH_CEILING_MIN_COUNT = 10;
+
+/** Prove the least-recently-verified sessions against their canonical's record
+ *  count, and rebuild the ones that do not match.
+ *
+ *  Only PARENT lanes are swept here. A parent rebuild re-derives the whole
+ *  session, and a lane whose parent is wrong cannot be judged independently —
+ *  sweeping lanes separately would double the read cost to re-check content the
+ *  parent pass already re-derived. */
+async function deepVerifySweep(
+  db: HxDb,
+  store: SessionStore,
+  opts: ReconcileOptions,
+  res: ReconcileResult,
+  sleep: (ms: number) => Promise<void>,
+  delay: number,
+): Promise<void> {
+  // Default OFF here on purpose. reconcileOrphans is shared, and a sweep that
+  // silently reads a canonical per session would change the cost and the
+  // behaviour of every caller that never asked for it. The fortress opts in
+  // (see main.ts); callers that want it pass the cap.
+  const limit = opts.deepVerifyPerPass ?? 0;
+  if (limit <= 0) return;
+
+  // Oldest-verified first; NULLS FIRST means a corpus that has never been swept
+  // is worked through from the beginning before anything is revisited.
+  const candidates = await db
+    .select({
+      rowId: hxSessions.id,
+      sessionId: hxSessions.sessionId,
+      family: hxSessions.family,
+      userId: hxUsers.externalId,
+    })
+    .from(hxSessions)
+    .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+    .where(isNull(hxSessions.deletedAt))
+    .orderBy(dsql`${hxSessions.deepVerifiedAt} asc nulls first`)
+    .limit(limit);
+
+  for (const row of candidates) {
+    const key: SessionKey = {
+      userId: row.userId,
+      family: row.family,
+      sessionId: row.sessionId,
+    };
+    try {
+      if (await isSessionDeleted(db, key.userId, key.sessionId)) {
+        // Tombstoned between selection and now — stamp so it leaves the queue.
+        await stampDeepVerified(db, row.rowId);
+        continue;
+      }
+      const text = await store.readCanonicalText(key);
+      const expected = parseChunk(text).turns.length;
+      const actual = await countLaneTurns(db, row.rowId, null);
+      res.deepVerified += 1;
+
+      if (actual === expected) {
+        await stampDeepVerified(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      res.deepMismatched += 1;
+      opts.logger?.warn?.("reconciler: count sweep found a session the byte gate calls healthy", {
+        sessionId: key.sessionId,
+        family: key.family,
+        indexedTurns: actual,
+        canonicalRecords: expected,
+        // Sign is the diagnosis: short means records never landed, over means
+        // the same records landed twice.
+        kind: actual < expected ? "missing_records" : "duplicate_records",
+      });
+
+      // Systematic-bug ceiling. If MOST of what we prove comes back mismatched,
+      // the likelier explanation is that the comparison itself is wrong — a
+      // parser change, a counting change — not that the corpus rotted. Repairing
+      // on a broken comparison would rewrite healthy sessions corpus-wide, which
+      // is far worse than leaving damage in place for one pass. Detection keeps
+      // running and keeps reporting; only the WRITES stand down.
+      if (
+        res.deepMismatched >= DEEP_MISMATCH_CEILING_MIN_COUNT &&
+        res.deepMismatched > res.deepVerified * DEEP_MISMATCH_CEILING_RATIO
+      ) {
+        opts.logger?.warn?.("reconciler: count sweep mismatch rate implausible — repairs stood down", {
+          mismatched: res.deepMismatched, verified: res.deepVerified,
+        });
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      // Rebuild from the text we just read. The CAS anchors to the byte count
+      // observed NOW, so a live commit that lands in between aborts the rebuild
+      // rather than deleting what it wrote.
+      const anchor = await currentBytes(db, key);
+      let outcome: Awaited<ReturnType<typeof ingestCommit>>;
+      try {
+        outcome = await ingestCommit(db, {
+          key,
+          chunkId: repairChunkId("count"),
+          replace: true,
+          chunkText: text,
+          totalBytes: Buffer.byteLength(text),
+          componentCount: 1,
+          meta: null,
+          attribution: {
+            orgExternalId: null,
+            projectExternalId: null,
+            repoSlug: null,
+            deviceId: null,
+          },
+          recovered: true,
+          rebuild: true,
+          ...(anchor !== undefined ? { expectIndexedBytes: anchor } : {}),
+        });
+      } catch (err) {
+        if (!(err instanceof IndexAdvancedError)) throw err;
+        // A live write beat us to it. Leave UNSTAMPED so the next pass judges
+        // the newer content rather than recording a verdict about old content.
+        res.liveRaces += 1;
+        opts.logger?.info?.("reconciler: session advanced before its count repair — deferring", {
+          sessionId: key.sessionId, family: key.family,
+          expected: err.expected, nowIndexed: err.actual,
+        });
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      if (!outcome.applied) {
+        res.noOpRepairs += 1;
+        opts.logger?.warn?.("reconciler: count repair reported NO-OP", {
+          sessionId: key.sessionId, family: key.family, reason: outcome.reason,
+        });
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      // Re-count rather than assume. A repair that did not actually make the
+      // count exact must NOT be stamped — stamping it would retire the session
+      // from the sweep while still damaged, which is the precise failure this
+      // whole mechanism exists to prevent.
+      const after = await countLaneTurns(db, row.rowId, null);
+      if (after === expected) {
+        res.deepRepaired += 1;
+        await stampDeepVerified(db, row.rowId);
+      } else {
+        res.integrityFailures += 1;
+        opts.logger?.warn?.("reconciler: count repair did not reach the canonical's record count", {
+          sessionId: key.sessionId, family: key.family,
+          indexedTurns: after, canonicalRecords: expected,
+        });
+      }
+    } catch (err) {
+      // Never stamp on failure: an unproven session must stay in the queue.
+      res.deepErrors += 1;
+      opts.logger?.warn?.("reconciler: count sweep skipped one session", {
+        err: sanitizeDbError(err),
+        sessionId: key.sessionId,
+        family: key.family,
+      });
+    }
+    if (delay > 0) await sleep(delay);
+  }
+}
+
+/** Turns indexed for one lane of a session row (null agent = the parent). */
+async function countLaneTurns(db: HxDb, sessionRowId: string, agentRowId: string | null): Promise<number> {
+  const [agg] = await db
+    .select({ n: dsql<number>`count(*)::int` })
+    .from(hxTurns)
+    .where(
+      and(
+        eq(hxTurns.sessionId, sessionRowId),
+        agentRowId ? eq(hxTurns.agentId, agentRowId) : isNull(hxTurns.agentId),
+      ),
+    );
+  return Number(agg?.n ?? 0);
+}
+
+/** Record that this row's count was proven NOW. Only ever called after an exact
+ *  match — never after a repair that failed to reach the expected count. */
+async function stampDeepVerified(db: HxDb, sessionRowId: string): Promise<void> {
+  await db
+    .update(hxSessions)
+    .set({ deepVerifiedAt: new Date().toISOString() })
+    .where(eq(hxSessions.id, sessionRowId));
 }

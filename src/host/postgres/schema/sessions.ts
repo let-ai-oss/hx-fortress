@@ -58,6 +58,9 @@ export const hxSessions = hxSchema.table(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: deletedAt(),
+    /** When this row's record count was last proven against its canonical.
+     *  NULL = never; the sweep works oldest-first, so NULL is picked up first. */
+    deepVerifiedAt: ts("deep_verified_at"),
   },
   (t) => [
     unique("hx_sessions_natural_unique").on(t.userId, t.family, t.sessionId),
@@ -107,6 +110,9 @@ export const hxSessionAgents = hxSchema.table(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: deletedAt(),
+    /** When this row's record count was last proven against its canonical.
+     *  NULL = never; the sweep works oldest-first, so NULL is picked up first. */
+    deepVerifiedAt: ts("deep_verified_at"),
   },
   (t) => [
     unique("hx_session_agents_natural_unique").on(t.sessionId, t.agentExternalId),
