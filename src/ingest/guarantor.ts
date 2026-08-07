@@ -53,6 +53,7 @@ export interface GuarantorConfig {
     | "repairStaleIndexes"
     | "staleRepairCeiling"
     | "deepVerifyPerPass"
+    | "isSaturated"
   >;
 }
 
@@ -157,6 +158,7 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
           maxOrphans: cfg.reconcile?.maxOrphans,
           repairStaleIndexes: cfg.reconcile?.repairStaleIndexes,
           deepVerifyPerPass: cfg.reconcile?.deepVerifyPerPass,
+          isSaturated: cfg.reconcile?.isSaturated,
           staleRepairCeiling: cfg.reconcile?.staleRepairCeiling,
           correctExistingTitles: firstPass && correctTitles,
           logger: cfg.logger,

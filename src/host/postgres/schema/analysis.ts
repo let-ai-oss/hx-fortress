@@ -110,6 +110,11 @@ export const hxAnalysisRuns = hxSchema.table(
   (t) => [
     index("hx_analysis_runs_user_status_idx").on(t.userId, t.status),
     index("hx_analysis_runs_user_started_idx").on(t.userId, t.startedAt),
+    // FK cover: an unindexed foreign key makes every cascading delete scan this
+    // whole table ONCE PER DELETED PARENT ROW. Declared here as well as in the
+    // migration so drizzle-kit never generates a DROP for it.
+    index("hx_analysis_runs_definition_id_idx").on(t.definitionId),
+    index("hx_analysis_runs_model_id_idx").on(t.modelId),
   ],
 );
 
@@ -189,6 +194,12 @@ export const hxUsageRollup = hxSchema.table(
     unique("hx_usage_rollup_grain_unique")
       .on(t.bucketDate, t.userId, t.projectId, t.modelId)
       .nullsNotDistinct(),
+    // FK cover: an unindexed foreign key makes every cascading delete scan this
+    // whole table ONCE PER DELETED PARENT ROW. Declared here as well as in the
+    // migration so drizzle-kit never generates a DROP for it.
+    index("hx_usage_rollup_user_id_idx").on(t.userId),
+    index("hx_usage_rollup_project_id_idx").on(t.projectId),
+    index("hx_usage_rollup_model_id_idx").on(t.modelId),
   ],
 );
 

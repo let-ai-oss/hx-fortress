@@ -39,6 +39,12 @@ export interface ReconcileOptions {
   batchDelayMs?: number;
   /** Cap on orphans re-ingested this pass (0/undefined = no cap). */
   maxOrphans?: number;
+  /** True while the LIVE pool is starved. Repair is the lower-priority workload
+   *  by definition — nobody is waiting on it — so when live ingest is struggling
+   *  the guarantor stands down for the rest of the pass and picks up on the next
+   *  one rather than adding its own load to a database already short of
+   *  connections. Waiting an hour costs nothing; competing costs live chunks. */
+  isSaturated?: () => boolean;
   /** Sessions the count sweep proves per pass (0 disables it).
    *
    *  The sweep costs ONE canonical read per session, which is why it is capped
@@ -112,6 +118,10 @@ export interface ReconcileResult {
    *  every pass would spend another full rebuild proving the same thing. A
    *  non-zero value means investigate the STORE, not the indexer. */
   shortReads: number;
+  /** Times this pass stood down because the LIVE pool was saturated. Not an
+   *  error — the guarantor yielding to the workload that has a caller waiting.
+   *  Persistently non-zero means live ingest is under sustained pressure. */
+  yieldedToLive: number;
   /** Sessions whose record count was PROVEN against their canonical this pass
    *  (the count sweep). Progress, not damage — it is the denominator for the
    *  three counters below. */
@@ -369,6 +379,9 @@ function classifyShortfall(
   return "shortRead";
 }
 
+/** Internal signal: the sweep stood down for load, which is not a failure. */
+class SweepSkipped extends Error {}
+
 /** Below this many stale sessions the ceiling never applies: a handful of rows
  *  is a repair job, not a stampede, and refusing it would strand small fortresses
  *  permanently. */
@@ -464,6 +477,7 @@ export async function reconcileOrphans(
     verifyFallbacks: 0,
     integrityFailures: 0,
     shortReads: 0,
+    yieldedToLive: 0,
     deepVerified: 0,
     deepMismatched: 0,
     deepRepaired: 0,
@@ -723,6 +737,13 @@ export async function reconcileOrphans(
     if (coveredByRow && key.bytes === 0) {
       res.emptyCanonicals += 1;
       continue;
+    }
+    if (opts.isSaturated?.()) {
+      res.yieldedToLive += 1;
+      opts.logger?.info?.("reconciler: live pool saturated — standing down for this pass", {
+        restoredSoFar: res.restored,
+      });
+      break;
     }
     res.orphans += 1;
     try {
@@ -1067,10 +1088,19 @@ export async function reconcileOrphans(
   // this is incremental: prove the least-recently-verified rows, stamp them,
   // and rotate. A failure never stamps, so it is retried rather than skipped.
   try {
+    if (opts.isSaturated?.()) {
+      res.yieldedToLive += 1;
+      opts.logger?.info?.("reconciler: live pool saturated — skipping the count sweep this pass");
+      throw new SweepSkipped();
+    }
     await deepVerifySweep(db, store, opts, res, sleep, delay);
+    await deepVerifyLanes(db, store, opts, res, sleep, delay, opts.deepVerifyPerPass ?? 0);
   } catch (err) {
-    // Never discard the repair stats already gathered.
-    opts.logger?.warn?.("reconciler: count sweep failed", { err: sanitizeDbError(err) });
+    // Never discard the repair stats already gathered. A stand-down is not a
+    // failure and must not be logged as one.
+    if (!(err instanceof SweepSkipped)) {
+      opts.logger?.warn?.("reconciler: count sweep failed", { err: sanitizeDbError(err) });
+    }
   }
 
   if (opts.correctExistingTitles !== false) {
@@ -1098,10 +1128,11 @@ const DEEP_MISMATCH_CEILING_MIN_COUNT = 10;
 /** Prove the least-recently-verified sessions against their canonical's record
  *  count, and rebuild the ones that do not match.
  *
- *  Only PARENT lanes are swept here. A parent rebuild re-derives the whole
- *  session, and a lane whose parent is wrong cannot be judged independently —
- *  sweeping lanes separately would double the read cost to re-check content the
- *  parent pass already re-derived. */
+ *  Agent lanes are swept too, and they must be: a lane is a SEPARATE canonical
+ *  object (`sid:a:agentId`) with its own row and its own turns, so rebuilding
+ *  the parent does not re-derive a single byte of it. A sweep that skipped
+ *  lanes would leave every agent transcript unverifiable — the same blind spot
+ *  this exists to close, just moved one level down. */
 async function deepVerifySweep(
   db: HxDb,
   store: SessionStore,
@@ -1259,6 +1290,153 @@ async function deepVerifySweep(
     }
     if (delay > 0) await sleep(delay);
   }
+}
+
+/** Prove the least-recently-verified AGENT LANES the same way. A lane carries
+ *  its own canonical and its own turns, so it needs its own count. */
+async function deepVerifyLanes(
+  db: HxDb,
+  store: SessionStore,
+  opts: ReconcileOptions,
+  res: ReconcileResult,
+  sleep: (ms: number) => Promise<void>,
+  delay: number,
+  limit: number,
+): Promise<void> {
+  const candidates = await db
+    .select({
+      laneRowId: hxSessionAgents.id,
+      agentId: hxSessionAgents.agentExternalId,
+      sessionRowId: hxSessions.id,
+      sessionId: hxSessions.sessionId,
+      family: hxSessions.family,
+      userId: hxUsers.externalId,
+    })
+    .from(hxSessionAgents)
+    .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+    .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+    .where(and(isNull(hxSessionAgents.deletedAt), isNull(hxSessions.deletedAt)))
+    .orderBy(dsql`${hxSessionAgents.deepVerifiedAt} asc nulls first`, hxSessionAgents.id)
+    .limit(limit);
+
+  for (const row of candidates) {
+    // Two different keys, and confusing them is a silent content mix-up. The
+    // STORE key carries the `:a:agentId` suffix — that composite IS the lane's
+    // own canonical object, and reading the parent would compare a lane against
+    // entirely the wrong content. The COMMIT key is the bare session id, because
+    // ingestAgentCommit takes the parent identity plus `agentId` separately.
+    const storeKey: SessionKey = {
+      userId: row.userId,
+      family: row.family,
+      sessionId: `${row.sessionId}${AGENT_LANE}${row.agentId}`,
+    };
+    const commitKey: SessionKey = {
+      userId: row.userId,
+      family: row.family,
+      sessionId: row.sessionId,
+    };
+    try {
+      if (await isSessionDeleted(db, commitKey.userId, row.sessionId)) {
+        await stampLaneVerified(db, row.laneRowId);
+        continue;
+      }
+      const text = await store.readCanonicalText(storeKey);
+      const expected = parseChunk(text).turns.length;
+      const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
+      res.deepVerified += 1;
+
+      if (actual === expected) {
+        await stampLaneVerified(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      res.deepMismatched += 1;
+      opts.logger?.warn?.("reconciler: count sweep found an agent lane the byte gate calls healthy", {
+        sessionId: row.sessionId, agentId: row.agentId, family: row.family,
+        indexedTurns: actual, canonicalRecords: expected,
+        kind: actual < expected ? "missing_records" : "duplicate_records",
+      });
+
+      if (
+        res.deepMismatched >= DEEP_MISMATCH_CEILING_MIN_COUNT &&
+        res.deepMismatched > res.deepVerified * DEEP_MISMATCH_CEILING_RATIO
+      ) {
+        opts.logger?.warn?.("reconciler: count sweep mismatch rate implausible — repairs stood down", {
+          mismatched: res.deepMismatched, verified: res.deepVerified,
+        });
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      let outcome: Awaited<ReturnType<typeof ingestAgentCommit>>;
+      try {
+        outcome = await ingestAgentCommit(db, {
+          key: commitKey,
+          agentId: row.agentId,
+          chunkId: repairChunkId("count"),
+          replace: true,
+          chunkText: text,
+          totalBytes: Buffer.byteLength(text),
+          componentCount: 1,
+          meta: null,
+          attribution: {
+            orgExternalId: null,
+            projectExternalId: null,
+            repoSlug: null,
+            deviceId: null,
+          },
+          recovered: true,
+          rebuild: true,
+        });
+      } catch (err) {
+        if (!(err instanceof IndexAdvancedError)) throw err;
+        res.liveRaces += 1;
+        opts.logger?.info?.("reconciler: lane advanced before its count repair — deferring", {
+          sessionId: row.sessionId, agentId: row.agentId,
+          expected: err.expected, nowIndexed: err.actual,
+        });
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      if (!outcome.applied) {
+        res.noOpRepairs += 1;
+        opts.logger?.warn?.("reconciler: lane count repair reported NO-OP", {
+          sessionId: row.sessionId, agentId: row.agentId, reason: outcome.reason,
+        });
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      // Re-count, never assume — and only stamp on an exact match.
+      const after = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
+      if (after === expected) {
+        res.deepRepaired += 1;
+        await stampLaneVerified(db, row.laneRowId);
+      } else {
+        res.integrityFailures += 1;
+        opts.logger?.warn?.("reconciler: lane count repair did not reach the canonical's record count", {
+          sessionId: row.sessionId, agentId: row.agentId,
+          indexedTurns: after, canonicalRecords: expected,
+        });
+      }
+    } catch (err) {
+      res.deepErrors += 1;
+      opts.logger?.warn?.("reconciler: count sweep skipped one agent lane", {
+        err: sanitizeDbError(err),
+        sessionId: row.sessionId, agentId: row.agentId,
+      });
+    }
+    if (delay > 0) await sleep(delay);
+  }
+}
+
+async function stampLaneVerified(db: HxDb, laneRowId: string): Promise<void> {
+  await db
+    .update(hxSessionAgents)
+    .set({ deepVerifiedAt: new Date().toISOString() })
+    .where(eq(hxSessionAgents.id, laneRowId));
 }
 
 /** Turns indexed for one lane of a session row (null agent = the parent). */

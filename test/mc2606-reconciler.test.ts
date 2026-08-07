@@ -1404,4 +1404,109 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .limit(1);
     expect(row!.at).toBeNull();
   });
+
+  // Agent lanes are SEPARATE canonical objects with their own rows and their own
+  // turns — rebuilding the parent does not re-derive a byte of them. A sweep
+  // that skipped lanes would leave every agent transcript unverifiable.
+  test("the count sweep proves agent lanes too, not just parents", async () => {
+    const sessionId = crypto.randomUUID();
+    const agentId = "agent-sweep-1";
+    const key: SessionKey = {
+      userId: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId,
+    };
+    // Store key carries the :a: suffix; the commit key is the bare session id.
+    const laneStoreKey: SessionKey = { ...key, sessionId: `${sessionId}:a:${agentId}` };
+    const parent = body(3);
+    const laneWhole = body(8);
+    const laneShort = body(5);
+
+    await ingestCommit(db, {
+      key, chunkId: "lane-p1", replace: false, chunkText: parent,
+      totalBytes: Buffer.byteLength(parent), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    // The lane lands SHORT but stamped with the full canonical size — dense,
+    // byte-covering, three records missing. Invisible to every byte check.
+    await ingestAgentCommit(db, {
+      key, agentId, chunkId: "lane-a1", replace: false, chunkText: laneShort,
+      totalBytes: Buffer.byteLength(laneWhole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId === laneStoreKey.sessionId) return laneWhole;
+        if (k.sessionId === sessionId) return parent;
+        throw new Error("not this test's session");
+      },
+      statCanonical: async () => Buffer.byteLength(laneWhole),
+    } as unknown as SessionStore;
+
+    const laneTurns = async () => {
+      const [srow] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, sessionId)))
+        .limit(1);
+      const [lrow] = await db
+        .select({ id: hxSessionAgents.id })
+        .from(hxSessionAgents)
+        .where(
+          and(
+            eq(hxSessionAgents.sessionId, srow!.id),
+            eq(hxSessionAgents.agentExternalId, agentId),
+          ),
+        )
+        .limit(1);
+      const t = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, srow!.id), eq(hxTurns.agentId, lrow!.id)));
+      return t.length;
+    };
+
+    expect(await laneTurns()).toBe(5);
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    expect(res.deepMismatched).toBeGreaterThanOrEqual(1);
+    expect(await laneTurns()).toBe(8); // the lane's missing records are indexed
+  });
+
+  // Repair is the lower-priority workload — it must yield to live ingest rather
+  // than add load to a pool that is already starved.
+  test("a saturated live pool stands the pass down instead of competing", async () => {
+    const key: SessionKey = {
+      userId: `sat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(6);
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async () => whole,
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000,
+      isSaturated: () => true,
+    });
+
+    expect(res.yieldedToLive).toBeGreaterThanOrEqual(1);
+    expect(res.restored).toBe(0);      // nothing rebuilt while live is starved
+    expect(res.deepVerified).toBe(0);  // and the sweep's extra reads never happen
+
+    // The orphan is still there, untouched, for a healthier pass to pick up.
+    const rows = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)));
+    expect(rows.length).toBe(0);
+  });
 });

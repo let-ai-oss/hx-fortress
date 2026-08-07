@@ -510,6 +510,10 @@ export async function runFortressHost(
         // detection (staleIndexes in every pass) but stops it acting.
         repairStaleIndexes: repairStaleFromEnv(process.env.FORTRESS_GUARANTOR_REPAIR_STALE),
         deepVerifyPerPass,
+        // Yield to live ingest. Repair has no caller waiting on it, so when the
+        // live pool is starved the guarantor stands down for the pass instead of
+        // adding its own load to a database already short of connections.
+        isSaturated: () => guardedDb?.saturated() ?? false,
       },
     });
     guarantor.start();
