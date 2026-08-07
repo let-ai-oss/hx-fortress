@@ -1156,4 +1156,52 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     // integrity failure was reported.
     expect(await turns()).toBe(8);
   });
+
+  // The prod shape behind "SESSION STILL INCOMPLETE after a full rebuild" on a
+  // session that was in fact whole: the store's stat reports more bytes than its
+  // read hands back (a canonical holding non-UTF-8 bytes re-encodes shorter, and
+  // a capped/truncated download returns short outright). The rebuild indexes
+  // everything it was given, densely — yet a stat-vs-read comparison can never be
+  // satisfied, so the old code re-ran a full rebuild every pass, forever, and
+  // reported permanent damage. It must be named for what it is instead.
+  test("a stat that exceeds the read is a shortRead, not an integrity failure", async () => {
+    const key: SessionKey = {
+      userId: `short-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const text = body(6);
+    const readBytes = Buffer.byteLength(text);
+    const STAT = readBytes + 219; // what the object claims; never changes
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: STAT }],
+      readCanonicalText: async () => text,
+      statCanonical: async () => STAT,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(res.restored).toBe(1);
+    expect(res.shortReads).toBe(1);
+    // The two counters this must NOT land in: it is neither damage nor a live race.
+    expect(res.integrityFailures).toBe(0);
+    expect(res.liveRaces).toBe(0);
+
+    // Every record the store actually returned is indexed, densely.
+    const [row] = await db
+      .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const rows = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    expect(rows.length).toBe(6);
+    // The watermark records the bytes we really indexed — never the stat we could
+    // not read. Inflating it to STAT would be the guarantor lying about coverage.
+    expect(Number(row!.bytes)).toBe(readBytes);
+  });
 });

@@ -91,6 +91,21 @@ export interface ReconcileResult {
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
    *  that leaves damage behind. Each one is logged with its id at error level. */
   integrityFailures: number;
+  /** Rebuilds that indexed EVERY byte the store handed back, densely, while the
+   *  store's own stat still reports a larger object. The index is complete with
+   *  respect to the read; the read and the stat disagree.
+   *
+   *  Two known producers. A canonical holding bytes that are not valid UTF-8:
+   *  `readCanonicalText` decodes to a JS string and the rebuild records
+   *  `Buffer.byteLength` of the RE-ENCODED text, which for a lossy round-trip
+   *  differs from the object size `statCanonical` reports. And a read that
+   *  returns short (a truncated or capped download).
+   *
+   *  Kept apart from `integrityFailures` because no rebuild can ever clear it —
+   *  scoring it as damage buries the real signal under a permanent floor, and
+   *  every pass would spend another full rebuild proving the same thing. A
+   *  non-zero value means investigate the STORE, not the indexer. */
+  shortReads: number;
   /** Repairs the no-clobber guard REFUSED because a live row was already there —
    *  the guard working as intended, not a defect. Counted apart from noOpRepairs
    *  so the bug signal stays a bug signal. */
@@ -191,7 +206,16 @@ async function verifyLane(
    *  compares a lane against the wrong object entirely, and with a median parent
    *  of one turn that comparison passes trivially. */
   statKey?: SessionKey,
-): Promise<{ ok: boolean; bytes: number; turns: number; dense: boolean }> {
+): Promise<{
+  ok: boolean;
+  bytes: number;
+  turns: number;
+  dense: boolean;
+  /** The size actually compared against — the FRESH stat when one was available,
+   *  otherwise the scan-time size. Callers diff this against the size they
+   *  rebuilt from to tell live growth apart from real damage. */
+  canonical: number | null;
+}> {
   // Re-measure the canonical NOW. The size read at scan time can be minutes old,
   // and for a live session it is already wrong by the time a repair finishes.
   if (store) {
@@ -215,7 +239,7 @@ async function verifyLane(
       ),
     )
     .limit(1);
-  if (!row) return { ok: false, bytes: 0, turns: 0, dense: false };
+  if (!row) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes };
   // hx.turns.agent_id holds the lane ROW id, not the external agent id — resolve
   // it before counting, and read the lane's OWN byte count while we are here.
   let bytes = Number(row.bytes ?? 0);
@@ -232,7 +256,7 @@ async function verifyLane(
         ),
       )
       .limit(1);
-    if (!laneRow) return { ok: false, bytes: 0, turns: 0, dense: false };
+    if (!laneRow) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes };
     laneRowId = laneRow.id;
     bytes = Number(laneRow.bytes ?? 0);
   }
@@ -256,7 +280,39 @@ async function verifyLane(
   // the canonical", not "equals a number captured minutes ago" — so >= passes, and
   // only genuinely BEHIND counts as incomplete.
   const bytesOk = canonicalBytes == null || bytes >= canonicalBytes;
-  return { ok: bytesOk && dense, bytes, turns, dense };
+  return { ok: bytesOk && dense, bytes, turns, dense, canonical: canonicalBytes };
+}
+
+/** Why a post-rebuild verification came back short.
+ *
+ *  `damage`     — a hole, or fewer bytes indexed than the text we actually read.
+ *                 The rebuild genuinely failed; this is the alert.
+ *  `grew`       — everything we read is indexed and the canonical has grown SINCE
+ *                 the pass listed it. A live session; the tail lands next pass.
+ *  `shortRead`  — everything we read is indexed, the canonical has not grown, yet
+ *                 the stat still reports more bytes than the read returned. No
+ *                 rebuild can close that; the store is the thing to look at.
+ *
+ *  Splitting the last two out of `integrityFailures` is what keeps that counter
+ *  meaning "the guarantor could not make this session whole". On a busy fortress
+ *  every actively-written session trips `grew`, and a single non-UTF-8 canonical
+ *  trips `shortRead` on every pass forever — conflating either one puts a
+ *  permanent floor under the alert. */
+type ShortfallKind = "damage" | "grew" | "shortRead";
+
+function classifyShortfall(
+  v: { bytes: number; dense: boolean; canonical: number | null },
+  /** Bytes the rebuild actually indexed — `Buffer.byteLength` of the text read. */
+  readBytes: number,
+  /** Object size when the pass listed this canonical, for the growth comparison. */
+  scanBytes: number | null,
+): ShortfallKind {
+  // Anything less than a dense lane covering every byte we read is real damage,
+  // whatever the store reports.
+  if (!v.dense || v.bytes < readBytes) return "damage";
+  if (v.canonical == null) return "damage";
+  if (scanBytes != null && v.canonical > scanBytes) return "grew";
+  return "shortRead";
 }
 
 /** Below this many stale sessions the ceiling never applies: a handful of rows
@@ -353,6 +409,7 @@ export async function reconcileOrphans(
     repairedFull: 0,
     verifyFallbacks: 0,
     integrityFailures: 0,
+    shortReads: 0,
   };
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
@@ -694,12 +751,30 @@ export async function reconcileOrphans(
           if (v.ok) {
             res.repairedFull += 1;
           } else {
-            res.integrityFailures += 1;
-            opts.logger?.warn?.("reconciler: LANE STILL INCOMPLETE after a full rebuild", {
-              sessionId: baseSid, agentId, family: key.family,
-              indexedBytes: v.bytes, canonicalBytes: key.bytes ?? null,
-              turns: v.turns, dense: v.dense,
-            });
+            const why = classifyShortfall(v, base.totalBytes, key.bytes ?? null);
+            if (why === "grew") {
+              res.liveRaces += 1;
+              opts.logger?.info?.("reconciler: lane grew during its rebuild — tail lands next pass", {
+                sessionId: baseSid, agentId, family: key.family,
+                indexedBytes: v.bytes, readBytes: base.totalBytes, nowBytes: v.canonical,
+                turns: v.turns,
+              });
+            } else if (why === "shortRead") {
+              res.shortReads += 1;
+              opts.logger?.warn?.("reconciler: lane stat exceeds what the read returned — index is complete for the bytes we got", {
+                sessionId: baseSid, agentId, family: key.family,
+                indexedBytes: v.bytes, readBytes: base.totalBytes, statBytes: v.canonical,
+                shortfall: (v.canonical ?? 0) - base.totalBytes, turns: v.turns,
+              });
+            } else {
+              res.integrityFailures += 1;
+              opts.logger?.warn?.("reconciler: LANE STILL INCOMPLETE after a full rebuild", {
+                sessionId: baseSid, agentId, family: key.family,
+                indexedBytes: v.bytes, readBytes: base.totalBytes,
+                canonicalBytes: v.canonical ?? key.bytes ?? null,
+                turns: v.turns, dense: v.dense,
+              });
+            }
           }
           res.restored += 1;
         }
@@ -860,11 +935,30 @@ export async function reconcileOrphans(
             if (v.ok) {
               res.repairedFull += 1;
             } else {
-              res.integrityFailures += 1;
-              opts.logger?.warn?.("reconciler: SESSION STILL INCOMPLETE after a full rebuild", {
-                sessionId: key.sessionId, family: key.family,
-                indexedBytes: v.bytes, canonicalBytes, turns: v.turns, dense: v.dense,
-              });
+              const why = classifyShortfall(v, base.totalBytes, canonicalBytes);
+              if (why === "grew") {
+                res.liveRaces += 1;
+                opts.logger?.info?.("reconciler: session grew during its rebuild — tail lands next pass", {
+                  sessionId: key.sessionId, family: key.family,
+                  indexedBytes: v.bytes, readBytes: base.totalBytes, nowBytes: v.canonical,
+                  turns: v.turns,
+                });
+              } else if (why === "shortRead") {
+                res.shortReads += 1;
+                opts.logger?.warn?.("reconciler: store stat exceeds what the read returned — index is complete for the bytes we got", {
+                  sessionId: key.sessionId, family: key.family,
+                  indexedBytes: v.bytes, readBytes: base.totalBytes, statBytes: v.canonical,
+                  shortfall: (v.canonical ?? 0) - base.totalBytes, turns: v.turns,
+                });
+              } else {
+                res.integrityFailures += 1;
+                opts.logger?.warn?.("reconciler: SESSION STILL INCOMPLETE after a full rebuild", {
+                  sessionId: key.sessionId, family: key.family,
+                  indexedBytes: v.bytes, readBytes: base.totalBytes,
+                  canonicalBytes: v.canonical ?? canonicalBytes,
+                  turns: v.turns, dense: v.dense,
+                });
+              }
             }
           }
         } else {
