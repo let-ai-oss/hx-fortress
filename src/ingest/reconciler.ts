@@ -95,11 +95,14 @@ export interface ReconcileResult {
   repairedTail: number;
   /** Repairs that rebuilt the whole session from the canonical. */
   repairedFull: number;
-  /** Tail repairs whose post-repair verification failed. Usually escalated to a
-   *  full rebuild — but when the canonical grew mid-iteration the escalation is
-   *  DEFERRED instead (a paired `liveRaces` in the same result says so), because
-   *  rebuilding from pre-growth text would delete content. A persistently non-zero value means the incremental path is
-   *  mis-slicing and should be disabled (FORTRESS_GUARANTOR_TAIL_REPAIR=false). */
+  /** Tail repairs whose post-repair verification failed AND which could not be
+   *  explained as parser statefulness (that case is `laneDrift`). Escalated to a
+   *  full rebuild — unless the canonical grew mid-iteration, where the
+   *  escalation is DEFERRED instead (a paired `liveRaces` says so), because
+   *  rebuilding from pre-growth text would delete content.
+   *
+   *  A persistently non-zero value means the incremental path really is
+   *  mis-slicing. Disable it with the `repairTails` reconcile option. */
   verifyFallbacks: number;
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
    *  that leaves damage behind. Each one is logged with its id at error level. */
@@ -144,6 +147,13 @@ export interface ReconcileResult {
   /** Deep verifications that could not be completed (unreadable canonical,
    *  transient DB error). NOT stamped, so they are retried next pass. */
   deepErrors: number;
+  /** Tail repairs that landed EXACTLY (prefix + tail, dense, byte-covering) yet
+   *  still differ from a whole-canonical parse, because parseChunk suppresses
+   *  more when it sees the text in one piece. Expected and benign on collapsing
+   *  families (Codex, essentially every assistant turn) — recorded so the
+   *  divergence between the search index and the whole-parse read view stays
+   *  visible rather than silent. */
+  laneDrift: number;
   /** Lanes holding MORE turns than parse(whole) yields. Reported, never acted
    *  on: parseChunk is stateful across the text, so an append-built lane legally
    *  holds the SUM of per-chunk parses, which is >= parse(whole). This counter
@@ -525,6 +535,7 @@ export async function reconcileOrphans(
     deepMismatched: 0,
     deepRepaired: 0,
     deepErrors: 0,
+    laneDrift: 0,
     deepOvercount: 0,
     deepVerifyBacklog: null,
   };
@@ -541,6 +552,23 @@ export async function reconcileOrphans(
     opts.logger?.info?.("reconciler: live pool saturated — pass stood down before any work");
     return res;
   }
+
+  // LIST THE STORE FIRST, then snapshot the database.
+  //
+  // The two are read seconds-to-minutes apart (the snapshot below is a full scan
+  // of hx.sessions plus grouped aggregates over a multi-GB hx.turns). Whichever
+  // is read LAST is the fresher view, and the gate flags a session whose
+  // canonical looks ahead of its row.
+  //
+  // Snapshotting the DB first therefore mislabels every session written during
+  // the gap: the row is stale-by-comparison purely because it was read earlier.
+  // Each one costs a whole-canonical download and a repair attempt; most abort
+  // on the CAS, but a session whose indexing is still queued behind the
+  // gateway's deferred commit does NOT abort, and ends up duplicated.
+  //
+  // Reading the store first inverts it: a session that advances in the gap looks
+  // AHEAD of its canonical, which the gate already ignores.
+  const keys: CanonicalEntry[] = await store.listAllCanonicalKeys();
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
   // sessions and agent lanes alike, so neither is re-ingested once indexed.
@@ -671,8 +699,6 @@ export async function reconcileOrphans(
     have.add(k);
     laneBytes.set(k, Number(r.bytesUploaded ?? 0));
   }
-
-  const keys: CanonicalEntry[] = await store.listAllCanonicalKeys();
 
   // Decide ONCE, before touching anything, whether stale repair runs this pass.
   // The comparison is cheap (both sides are already in memory), and knowing the
@@ -949,6 +975,12 @@ export async function reconcileOrphans(
           const expectPriorTurns = parseChunk(
             buf.subarray(0, alreadyIndexedBytes).toString("utf8"),
           ).turns.length;
+          const tailText = buf.subarray(alreadyIndexedBytes).toString("utf8");
+          // What the lane MUST hold if this append lands exactly as intended.
+          // It is not `parse(whole)`: parseChunk is stateful across the text, so
+          // the sum of the two pieces legitimately exceeds a whole parse. That
+          // difference is the discriminator below.
+          const expectAfterAppend = expectPriorTurns + parseChunk(tailText).turns.length;
           let outcome: Awaited<ReturnType<typeof ingestCommit>> | null = null;
           try {
             outcome = await ingestCommit(db, {
@@ -956,7 +988,7 @@ export async function reconcileOrphans(
               key,
               chunkId: repairChunkId("tail"),
               replace: false,
-              chunkText: buf.subarray(alreadyIndexedBytes).toString("utf8"),
+              chunkText: tailText,
               // The bytes this append actually indexes — NEVER the size the store
               // claims. `canonicalBytes` is the LISTED/stat size; when the read
               // comes back shorter (a non-UTF-8 canonical, a truncated download)
@@ -1004,6 +1036,34 @@ export async function reconcileOrphans(
             if (v.ok) {
               landed = true;
               res.repairedTail += 1;
+            } else if (
+              v.dense &&
+              v.bytes >= buf.length &&
+              // …and we are not merely BEHIND a canonical that grew under us.
+              // Without this the acceptance below would swallow the growth case,
+              // which has its own handling (re-stat and defer) and must keep it.
+              v.canonical != null &&
+              v.bytes >= v.canonical &&
+              v.turns === expectAfterAppend
+            ) {
+              // The append landed EXACTLY: prefix + tail, densely, covering every
+              // byte. The only reason it differs from `parse(whole)` is that
+              // parseChunk suppresses more when it sees the text in one piece —
+              // for Codex that happens on essentially every assistant turn.
+              //
+              // Escalating here would rebuild a session that is exactly what we
+              // asked for, delete its embeddings, and do it again on the next
+              // pass, forever: the tail fast path would be dead for the whole
+              // collapsing family and every stale repair would be a full
+              // rebuild. Accept it, and record the divergence from the whole
+              // parse so it stays visible.
+              landed = true;
+              res.repairedTail += 1;
+              res.laneDrift += 1;
+              opts.logger?.info?.("reconciler: tail landed exactly; lane holds more than a whole parse", {
+                sessionId: key.sessionId, family: key.family,
+                turns: v.turns, wholeParse: expectedTurns,
+              });
             } else {
               res.verifyFallbacks += 1;
               opts.logger?.warn?.("reconciler: tail repair did not verify — rebuilding in full", {

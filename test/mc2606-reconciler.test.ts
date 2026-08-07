@@ -1602,12 +1602,16 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
   });
 
   // A lane whose whole-canonical parse COLLAPSES (Codex: response_item turns are
-  // dropped once an event_msg appears) drifts from the canonical when it is
-  // built by appending. The repair paths must CONVERGE it: `parse(whole)` is the
-  // canonical-faithful state — it is exactly what a `replace` produces — so a
-  // rebuild here is repair, not loss. What must never happen is the lane being
-  // left drifted, or a tail splicing content the lane already holds.
-  test("a collapsing lane converges to the whole-canonical parse", async () => {
+  // dropped once an event_msg appears) legitimately holds MORE turns than
+  // parse(whole) when built by appending. The tail repair must ACCEPT that.
+  //
+  // Converging it instead — which is what demanding parse(whole) here does —
+  // rebuilds a session that is exactly what was asked for, destroys its
+  // embeddings, and does it again next pass: for Codex the parse collapses on
+  // essentially every assistant turn, so the tail fast path would be dead for
+  // the whole family and every stale repair a full rebuild. The divergence is
+  // recorded as `laneDrift` rather than acted on.
+  test("a collapsing lane's tail is accepted, not rebuilt, and stays stable", async () => {
     const key: SessionKey = {
       userId: `converge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       family: "codex-cli",
@@ -1626,10 +1630,11 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     const ev = (m: string) =>
       JSON.stringify({ type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: m } }) + "\n";
     const head = ri("a", "assistant") + ri("b", "user");
-    const whole = head + ev("c");
-    const target = parseChunk(whole).turns.length;
-    // The premise: appending yields more turns than a whole parse does.
-    expect(target).toBeLessThan(parseChunk(head).turns.length + parseChunk(ev("c")).turns.length);
+    const tail = ev("c");
+    const whole = head + tail;
+    const appended = parseChunk(head).turns.length + parseChunk(tail).turns.length;
+    // The premise: appending yields strictly more than a whole parse.
+    expect(appended).toBeGreaterThan(parseChunk(whole).turns.length);
 
     await ingestCommit(db, {
       key, chunkId: "cv-1", replace: false, chunkText: head,
@@ -1645,32 +1650,40 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       statCanonical: async () => Buffer.byteLength(whole),
     } as unknown as SessionStore;
 
+    const turns = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ id: hxTurns.id }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).map((x) => x.id).sort();
+    };
+
     const res = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
     });
-    // However it gets there, the pass leaves NO integrity failure behind.
-    expect(res.integrityFailures).toBe(0);
 
-    const [row] = await db
-      .select({ id: hxSessions.id })
-      .from(hxSessions)
-      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
-      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
-      .limit(1);
-    const turns = await db
-      .select({ seq: hxTurns.seq })
-      .from(hxTurns)
-      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
-    // And the lane equals what a whole-canonical parse says, exactly.
-    expect(turns.length).toBe(target);
+    // The tail landed on the FAST path — no rebuild, no destroyed embeddings.
+    expect(res.repairedTail).toBe(1);
+    expect(res.repairedFull).toBe(0);
+    expect(res.verifyFallbacks).toBe(0);
+    // …and the divergence from the whole parse is recorded, not hidden.
+    expect(res.laneDrift).toBe(1);
+    const after = await turns();
+    expect(after.length).toBe(appended);
 
-    // Idempotent: a second pass has nothing to do and changes nothing. Without
-    // convergence this is where a permanent rebuild loop would show up.
+    // Stable: a second pass finds nothing to do and rewrites nothing. This is
+    // where a permanent rebuild + re-embed loop would show up.
     const again = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
     });
-    expect(again.staleIndexes).toBe(0);
     expect(again.repairedFull).toBe(0);
+    expect(again.staleIndexes).toBe(0);
+    expect(await turns()).toEqual(after);
   });
 
   // The rotation cursor is the thing that stops an unprovable row parking itself
@@ -1730,6 +1743,50 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect(res.scanned).toBe(0);         // the bulk gate never ran
     expect(listed).toBe(0);              // the bucket was never listed
     expect(res.deepVerifyBacklog).toBeNull();
+  });
+
+  // The sweep must yield MID-FLIGHT, not just at the door. Checking saturation
+  // once before it starts still lets it issue a hundred canonical reads and a
+  // hundred 40-115s rebuilds however starved live ingest becomes.
+  test("the count sweep stops mid-flight when the live pool goes saturated", async () => {
+    const made: SessionKey[] = [];
+    for (let i = 0; i < 4; i++) {
+      const key: SessionKey = {
+        userId: `midyield-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+        family: "claude-cli",
+        sessionId: crypto.randomUUID(),
+      };
+      const t = body(3);
+      await ingestCommit(db, {
+        key, chunkId: `my-${i}`, replace: false, chunkText: t,
+        totalBytes: Buffer.byteLength(t), componentCount: 1, meta: null, attribution: ATTR,
+      });
+      made.push(key);
+    }
+
+    // Saturation appears after the first canonical is read.
+    let reads = 0;
+    let saturated = false;
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async () => {
+        reads += 1;
+        saturated = true;
+        return body(3);
+      },
+      statCanonical: async () => Buffer.byteLength(body(3)),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000,
+      isSaturated: () => saturated,
+    });
+
+    // It stopped instead of working through the rest of the corpus.
+    expect(reads).toBe(1);
+    expect(res.yieldedToLive).toBe(1);
+    expect(made.length).toBe(4); // (the corpus really was larger than one row)
   });
 
   // C1-ROUND-4. The gateway acks a chunk once the canonical is composed and

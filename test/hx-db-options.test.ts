@@ -291,4 +291,30 @@ describe("per-role pool profiles — background repair can never spend the live 
     // …but nowhere near the shared 120 s that let abandoned commits squat.
     expect(ingest).toBeLessThan(120_000);
   });
+
+  test("the background budget is clamped under maxLifetime but never crushed", () => {
+    // maxLifetime is measured from connection ESTABLISHMENT and Bun kills
+    // mid-query, so a statement budget above it guarantees some rebuilds are
+    // guillotined. Clamping is right — but the first cut used Math.max(1, …),
+    // which at a 60 s lifetime produced a ONE MILLISECOND budget: every
+    // background statement died with 57014 and all repair stopped, silently.
+    const bg = (env: Record<string, string | undefined>) =>
+      hxPoolOptionsFor("bg", env).connection?.statement_timeout;
+
+    expect(bg({})).toBe(600_000);
+    expect(bg({ FORTRESS_DB_MAX_LIFETIME_MS: "300000" })).toBe(240_000);
+    // The cases that used to collapse to 1 ms. The floor is the live path's own
+    // bound: a short connection lifetime is a reason to cap repair, never a
+    // reason to make it impossible.
+    expect(bg({ FORTRESS_DB_MAX_LIFETIME_MS: "61000" })).toBe(30_000);
+    expect(bg({ FORTRESS_DB_MAX_LIFETIME_MS: "60000" })).toBe(30_000);
+    expect(bg({ FORTRESS_DB_MAX_LIFETIME_MS: "30000" })).toBe(30_000);
+    // Blank / zero / negative still mean "use the default lifetime".
+    expect(bg({ FORTRESS_DB_MAX_LIFETIME_MS: "" })).toBe(600_000);
+    expect(bg({ FORTRESS_DB_MAX_LIFETIME_MS: "0" })).toBe(600_000);
+    // And the =0 pooler hatch still strips every startup parameter.
+    expect(
+      hxPoolOptionsFor("bg", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection,
+    ).toBeUndefined();
+  });
 });
