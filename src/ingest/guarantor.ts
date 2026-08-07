@@ -141,6 +141,11 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
     }, ms);
   };
 
+  // Set when the last pass yielded to live ingest, so the next one is armed at
+  // the debounce rather than the full interval — a 60-second saturation window
+  // should not cost an hour of repair.
+  let stoodDown = false;
+
   async function tick(): Promise<void> {
     if (stopped || inFlight) return;
     signalPending = false; // this pass consumes any armed signal.
@@ -163,7 +168,12 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
           correctExistingTitles: firstPass && correctTitles,
           logger: cfg.logger,
         });
-        firstPass = false;
+        // A pass that stood down for load did no work, so it must not consume
+        // the one-shot boot drain (the title corrective backfill runs on the
+        // first pass only). The drain fires 30 s after start — exactly when a
+        // fortress restarting from a pool incident is most likely saturated.
+        if (res.yieldedToLive === 0) firstPass = false;
+        stoodDown = res.yieldedToLive > 0;
         cfg.logger?.info?.("guarantor: reconcile pass complete", { ...res });
       } catch (err) {
         // reconcileOrphans is non-throwing per session; this catches only a
@@ -179,7 +189,7 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
       // An urgent signal that arrived mid-pass pulls the next pass to the
       // debounce window (the outage's backlog is already known); otherwise
       // the ordinary sweep cadence resumes.
-      schedule(urgentLatch ? signalDebounce : interval);
+      schedule(urgentLatch || stoodDown ? signalDebounce : interval);
     }
   }
 

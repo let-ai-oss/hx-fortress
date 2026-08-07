@@ -497,6 +497,10 @@ export async function runFortressHost(
     // under a week, and the pass yields entirely when live ingest is starved, so
     // the extra reads never come at the live path's expense. `deepVerifyBacklog`
     // in every pass log is how you watch it converge.
+    // NOTE the unit: this cap applies to sessions AND, separately, to agent
+    // lanes — so a pass reads up to 2x this many canonicals. 100 means ~200
+    // object reads per pass, and the rotation is continuous rather than
+    // one-shot, so budget that egress (README documents it).
     const DEFAULT_DEEP_VERIFY_PER_PASS = 100;
     // Set-but-EMPTY means the default, never 0. `Number("")` is 0, so the naive
     // read silently disables the only detector for this damage class when a

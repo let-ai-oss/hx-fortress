@@ -362,7 +362,13 @@ export function hxPoolOptionsFor(
         statementTimeoutMs(env) < DEFAULT_STATEMENT_TIMEOUT_MS
           ? statementTimeoutMs(env)
           : backgroundStatementTimeoutMs(env),
-        Math.max(1, lifetimeMsFor(env) - BG_LIFETIME_MARGIN_MS),
+        // Never below what the LIVE path gets. `Math.max(1, …)` avoided a zero
+        // (which would omit the parameter entirely) but produced something
+        // worse: a 60 s maxLifetime yielded a 1 ms budget, so every background
+        // statement died instantly with 57014 and all repair stopped, silently.
+        // A short connection lifetime is a reason to cap the budget, never a
+        // reason to make repair impossible.
+        Math.max(ingestStatementTimeoutMs(env), lifetimeMsFor(env) - BG_LIFETIME_MARGIN_MS),
       ),
     });
   }

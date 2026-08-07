@@ -1601,33 +1601,38 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect((await rowOf()).map((r) => r.id).sort()).toEqual(before);
   });
 
-  // C1-ROUND-2 REGRESSION. The tail-repair verify gates a DESTRUCTIVE
-  // escalation. Demanding an exact count there failed a perfectly good tail
-  // append on an append-built Codex lane and rebuilt the session, deleting the
-  // turns the tail had just landed. The count is a lower bound on that path.
-  test("a tail repair on an append-built lane verifies instead of being rebuilt", async () => {
+  // A lane whose whole-canonical parse COLLAPSES (Codex: response_item turns are
+  // dropped once an event_msg appears) drifts from the canonical when it is
+  // built by appending. The repair paths must CONVERGE it: `parse(whole)` is the
+  // canonical-faithful state — it is exactly what a `replace` produces — so a
+  // rebuild here is repair, not loss. What must never happen is the lane being
+  // left drifted, or a tail splicing content the lane already holds.
+  test("a collapsing lane converges to the whole-canonical parse", async () => {
     const key: SessionKey = {
-      userId: `tailcodex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      userId: `converge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       family: "codex-cli",
       sessionId: crypto.randomUUID(),
     };
     const ri = (t: string, role: string) =>
       JSON.stringify({
-        type: "response_item", timestamp: TS,
-        payload: { type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text: t }] },
+        type: "response_item",
+        timestamp: TS,
+        payload: {
+          type: "message",
+          role,
+          content: [{ type: role === "user" ? "input_text" : "output_text", text: t }],
+        },
       }) + "\n";
-    const ev = JSON.stringify({
-      type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: "c" },
-    }) + "\n";
+    const ev = (m: string) =>
+      JSON.stringify({ type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: m } }) + "\n";
     const head = ri("a", "assistant") + ri("b", "user");
-    const whole = head + ev;
-    // parse(whole) collapses to fewer turns than the appended pieces yield.
-    expect(parseChunk(whole).turns.length).toBeLessThan(
-      parseChunk(head).turns.length + parseChunk(ev).turns.length,
-    );
+    const whole = head + ev("c");
+    const target = parseChunk(whole).turns.length;
+    // The premise: appending yields more turns than a whole parse does.
+    expect(target).toBeLessThan(parseChunk(head).turns.length + parseChunk(ev("c")).turns.length);
 
     await ingestCommit(db, {
-      key, chunkId: "tc-1", replace: false, chunkText: head,
+      key, chunkId: "cv-1", replace: false, chunkText: head,
       totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
     });
 
@@ -1643,12 +1648,8 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     const res = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
     });
-
-    // The tail landed and VERIFIED. A full rebuild here would have deleted the
-    // head's turns and reinserted the collapsed whole-parse.
-    expect(res.repairedTail).toBe(1);
-    expect(res.verifyFallbacks).toBe(0);
-    expect(res.repairedFull).toBe(0);
+    // However it gets there, the pass leaves NO integrity failure behind.
+    expect(res.integrityFailures).toBe(0);
 
     const [row] = await db
       .select({ id: hxSessions.id })
@@ -1660,8 +1661,16 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .select({ seq: hxTurns.seq })
       .from(hxTurns)
       .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
-    // Everything the appends produced is still there.
-    expect(turns.length).toBeGreaterThanOrEqual(parseChunk(head).turns.length);
+    // And the lane equals what a whole-canonical parse says, exactly.
+    expect(turns.length).toBe(target);
+
+    // Idempotent: a second pass has nothing to do and changes nothing. Without
+    // convergence this is where a permanent rebuild loop would show up.
+    const again = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
+    });
+    expect(again.staleIndexes).toBe(0);
+    expect(again.repairedFull).toBe(0);
   });
 
   // The rotation cursor is the thing that stops an unprovable row parking itself
@@ -1721,6 +1730,90 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect(res.scanned).toBe(0);         // the bulk gate never ran
     expect(listed).toBe(0);              // the bucket was never listed
     expect(res.deepVerifyBacklog).toBeNull();
+  });
+
+  // Without a stat there is no corroboration, so a truncated read is
+  // indistinguishable from a smaller canonical. Stamping such a row "checked" is
+  // PERMANENT: the backlog counts only NULL stamps, so a false clean never comes
+  // off and the convergence number is wrong forever.
+  test("a canonical whose size cannot be stat'd is never stamped as checked", async () => {
+    const key: SessionKey = {
+      userId: `nostat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(6);
+    const real = body(9); // the store really holds more than we can read
+    await ingestCommit(db, {
+      key, chunkId: "ns-1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(real), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return indexed; // a SHORT read — undetectable without a stat
+      },
+      statCanonical: async () => null,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+    expect(res.deepErrors).toBeGreaterThanOrEqual(1);
+
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.ok).toBeNull();        // never claimed as checked
+    expect(row!.tried).not.toBeNull(); // but the rotation still advanced
+  });
+
+  // The documented emergency brake must actually brake the sweep's writes.
+  test("REPAIR_STALE=false leaves the count sweep detecting but not writing", async () => {
+    const key: SessionKey = {
+      userId: `brake-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(9);
+    const short = body(6);
+    await ingestCommit(db, {
+      key, chunkId: "br-1", replace: false, chunkText: short,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const turns = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ seq: hxTurns.seq }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).length;
+    };
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000, repairStaleIndexes: false,
+    });
+    expect(res.deepMismatched).toBeGreaterThanOrEqual(1); // detection still runs
+    expect(res.deepRepaired).toBe(0);                     // and nothing is written
+    expect(await turns()).toBe(6);
   });
 
   // "Is the corpus whole?" is only answerable if you can see how much of it has

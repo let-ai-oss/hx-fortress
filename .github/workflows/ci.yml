@@ -86,7 +86,17 @@ jobs:
           PGPASSWORD: hx
         run: |
           set -euo pipefail
-          for f in $(grep -rl "FORTRESS_DATABASE_URL" test --include='*.test.ts' | sort); do
+          # `set -e` does not observe a command substitution used as a for-loop
+          # word list, so an empty match would make this step a silent no-op
+          # reporting success — the exact "it never ran" failure this job exists
+          # to end. Collect first and refuse to pass on nothing.
+          mapfile -t files < <(grep -rl "FORTRESS_DATABASE_URL" test --include='*.test.ts' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no DB-backed suites matched — refusing to report success"
+            exit 1
+          fi
+          echo "running ${#files[@]} DB-backed suites"
+          for f in "${files[@]}"; do
             db="ci_$(basename "$f" .test.ts | tr -c 'a-zA-Z0-9' '_')"
             psql -h 127.0.0.1 -U postgres -q -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"
             echo "--- $f -> $db"

@@ -360,21 +360,16 @@ async function verifyLane(
   // canonical's own record count to what is indexed can. When the caller can
   // supply that count it decides the verdict, with bytes/density kept as the
   // cheap corroborating checks.
-  // How to read the count, and why it is not one rule.
-  //
-  // After a REPLACE the lane was built from exactly this text in one pass, so
-  // `turns === expected` holds by construction and equality is the strongest
-  // check available.
-  //
-  // After a TAIL APPEND it does not. parseChunk is stateful across the whole
-  // text, so a lane built by appending chunks holds the SUM of per-chunk parses,
-  // which is >= parse(whole) — measured: a Codex lane appended as 3 turns parses
-  // whole to 1. Demanding equality there fails a perfectly good tail repair and
-  // escalates to a full rebuild that DELETES those three turns and reinserts
-  // one. The count is a lower bound on that path and nothing more.
+  // EXACT on every repair path. The canonical-faithful state of a lane is
+  // `parse(whole)` — that is what a `replace` produces — so a repaired lane
+  // whose count differs has DRIFTED from the canonical and must be rebuilt, not
+  // accepted. (parseChunk is stateful across the text, so an incrementally
+  // appended lane can legitimately differ; that drift is exactly what the
+  // rebuild converges. `atLeast` exists for callers that can only establish a
+  // lower bound, and no repair path is one of them.)
   const countOk =
     expectedTurns == null ||
-    ((countMode ?? "atLeast") === "exact" ? turns === expectedTurns : turns >= expectedTurns);
+    ((countMode ?? "exact") === "exact" ? turns === expectedTurns : turns >= expectedTurns);
   return {
     ok: bytesOk && dense && countOk,
     bytes,
@@ -1004,7 +999,7 @@ export async function reconcileOrphans(
             });
           } else if (outcome) {
             tailApplied = true;
-            const v = await verifyLane(db, key, canonicalBytes, store, null, "atLeast", expectedTurns);
+            const v = await verifyLane(db, key, canonicalBytes, store, null, "exact", expectedTurns);
             if (v.ok) {
               landed = true;
               res.repairedTail += 1;
@@ -1247,6 +1242,14 @@ async function deepVerifySweep(
     .limit(limit);
 
   for (const row of candidates) {
+    // Yield mid-flight, not only at the door. Checking saturation just once
+    // before the sweep starts still lets it issue up to a hundred canonical
+    // reads and 40-115 s rebuilds however starved live ingest becomes.
+    if (opts.isSaturated?.()) {
+      if (res.yieldedToLive === 0) res.yieldedToLive += 1;
+      opts.logger?.info?.("reconciler: live pool saturated — count sweep stopping mid-pass");
+      return;
+    }
     const key: SessionKey = {
       userId: row.userId,
       family: row.family,
@@ -1275,14 +1278,27 @@ async function deepVerifySweep(
       try {
         statBytes = await store.statCanonical(key);
       } catch {
-        // unreadable stat — treated as "unknown" below, which never repairs
+        // leave null — handled as "cannot judge" immediately below
+      }
+      // No stat means no corroboration, and without it a truncated read is
+      // indistinguishable from a smaller canonical: `expected` comes out short,
+      // the session looks fine, and it gets stamped as checked. That is a
+      // PERMANENT false clean — the backlog counts only rows whose stamp is
+      // NULL, so it never comes off. Advance the cursor and re-read next pass.
+      if (statBytes == null) {
+        res.deepErrors += 1;
+        opts.logger?.warn?.("reconciler: count sweep could not stat the canonical — cannot judge", {
+          sessionId: key.sessionId, family: key.family,
+        });
+        await stampAttempted(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
       }
       const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.rowId, null);
-      res.deepVerified += 1;
 
-      if (statBytes != null && statBytes > readBytes) {
+      if (statBytes > readBytes) {
         // The stat is taken AFTER the read, so a session written to in between
         // legitimately stats larger. That is growth, not a short read, and
         // conflating them would fire a store-fault alert for every actively
@@ -1304,6 +1320,10 @@ async function deepVerifySweep(
         if (delay > 0) await sleep(delay);
         continue;
       }
+
+      // Counted only once the row is judgeable — an unjudgeable row is not
+      // evidence, and this is also the systematic-bug ceiling's denominator.
+      res.deepVerified += 1;
 
       // THE ORACLE, and its exact strength. `parseChunk` is stateful across the
       // whole text — cross-record dedup, retroactive Codex filtering, queue
@@ -1476,6 +1496,11 @@ async function deepVerifyLanes(
     .limit(limit);
 
   for (const row of candidates) {
+    if (opts.isSaturated?.()) {
+      if (res.yieldedToLive === 0) res.yieldedToLive += 1;
+      opts.logger?.info?.("reconciler: live pool saturated — lane sweep stopping mid-pass");
+      return;
+    }
     // Two different keys, and confusing them is a silent content mix-up. The
     // STORE key carries the `:a:agentId` suffix — that composite IS the lane's
     // own canonical object, and reading the parent would compare a lane against
@@ -1507,14 +1532,22 @@ async function deepVerifyLanes(
       try {
         statBytes = await store.statCanonical(storeKey);
       } catch {
-        // unknown — never repairs below
+        // leave null — handled as "cannot judge" immediately below
+      }
+      if (statBytes == null) {
+        res.deepErrors += 1;
+        opts.logger?.warn?.("reconciler: count sweep could not stat a lane canonical — cannot judge", {
+          sessionId: row.sessionId, agentId: row.agentId,
+        });
+        await stampLaneAttempted(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
       }
       const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
-      res.deepVerified += 1;
 
-      if (statBytes != null && statBytes > readBytes) {
+      if (statBytes > readBytes) {
         // Growth during the read, not a short read — see the parent path.
         const grew =
           laneAnchor !== undefined && (await currentLaneBytes(db, row.laneRowId)) !== laneAnchor;
@@ -1533,6 +1566,8 @@ async function deepVerifyLanes(
         if (delay > 0) await sleep(delay);
         continue;
       }
+
+      res.deepVerified += 1;
 
       // Lower bound only — see the parent sweep for why parse(whole) cannot be
       // an equality oracle against an append-built lane.
