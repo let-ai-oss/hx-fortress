@@ -20,6 +20,7 @@ import sql0011WidenTokens from "./0011_widen_session_tokens.sql" with { type: "t
 import sql0012EmbedBudget from "./0012_embed_budget.sql" with { type: "text" };
 import sql0013DeletedSessions from "./0013_deleted_sessions.sql" with { type: "text" };
 import sql0014BackfillTitles from "./0014_backfill_session_titles.sql" with { type: "text" };
+import sql0015FkIndexes from "./0015_fk_indexes.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -56,4 +57,9 @@ export const migrations: Migration[] = [
   // title-less and show a bare id. Fills only NULL titles (idempotent). NOT
   // gated. Going forward ingestCommit derives titles inline (src/ingest/ingest.ts).
   { name: "0014_backfill_session_titles", sql: sql0014BackfillTitles },
+  // Covering indexes for the DELETE-cascade foreign keys. An unindexed FK makes
+  // every cascading delete scan the whole child table ONCE PER DELETED ROW —
+  // this is what made guarantor rebuilds run to the statement timeout and starve
+  // the background pool. NOT gated. See the file header for the full account.
+  { name: "0015_fk_indexes", sql: sql0015FkIndexes },
 ];
