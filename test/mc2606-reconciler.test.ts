@@ -1745,6 +1745,70 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect(res.deepVerifyBacklog).toBeNull();
   });
 
+  // C1-DELTA. Moving the stat BEFORE the read left growth in the stat->read
+  // window uncovered: the text in hand is newer than the watermark it is judged
+  // against, so a healthy session reads as `actual < expected` and gets rebuilt
+  // — deleting live turns, after which the deferred gateway commit lands and
+  // duplicates them, all stamped verified. The arm that used to catch this was
+  // `statBytes > readBytes`; moving the stat inverted the comparison.
+  test("a canonical that grows between the stat and the read is never judged", async () => {
+    const key: SessionKey = {
+      userId: `statgrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(4);
+    const grown = body(9); // what the READ returns, after a compose lands
+    await ingestCommit(db, {
+      key, chunkId: "sg-1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      // The stat sees the pre-growth size; the read, moments later, sees more.
+      statCanonical: async () => Buffer.byteLength(indexed),
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return grown;
+      },
+    } as unknown as SessionStore;
+
+    const ids = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ id: hxTurns.id }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).map((x) => x.id).sort();
+    };
+    const before = await ids();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // Deferred, not judged: no false damage, no rebuild, same rows.
+    expect(res.liveRaces).toBeGreaterThanOrEqual(1);
+    expect(res.deepMismatched).toBe(0);
+    expect(res.deepRepaired).toBe(0);
+    expect(await ids()).toEqual(before);
+
+    // And not stamped — it is still owed a real check.
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.ok).toBeNull();
+    expect(row!.tried).not.toBeNull();
+  });
+
   // The sweep must yield MID-FLIGHT, not just at the door. Checking saturation
   // once before it starts still lets it issue a hundred canonical reads and a
   // hundred 40-115s rebuilds however starved live ingest becomes.

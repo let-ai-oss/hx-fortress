@@ -147,6 +147,11 @@ export interface ReconcileResult {
   /** Deep verifications that could not be completed (unreadable canonical,
    *  transient DB error). NOT stamped, so they are retried next pass. */
   deepErrors: number;
+  /** Rows the sweep declined to judge because their canonical is AHEAD of the
+   *  index — the byte-staleness gate's business, not the sweep's. Not damage,
+   *  but it is why a backlog can sit still: without this counter a stuck
+   *  backlog has no visible cause in the pass log. */
+  skippedBehind: number;
   /** Tail repairs that landed EXACTLY (prefix + tail, dense, byte-covering) yet
    *  still differ from a whole-canonical parse, because parseChunk suppresses
    *  more when it sees the text in one piece. Expected and benign on collapsing
@@ -535,6 +540,7 @@ export async function reconcileOrphans(
     deepMismatched: 0,
     deepRepaired: 0,
     deepErrors: 0,
+    skippedBehind: 0,
     laneDrift: 0,
     deepOvercount: 0,
     deepVerifyBacklog: null,
@@ -1044,7 +1050,12 @@ export async function reconcileOrphans(
               // which has its own handling (re-stat and defer) and must keep it.
               v.canonical != null &&
               v.bytes >= v.canonical &&
-              v.turns === expectAfterAppend
+              v.turns === expectAfterAppend &&
+              // …and the divergence is PROVABLY the collapsing-parse case. Without
+              // this the branch accepts any residual disagreement, including a
+              // lane whose prefix content is stale but whose COUNT happens to
+              // line up — `expectPriorTurns` is a count CAS, not a content check.
+              expectAfterAppend > expectedTurns
             ) {
               // The append landed EXACTLY: prefix + tail, densely, covering every
               // byte. The only reason it differs from `parse(whole)` is that
@@ -1369,6 +1380,7 @@ async function deepVerifySweep(
       // the lane and its embeddings, the deferred commit then lands and
       // re-appends its chunk, and the session ends up DUPLICATED — and stamped.
       if (anchor !== undefined && statBytes > anchor) {
+        res.skippedBehind += 1;
         await stampAttempted(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
@@ -1393,7 +1405,26 @@ async function deepVerifySweep(
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.rowId, null);
 
-      // The stat was taken BEFORE the read, so reading LARGER is ordinary growth.
+      // The stat was taken BEFORE the read, so reading LARGER means the canonical
+      // GREW in that window — a live compose landed. The text in hand is then
+      // newer than the watermark we are about to judge it against, and judging
+      // it produces `actual < expected` on a perfectly healthy session. That is
+      // the rebuild-and-duplicate this whole guard exists to prevent, reached
+      // through the stat->read window instead of the behind check.
+      //
+      // (Before the stat moved ahead of the read this was covered by the
+      // short-read arm below, which growth used to trip. Moving the stat first
+      // inverted the comparison and left that arm covering nothing.)
+      if (readBytes > statBytes) {
+        res.liveRaces += 1;
+        opts.logger?.info?.("reconciler: canonical grew between stat and read — re-judging next pass", {
+          sessionId: key.sessionId, family: key.family, readBytes, statBytes,
+        });
+        await stampAttempted(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
       // Reading SMALLER means the read came back short of the object, and no
       // rebuild can fix that — it is the store's problem.
       if (readBytes < statBytes) {
@@ -1634,6 +1665,7 @@ async function deepVerifyLanes(
       // deletes a healthy lane and lets a deferred commit duplicate it — see the
       // parent path for the full sequence.
       if (laneAnchor !== undefined && statBytes > laneAnchor) {
+        res.skippedBehind += 1;
         await stampLaneAttempted(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
@@ -1652,6 +1684,17 @@ async function deepVerifyLanes(
       const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
+
+      // Grew between stat and read — see the parent path.
+      if (readBytes > statBytes) {
+        res.liveRaces += 1;
+        opts.logger?.info?.("reconciler: lane canonical grew between stat and read — re-judging next pass", {
+          sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
+        });
+        await stampLaneAttempted(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
 
       if (readBytes < statBytes) {
         res.shortReads += 1;
