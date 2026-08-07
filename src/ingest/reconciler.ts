@@ -1051,10 +1051,18 @@ export async function reconcileOrphans(
               v.canonical != null &&
               v.bytes >= v.canonical &&
               v.turns === expectAfterAppend &&
-              // …and the divergence is PROVABLY the collapsing-parse case. Without
-              // this the branch accepts any residual disagreement, including a
-              // lane whose prefix content is stale but whose COUNT happens to
-              // line up — `expectPriorTurns` is a count CAS, not a content check.
+              // …and the divergence is in the collapsing direction. For a
+              // newline-aligned split `sum >= whole` always holds (every state
+              // mechanism in classifyChunk only ever suppresses MORE with more
+              // context), and `sum == whole` would already have satisfied v.ok
+              // above — so this conjunct guards that invariant rather than
+              // adding a new check.
+              //
+              // Stated plainly, because it would be easy to read as more:
+              // `expectPriorTurns` is a COUNT compare-and-swap, not a content
+              // check. A lane whose prefix content is stale but whose count
+              // happens to match is still accepted here. Closing that needs the
+              // prefix hashed, which this is not.
               expectAfterAppend > expectedTurns
             ) {
               // The append landed EXACTLY: prefix + tail, densely, covering every
@@ -1402,31 +1410,52 @@ async function deepVerifySweep(
 
       const text = await store.readCanonicalText(key);
       const readBytes = Buffer.byteLength(text);
-      const expected = parseChunk(text).turns.length;
-      const actual = await countLaneTurns(db, row.rowId, null);
 
-      // The stat was taken BEFORE the read, so reading LARGER means the canonical
-      // GREW in that window — a live compose landed. The text in hand is then
-      // newer than the watermark we are about to judge it against, and judging
-      // it produces `actual < expected` on a perfectly healthy session. That is
-      // the rebuild-and-duplicate this whole guard exists to prevent, reached
-      // through the stat->read window instead of the behind check.
+      // Decide the byte question BEFORE parsing: neither arm below needs the
+      // parse, and on the deferral paths it would allocate the decoded string
+      // plus a multiple of it in retained records, only to throw it away.
       //
-      // (Before the stat moved ahead of the read this was covered by the
-      // short-read arm below, which growth used to trip. Moving the stat first
-      // inverted the comparison and left that arm covering nothing.)
-      if (readBytes > statBytes) {
-        res.liveRaces += 1;
-        opts.logger?.info?.("reconciler: canonical grew between stat and read — re-judging next pass", {
-          sessionId: key.sessionId, family: key.family, readBytes, statBytes,
-        });
-        await stampAttempted(db, row.rowId);
-        if (delay > 0) await sleep(delay);
-        continue;
+      // A read that disagrees with the stat has TWO possible causes and they
+      // demand opposite handling, so the length alone cannot decide:
+      //
+      //   the canonical GREW between the stat and the read — the text is newer
+      //   than the watermark we would judge it against, so judging it reports
+      //   false damage and rebuilds a healthy session, which the gateway's
+      //   deferred commit then duplicates. Must defer.
+      //
+      //   the DECODE inflated — `readCanonicalText` is `buf.toString("utf8")`,
+      //   and each ill-formed byte becomes U+FFFD, which re-encodes to three.
+      //   So a canonical holding non-UTF-8 bytes always reads LARGER than its
+      //   object. That is permanent, not transient: deferring it retires the
+      //   session from the only detector that can see a missing middle record,
+      //   forever, filed under a counter that says "transient".
+      //
+      // Only a re-stat separates them. It costs one HEAD, and only on the rare
+      // path where the two lengths already disagree.
+      if (readBytes !== statBytes) {
+        let statAfter: number | null = null;
+        try {
+          statAfter = await store.statCanonical(key);
+        } catch {
+          // unknowable — treat as growth and re-judge next pass
+        }
+        if (statAfter === null || statAfter > statBytes) {
+          res.liveRaces += 1;
+          opts.logger?.info?.("reconciler: canonical grew between stat and read — re-judging next pass", {
+            sessionId: key.sessionId, family: key.family, readBytes, statBytes, statAfter,
+          });
+          await stampAttempted(db, row.rowId);
+          if (delay > 0) await sleep(delay);
+          continue;
+        }
+        // Object unchanged and the read came back LARGER: a lossy decode. U+FFFD
+        // substitution never touches a newline (0x0A is valid ASCII), so the
+        // record count is unaffected and this text is still a sound oracle.
+        // Fall through and judge it.
       }
 
-      // Reading SMALLER means the read came back short of the object, and no
-      // rebuild can fix that — it is the store's problem.
+      // Reading SMALLER than an unchanged object means the read was truncated,
+      // and no rebuild can fix that — it is the store's problem.
       if (readBytes < statBytes) {
         res.shortReads += 1;
         opts.logger?.warn?.("reconciler: count sweep read short of the canonical — cannot judge", {
@@ -1436,6 +1465,9 @@ async function deepVerifySweep(
         if (delay > 0) await sleep(delay);
         continue;
       }
+
+      const expected = parseChunk(text).turns.length;
+      const actual = await countLaneTurns(db, row.rowId, null);
 
       // Counted only once the row is judgeable — an unjudgeable row is not
       // evidence, and this is also the systematic-bug ceiling's denominator.
@@ -1682,18 +1714,27 @@ async function deepVerifyLanes(
 
       const text = await store.readCanonicalText(storeKey);
       const readBytes = Buffer.byteLength(text);
-      const expected = parseChunk(text).turns.length;
-      const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
 
-      // Grew between stat and read — see the parent path.
-      if (readBytes > statBytes) {
-        res.liveRaces += 1;
-        opts.logger?.info?.("reconciler: lane canonical grew between stat and read — re-judging next pass", {
-          sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
-        });
-        await stampLaneAttempted(db, row.laneRowId);
-        if (delay > 0) await sleep(delay);
-        continue;
+      // Re-stat to tell GROWTH (defer) from a LOSSY DECODE (judgeable, and
+      // permanent if deferred) — see the parent path for the full reasoning.
+      // Decided before the parse so a deferral costs one string, not a parse.
+      if (readBytes !== statBytes) {
+        let statAfter: number | null = null;
+        try {
+          statAfter = await store.statCanonical(storeKey);
+        } catch {
+          // unknowable — treat as growth and re-judge next pass
+        }
+        if (statAfter === null || statAfter > statBytes) {
+          res.liveRaces += 1;
+          opts.logger?.info?.("reconciler: lane canonical grew between stat and read — re-judging next pass", {
+            sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes, statAfter,
+          });
+          await stampLaneAttempted(db, row.laneRowId);
+          if (delay > 0) await sleep(delay);
+          continue;
+        }
+        // Unchanged object, larger read: lossy decode. Record count unaffected.
       }
 
       if (readBytes < statBytes) {
@@ -1705,6 +1746,9 @@ async function deepVerifyLanes(
         if (delay > 0) await sleep(delay);
         continue;
       }
+
+      const expected = parseChunk(text).turns.length;
+      const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
 
       res.deepVerified += 1;
 

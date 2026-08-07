@@ -1764,10 +1764,17 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
     });
 
+    // A canonical that really grew stats SMALL before the compose lands and
+    // LARGE afterwards. Modelling it with a constant stat would be untruthful —
+    // and would let a "growth" test silently pass through the lossy-decode path
+    // instead, which is the opposite verdict.
+    let stats = 0;
     const store = {
       listAllCanonicalKeys: async () => [],
-      // The stat sees the pre-growth size; the read, moments later, sees more.
-      statCanonical: async () => Buffer.byteLength(indexed),
+      statCanonical: async () => {
+        stats += 1;
+        return stats === 1 ? Buffer.byteLength(indexed) : Buffer.byteLength(grown);
+      },
       readCanonicalText: async (k: SessionKey) => {
         if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
         return grown;
@@ -1794,6 +1801,9 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
 
     // Deferred, not judged: no false damage, no rebuild, same rows.
     expect(res.liveRaces).toBeGreaterThanOrEqual(1);
+    // The direct statement of "never judged" — the other two only imply it for
+    // this particular fixture.
+    expect(res.deepVerified).toBe(0);
     expect(res.deepMismatched).toBe(0);
     expect(res.deepRepaired).toBe(0);
     expect(await ids()).toEqual(before);
@@ -1807,6 +1817,119 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .limit(1);
     expect(row!.ok).toBeNull();
     expect(row!.tried).not.toBeNull();
+  });
+
+  // The lane sweep carries a hand-copied twin of the growth guard — different
+  // stamp function, different key, different row. Untested, it is exactly what
+  // a later round regresses silently.
+  test("a LANE canonical that grows between stat and read is never judged", async () => {
+    const sessionId = crypto.randomUUID();
+    const agentId = "agent-grow-1";
+    const key: SessionKey = {
+      userId: `lanegrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId,
+    };
+    const parent = body(2);
+    const laneIndexed = body(4);
+    const laneGrown = body(9);
+
+    await ingestCommit(db, {
+      key, chunkId: "lg-p", replace: false, chunkText: parent,
+      totalBytes: Buffer.byteLength(parent), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestAgentCommit(db, {
+      key, agentId, chunkId: "lg-a", replace: false, chunkText: laneIndexed,
+      totalBytes: Buffer.byteLength(laneIndexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const laneStoreId = `${sessionId}:a:${agentId}`;
+    let laneStats = 0;
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      statCanonical: async (k: SessionKey) => {
+        if (k.sessionId !== laneStoreId) return Buffer.byteLength(parent);
+        laneStats += 1;
+        return laneStats === 1 ? Buffer.byteLength(laneIndexed) : Buffer.byteLength(laneGrown);
+      },
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId === laneStoreId) return laneGrown; // the read sees the growth
+        if (k.sessionId === sessionId) return parent;
+        throw new Error("not this test's session");
+      },
+    } as unknown as SessionStore;
+
+    const laneRows = async () => {
+      const [srow] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, sessionId)))
+        .limit(1);
+      const [lrow] = await db
+        .select({ id: hxSessionAgents.id, ok: hxSessionAgents.deepVerifiedAt, tried: hxSessionAgents.deepAttemptedAt })
+        .from(hxSessionAgents)
+        .where(and(eq(hxSessionAgents.sessionId, srow!.id), eq(hxSessionAgents.agentExternalId, agentId)))
+        .limit(1);
+      const turns = await db
+        .select({ id: hxTurns.id })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, srow!.id), eq(hxTurns.agentId, lrow!.id)));
+      return { lrow: lrow!, ids: turns.map((t) => t.id).sort() };
+    };
+    const before = await laneRows();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    expect(res.liveRaces).toBeGreaterThanOrEqual(1);
+    expect(res.deepRepaired).toBe(0);
+    const after = await laneRows();
+    expect(after.ids).toEqual(before.ids);   // the lane was not rebuilt
+    expect(after.lrow.ok).toBeNull();        // and not claimed as checked
+    expect(after.lrow.tried).not.toBeNull(); // but the rotation advanced
+  });
+
+  // A canonical holding non-UTF-8 bytes reads LARGER than its object (U+FFFD is
+  // three bytes) — permanently, on every pass. Deferring it as "growth" would
+  // retire the session from the only detector that sees a missing middle
+  // record, forever, under a counter that says transient. It must be judged:
+  // U+FFFD never replaces a newline, so the record count is unaffected.
+  test("a canonical that merely decodes larger is judged, not deferred forever", async () => {
+    const key: SessionKey = {
+      userId: `lossy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(9);
+    const short = body(4);
+    // Byte-covering watermark over a lane holding only part of the records —
+    // the sweep's exact target damage.
+    await ingestCommit(db, {
+      key, chunkId: "lo-1", replace: false, chunkText: short,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      // The object is SMALLER than what the read returns, and stays that size:
+      // a stable lossy decode, not growth.
+      statCanonical: async () => Buffer.byteLength(whole) - 2,
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // Judged and repaired — NOT filed away as a live race.
+    expect(res.deepVerified).toBeGreaterThanOrEqual(1);
+    expect(res.deepMismatched).toBeGreaterThanOrEqual(1);
+    expect(res.deepRepaired).toBeGreaterThanOrEqual(1);
   });
 
   // The sweep must yield MID-FLIGHT, not just at the door. Checking saturation
