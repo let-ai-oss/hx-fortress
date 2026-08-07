@@ -1732,6 +1732,70 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect(res.deepVerifyBacklog).toBeNull();
   });
 
+  // C1-ROUND-4. The gateway acks a chunk once the canonical is composed and
+  // DEFERS the indexing, so there is a real window where the canonical holds
+  // records the index has not seen. In that window a count check sees
+  // `actual < expected` and cannot distinguish it from missing records — and
+  // answering with replace:true deletes a healthy lane and its embeddings, after
+  // which the deferred commit lands and re-appends, DUPLICATING it. The sweep
+  // only judges byte-COVERING rows; behind-ness belongs to the byte gate.
+  test("a session merely behind its canonical is left for the byte gate, not rebuilt", async () => {
+    const key: SessionKey = {
+      userId: `behind-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(4);
+    const whole = body(9); // the canonical is ahead — the commit has not run yet
+    await ingestCommit(db, {
+      key, chunkId: "bh-1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      // Not listed as an orphan: the byte gate is not part of this test.
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const ids = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ id: hxTurns.id }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).map((x) => x.id).sort();
+    };
+    const before = await ids();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // No false damage report, no rebuild, and the SAME rows are still there.
+    expect(res.deepMismatched).toBe(0);
+    expect(res.deepRepaired).toBe(0);
+    expect(await ids()).toEqual(before);
+
+    // Not stamped as checked — it is still owed a real check once it catches up.
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.ok).toBeNull();
+    expect(row!.tried).not.toBeNull();
+  });
+
   // Without a stat there is no corroboration, so a truncated read is
   // indistinguishable from a smaller canonical. Stamping such a row "checked" is
   // PERMANENT: the backlog counts only NULL stamps, so a false clean never comes
@@ -1841,12 +1905,14 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
 
     // A pass that proves NOTHING still reports the backlog, so an operator can
     // never mistake "found nothing" for "everything is verified".
+    // Sweep disabled: the backlog was not MEASURED, and "not measured" must be
+    // reported as such. Rendering it 0 would be the strongest possible claim
+    // made after looking at nothing.
     const idle = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
     });
     expect(idle.deepVerified).toBe(0);
-    expect(idle.deepVerifyBacklog).not.toBeNull();
-    expect(idle.deepVerifyBacklog as number).toBeGreaterThan(0);
+    expect(idle.deepVerifyBacklog).toBeNull();
 
     // A pass that stood down for load must report "not measured", NEVER 0 —
     // `0` is the value that means "the corpus is fully proven", and printing it
@@ -1858,11 +1924,18 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     });
     expect(saturated.deepVerifyBacklog).toBeNull();
 
+    // A pass that actually ran the sweep reports a real number.
     const swept = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false,
       deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
     });
-    // Everything reachable got proven, so the backlog strictly fell.
-    expect(swept.deepVerifyBacklog as number).toBeLessThan(idle.deepVerifyBacklog as number);
+    expect(swept.deepVerifyBacklog).not.toBeNull();
+    // …and a second sweep, having checked more rows, cannot report a larger one.
+    const again = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+    expect(again.deepVerifyBacklog as number).toBeLessThanOrEqual(
+      swept.deepVerifyBacklog as number,
+    );
   });
 });

@@ -173,7 +173,12 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
         // first pass only). The drain fires 30 s after start — exactly when a
         // fortress restarting from a pool incident is most likely saturated.
         if (res.yieldedToLive === 0) firstPass = false;
-        stoodDown = res.yieldedToLive > 0;
+        // Re-arm early ONLY for a stand-down at the door. A pass that yielded
+        // mid-flight has already paid for the bulk gate and the store listing;
+        // retrying it in 30 s would hammer a database the fortress has just
+        // declared starved, and `saturated()` flaps between probe ticks so half
+        // those retries would run the whole expensive scan again.
+        stoodDown = res.yieldedToLive > 0 && res.scanned === 0;
         cfg.logger?.info?.("guarantor: reconcile pass complete", { ...res });
       } catch (err) {
         // reconcileOrphans is non-throwing per session; this catches only a

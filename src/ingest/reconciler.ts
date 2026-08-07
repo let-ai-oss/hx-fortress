@@ -31,6 +31,7 @@ import {
   ingestCommit,
 } from "./ingest";
 import { parseChunk } from "./parse";
+import { maxCanonicalBytes } from "../modules/session-vault/store/limits";
 
 const AGENT_LANE = ":a:";
 
@@ -1160,6 +1161,7 @@ export async function reconcileOrphans(
     await deepVerifyLanes(db, store, opts, res, sleep, delay, opts.deepVerifyPerPass ?? 0);
     // How much of the corpus has still never been proven. Reported every pass so
     // convergence is observable rather than assumed.
+    if ((opts.deepVerifyPerPass ?? 0) <= 0) throw new SweepSkipped();
     const [pending] = await db
       .select({ n: dsql<number>`count(*)::int` })
       .from(hxSessions)
@@ -1177,7 +1179,10 @@ export async function reconcileOrphans(
     }
   }
 
-  if (opts.correctExistingTitles !== false) {
+  // Not after a stand-down. correctTitles is an unbounded scan with one object
+  // GET per candidate row, which is exactly the load the pass just declined to
+  // impose — running it here would make "stood down for load" a lie.
+  if (opts.correctExistingTitles !== false && res.yieldedToLive === 0) {
     // A failure here must not discard the orphan-restore stats already gathered.
     try {
       const tc = await correctTitles(db, store, { sleep, logger: opts.logger });
@@ -1269,11 +1274,9 @@ async function deepVerifySweep(
       // the read cannot see a commit that landed during it, and the rebuild
       // would then delete that commit's turns and reinstate stale text.
       const anchor = await currentBytes(db, key);
-      const text = await store.readCanonicalText(key);
-      // A read that came back SHORT of the object makes `expected` too small and
-      // would frame a healthy session as over-indexed. Corroborate before
-      // concluding anything; if the stat disagrees, this is the store's problem
-      // and no rebuild can fix it.
+      // Stat FIRST, and read only once the stat has cleared three gates. It
+      // decides whether the row is judgeable at all, whether it is merely BEHIND
+      // (someone else's job), and whether it is safe to pull into memory.
       let statBytes: number | null = null;
       try {
         statBytes = await store.statCanonical(key);
@@ -1284,7 +1287,7 @@ async function deepVerifySweep(
       // indistinguishable from a smaller canonical: `expected` comes out short,
       // the session looks fine, and it gets stamped as checked. That is a
       // PERMANENT false clean — the backlog counts only rows whose stamp is
-      // NULL, so it never comes off. Advance the cursor and re-read next pass.
+      // NULL, so it never comes off.
       if (statBytes == null) {
         res.deepErrors += 1;
         opts.logger?.warn?.("reconciler: count sweep could not stat the canonical — cannot judge", {
@@ -1294,28 +1297,50 @@ async function deepVerifySweep(
         if (delay > 0) await sleep(delay);
         continue;
       }
+      // THE SWEEP ONLY JUDGES BYTE-COVERING ROWS. Its damage class is "seq-dense
+      // AND byte-covering"; a lane merely BEHIND its canonical belongs to the
+      // byte-staleness gate, which repairs it by APPENDING the tail.
+      //
+      // Judging one here is not just useless, it is destructive. The gateway
+      // acks a chunk once the canonical is composed and DEFERS the indexing, so
+      // there is a real window where the canonical holds records the index has
+      // not seen. In that window `actual < expected` is indistinguishable from
+      // missing records, and the sweep answers with `replace: true`: it deletes
+      // the lane and its embeddings, the deferred commit then lands and
+      // re-appends its chunk, and the session ends up DUPLICATED — and stamped.
+      if (anchor !== undefined && statBytes > anchor) {
+        await stampAttempted(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+      // Size gate before the read. This is the one read path with no cap, and
+      // unlike a real repair it runs for rotation-chosen rows every pass:
+      // parseChunk retains every parsed record before filtering, so a 100 MB
+      // transcript materialises on the order of a gigabyte of heap inside the
+      // live-ingest process.
+      if (statBytes > maxCanonicalBytes()) {
+        res.unjudgeable += 1;
+        opts.logger?.warn?.("reconciler: canonical too large for the count sweep — skipped", {
+          sessionId: key.sessionId, family: key.family, statBytes,
+        });
+        await stampAttempted(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      const text = await store.readCanonicalText(key);
       const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.rowId, null);
 
-      if (statBytes > readBytes) {
-        // The stat is taken AFTER the read, so a session written to in between
-        // legitimately stats larger. That is growth, not a short read, and
-        // conflating them would fire a store-fault alert for every actively
-        // written session on every pass. Either way we cannot judge this text,
-        // so advance the cursor and re-read next rotation.
-        const grew = anchor !== undefined && (await currentBytes(db, key)) !== anchor;
-        if (grew) {
-          res.liveRaces += 1;
-          opts.logger?.info?.("reconciler: session grew during the count read — re-reading next pass", {
-            sessionId: key.sessionId, family: key.family, readBytes, statBytes,
-          });
-        } else {
-          res.shortReads += 1;
-          opts.logger?.warn?.("reconciler: count sweep read short of the canonical — cannot judge", {
-            sessionId: key.sessionId, family: key.family, readBytes, statBytes,
-          });
-        }
+      // The stat was taken BEFORE the read, so reading LARGER is ordinary growth.
+      // Reading SMALLER means the read came back short of the object, and no
+      // rebuild can fix that — it is the store's problem.
+      if (readBytes < statBytes) {
+        res.shortReads += 1;
+        opts.logger?.warn?.("reconciler: count sweep read short of the canonical — cannot judge", {
+          sessionId: key.sessionId, family: key.family, readBytes, statBytes,
+        });
         await stampAttempted(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
@@ -1325,31 +1350,23 @@ async function deepVerifySweep(
       // evidence, and this is also the systematic-bug ceiling's denominator.
       res.deepVerified += 1;
 
-      // THE ORACLE, and its exact strength. `parseChunk` is stateful across the
-      // whole text — cross-record dedup, retroactive Codex filtering, queue
-      // operations that consume an earlier record — so a lane BUILT by appending
-      // chunks holds the SUM of per-chunk parses, which is >= parse(whole).
-      // Measured on real fixtures: a Codex lane appended as 3 turns parses whole
-      // to 1.
+      // THE ORACLE, and its exact strength. parseChunk is stateful across the
+      // whole text, so a lane BUILT by appending chunks holds the SUM of
+      // per-chunk parses, which is >= parse(whole) — measured: a Codex lane
+      // appended as 3 turns parses whole to 1.
       //
-      // So parse(whole) is a valid LOWER BOUND and nothing more:
       //   actual <  expected  -> records are definitely missing. Repairable.
-      //   actual >= expected  -> proves nothing. Could be the statefulness above
-      //                          (overwhelmingly the common case) or genuine
-      //                          duplication, and this oracle cannot tell them
-      //                          apart. Rebuilding on it would delete-and-reinsert
-      //                          healthy sessions corpus-wide and destroy their
-      //                          embeddings, every rotation, forever.
-      //
-      // Treating it as equality was the bug. Duplication needs its own detector;
-      // it does not get to borrow this one.
+      //   actual >= expected  -> proves nothing. Either that statefulness (the
+      //                          common case) or genuine duplication, and this
+      //                          oracle cannot tell them apart. Acting on it
+      //                          would rewrite healthy sessions corpus-wide and
+      //                          destroy their embeddings, every rotation.
       if (actual >= expected) {
         if (actual > expected) res.deepOvercount += 1;
         await stampDeepVerified(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
-
       res.deepMismatched += 1;
       opts.logger?.warn?.("reconciler: count sweep found records missing from a session the byte gate calls healthy", {
         sessionId: key.sessionId,
@@ -1442,6 +1459,16 @@ async function deepVerifySweep(
       if (after === expected) {
         res.deepRepaired += 1;
         await stampDeepVerified(db, row.rowId);
+      } else if (after > expected) {
+        // A live append landed between the rebuild and this count. The repair
+        // paths route exactly this through `grew`; treating it as damage here
+        // would raise `integrityFailures` — "the only outcome that leaves damage
+        // behind" — on a healthy session. Never stamped: re-judged next pass.
+        res.liveRaces += 1;
+        opts.logger?.info?.("reconciler: session grew during its count repair — re-judging next pass", {
+          sessionId: key.sessionId, family: key.family, indexedTurns: after, canonicalRecords: expected,
+        });
+        await stampAttempted(db, row.rowId);
       } else {
         res.integrityFailures += 1;
         opts.logger?.warn?.("reconciler: count repair did not reach the canonical's record count", {
@@ -1527,7 +1554,7 @@ async function deepVerifyLanes(
       // no anchor at all, so a live lane commit that landed while the sweep held
       // the text was deleted by the rebuild and the lane then stamped verified.
       const laneAnchor = await currentLaneBytes(db, row.laneRowId);
-      const text = await store.readCanonicalText(storeKey);
+      // Stat first, read last — same three gates as the parent path.
       let statBytes: number | null = null;
       try {
         statBytes = await store.statCanonical(storeKey);
@@ -1543,25 +1570,34 @@ async function deepVerifyLanes(
         if (delay > 0) await sleep(delay);
         continue;
       }
+      // Merely BEHIND its canonical is the byte gate's job. Judging it here
+      // deletes a healthy lane and lets a deferred commit duplicate it — see the
+      // parent path for the full sequence.
+      if (laneAnchor !== undefined && statBytes > laneAnchor) {
+        await stampLaneAttempted(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+      if (statBytes > maxCanonicalBytes()) {
+        res.unjudgeable += 1;
+        opts.logger?.warn?.("reconciler: lane canonical too large for the count sweep — skipped", {
+          sessionId: row.sessionId, agentId: row.agentId, statBytes,
+        });
+        await stampLaneAttempted(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      const text = await store.readCanonicalText(storeKey);
       const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
 
-      if (statBytes > readBytes) {
-        // Growth during the read, not a short read — see the parent path.
-        const grew =
-          laneAnchor !== undefined && (await currentLaneBytes(db, row.laneRowId)) !== laneAnchor;
-        if (grew) {
-          res.liveRaces += 1;
-          opts.logger?.info?.("reconciler: lane grew during the count read — re-reading next pass", {
-            sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
-          });
-        } else {
-          res.shortReads += 1;
-          opts.logger?.warn?.("reconciler: count sweep read a lane short of its canonical — cannot judge", {
-            sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
-          });
-        }
+      if (readBytes < statBytes) {
+        res.shortReads += 1;
+        opts.logger?.warn?.("reconciler: count sweep read a lane short of its canonical — cannot judge", {
+          sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
+        });
         await stampLaneAttempted(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
@@ -1577,7 +1613,6 @@ async function deepVerifyLanes(
         if (delay > 0) await sleep(delay);
         continue;
       }
-
       res.deepMismatched += 1;
       opts.logger?.warn?.("reconciler: count sweep found records missing from an agent lane", {
         sessionId: row.sessionId, agentId: row.agentId, family: row.family,
@@ -1655,6 +1690,12 @@ async function deepVerifyLanes(
       if (after === expected) {
         res.deepRepaired += 1;
         await stampLaneVerified(db, row.laneRowId);
+      } else if (after > expected) {
+        res.liveRaces += 1;
+        opts.logger?.info?.("reconciler: lane grew during its count repair — re-judging next pass", {
+          sessionId: row.sessionId, agentId: row.agentId, indexedTurns: after, canonicalRecords: expected,
+        });
+        await stampLaneAttempted(db, row.laneRowId);
       } else {
         res.integrityFailures += 1;
         opts.logger?.warn?.("reconciler: lane count repair did not reach the canonical's record count", {
