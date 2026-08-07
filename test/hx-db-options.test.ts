@@ -205,11 +205,15 @@ describe("per-role pool profiles — background repair can never spend the live 
     });
     // Reads never take the per-session advisory lock, so they need no bound.
     expect(hxPoolOptionsFor("ro", {}).connection).toEqual({ statement_timeout: 120_000 });
-    // The guarantor holds the lock while rebuilding, so it keeps the long
-    // statement budget — but it WAITS for that lock whenever live ingest holds
-    // the same session, and unbounded that wait starves its own small pool.
+    // The guarantor gets a budget sized to FINISH a rebuild, not the shared one.
+    // A restore replays a whole transcript in one transaction (atomicity is what
+    // stops a half-rebuild being visible as complete), and killing that at the
+    // shared bound protects nothing — the work is discarded and the identical
+    // attempt returns next pass, forever. It still WAITS for the per-session
+    // lock whenever live ingest holds the same session, so lock_timeout stays
+    // short: unbounded, that wait starves its own two-connection pool.
     expect(hxPoolOptionsFor("bg", {}).connection).toEqual({
-      statement_timeout: 120_000,
+      statement_timeout: 600_000,
       lock_timeout: 15_000,
     });
   });
@@ -248,10 +252,25 @@ describe("per-role pool profiles — background repair can never spend the live 
       hxPoolOptionsFor("rw", { FORTRESS_DB_INGEST_STATEMENT_TIMEOUT_MS: "0" }).connection
         ?.statement_timeout,
     ).toBe(30_000);
-    // The read path keeps the long budget: hx_text_occurrences is a deliberately
-    // uncapped corpus count, and background restores replay whole transcripts.
+    // The read path keeps the shared budget: hx_text_occurrences is a
+    // deliberately uncapped corpus count.
     expect(hxPoolOptionsFor("ro", {}).connection?.statement_timeout).toBe(120_000);
-    expect(hxPoolOptionsFor("bg", {}).connection?.statement_timeout).toBe(120_000);
+    // Background repair gets MORE than the shared budget, on purpose: it replays
+    // whole transcripts in a single transaction and must be allowed to finish.
+    expect(hxPoolOptionsFor("bg", {}).connection?.statement_timeout).toBe(600_000);
+    expect(
+      hxPoolOptionsFor("bg", { FORTRESS_DB_BG_STATEMENT_TIMEOUT_MS: "900000" }).connection
+        ?.statement_timeout,
+    ).toBe(900_000);
+    // The =0 pooler hatch still wins over the background budget: no startup
+    // parameters are sent at all, so nothing can smuggle one back in.
+    expect(
+      hxPoolOptionsFor("bg", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection,
+    ).toBeUndefined();
+    // A background checkout waits far longer than a live one — failing a repair
+    // does not shed load, it destroys work that then repeats every pass.
+    expect(hxPoolOptionsFor("bg", {}).idleTimeout).toBe(300);
+    expect(hxPoolOptionsFor("rw", {}).idleTimeout).toBe(10);
   });
 
   test("the ingest bound only TIGHTENS the shared one, never loosens it", () => {

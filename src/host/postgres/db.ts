@@ -92,6 +92,38 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 // making it structurally impossible to spend the live ingest budget.
 const DEFAULT_BG_POOL_MAX = 2;
 
+/** Pool ACQUIRE bound for the background repair pool (ms).
+ *
+ *  Deliberately vastly longer than the live bound, because the two roles want
+ *  opposite things. A live chunk has a caller and a tunnel deadline waiting on
+ *  it, so shedding fast is correct — the cloud replays it. A guarantor repair
+ *  has NOBODY waiting. Failing its checkout does not shed load, it DESTROYS
+ *  work: the session stays stale, so the identical rebuild is attempted again
+ *  next pass, and the pass after that, forever. Waiting is strictly cheaper
+ *  than failing for this role.
+ *
+ *  Still finite. An unbounded queue turns a genuinely wedged pool into a pass
+ *  that never returns, and the guarantor must stay observable — a pass that
+ *  ends and reports is worth more than one that hangs. Five minutes is far
+ *  above any healthy checkout and far below the hourly sweep interval. */
+const DEFAULT_BG_ACQUIRE_TIMEOUT_MS = 300_000;
+
+/** Statement bound for the background repair pool (ms).
+ *
+ *  A restore replays a whole transcript in ONE transaction — that is what makes
+ *  a rebuild atomic, and atomicity is the only thing stopping a half-rebuilt
+ *  session from being visible as complete. For a large session that transaction
+ *  is legitimately long, and killing it at the live bound does not protect
+ *  anything: the work is discarded, the session stays stale, and the identical
+ *  rebuild is attempted again next pass. A bound that can never be satisfied is
+ *  a permanent failure loop wearing a safety knob's clothes.
+ *
+ *  So the background role gets a budget sized to finish. It cannot squat the
+ *  live path: it is a separate two-connection pool, and its lock_timeout stays
+ *  short so it can never make a live writer wait. It stays well inside
+ *  maxLifetime, which would otherwise rotate the connection mid-rebuild. */
+const DEFAULT_BG_STATEMENT_TIMEOUT_MS = 600_000;
+
 // Server-side statement bound for the LIVE INGEST pool (ms).
 //
 // The shared 120 s budget is right for the read path (hx_text_occurrences is a
@@ -174,6 +206,25 @@ export function backgroundLockTimeoutMs(
 }
 
 /** Connection ceiling for the background (guarantor) pool. */
+/** Acquire bound for the background pool — see DEFAULT_BG_ACQUIRE_TIMEOUT_MS.
+ *  0 ⇒ default: a background sweep may wait a long time, never forever. */
+export function backgroundAcquireTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = msEnv(env, "FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS", DEFAULT_BG_ACQUIRE_TIMEOUT_MS);
+  return raw > 0 ? raw : DEFAULT_BG_ACQUIRE_TIMEOUT_MS;
+}
+
+/** Statement bound for background repair — see DEFAULT_BG_STATEMENT_TIMEOUT_MS.
+ *  The =0 pooler hatch still wins: when the shared bound is disabled, no startup
+ *  parameters are sent at all and this is not consulted. */
+export function backgroundStatementTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = msEnv(env, "FORTRESS_DB_BG_STATEMENT_TIMEOUT_MS", DEFAULT_BG_STATEMENT_TIMEOUT_MS);
+  return raw > 0 ? raw : DEFAULT_BG_STATEMENT_TIMEOUT_MS;
+}
+
 export function backgroundPoolMax(
   env: Record<string, string | undefined> = process.env,
 ): number {
@@ -229,6 +280,8 @@ export function hxPoolOptions(
     statementTimeoutMs?: number;
     /** Set lock_timeout on this pool (live ingest only). */
     lockTimeoutMs?: number;
+    /** Override the checkout bound (background repair waits far longer). */
+    acquireTimeoutMs?: number;
   } = {},
 ): HxPoolOptions {
   const connectRaw = msEnv(env, "FORTRESS_DB_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS);
@@ -242,7 +295,7 @@ export function hxPoolOptions(
     baseStatementMs === 0 ? 0 : Math.trunc(overrides.statementTimeoutMs ?? baseStatementMs);
   const options: HxPoolOptions = {
     connectionTimeout: msToSec(connectMs),
-    idleTimeout: msToSec(acquireTimeoutMs(env)),
+    idleTimeout: msToSec(overrides.acquireTimeoutMs ?? acquireTimeoutMs(env)),
     maxLifetime: msToSec(lifetimeMs),
     max: overrides.max ?? poolMax(env),
   };
@@ -277,6 +330,13 @@ export function hxPoolOptionsFor(
     return hxPoolOptions(env, {
       max: backgroundPoolMax(env),
       lockTimeoutMs: backgroundLockTimeoutMs(env),
+      // A repair has no caller and no deadline. Shedding its checkout does not
+      // relieve pressure, it throws the work away and guarantees the identical
+      // attempt next pass — see DEFAULT_BG_ACQUIRE_TIMEOUT_MS.
+      acquireTimeoutMs: backgroundAcquireTimeoutMs(env),
+      // Sized to FINISH a large single-transaction rebuild rather than kill it
+      // — see DEFAULT_BG_STATEMENT_TIMEOUT_MS.
+      statementTimeoutMs: backgroundStatementTimeoutMs(env),
     });
   }
   if (role === "ro") return hxPoolOptions(env);
