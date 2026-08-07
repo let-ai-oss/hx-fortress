@@ -478,6 +478,46 @@ export async function runFortressHost(
       Number.isFinite(maxOrphansRaw) && maxOrphansRaw > 0
         ? Math.trunc(maxOrphansRaw)
         : DEFAULT_MAX_ORPHANS_PER_PASS;
+    // Sessions the COUNT sweep checks per pass. It is the only detector for
+    // records lost from the MIDDLE of a canonical — the lane stays seq-dense and
+    // byte-covering, so the byte-staleness gate never selects it and nothing
+    // else ever re-examines it.
+    //
+    // Its strength is a LOWER bound, not a proof of wholeness: parseChunk is
+    // stateful across the text, so an append-built lane legally holds more turns
+    // than parse(whole) yields and that direction is reported, never acted on.
+    //
+    // It costs one canonical read per session, hence a small per-pass cap and an
+    // oldest-verified-first rotation rather than a whole-corpus scan.
+    // FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS=0 turns it off.
+    // Sized so a FIRST full rotation completes in days, not weeks. The corpus
+    // is sessions + agent lanes (~14.5k on the reference deployment); at the
+    // hourly sweep, 25/pass would take ~24 days to prove everything once, during
+    // which "the corpus is whole" would simply be unknown. 100/pass brings that
+    // under a week, and the pass yields entirely when live ingest is starved, so
+    // the extra reads never come at the live path's expense. `deepVerifyBacklog`
+    // in every pass log is how you watch it converge.
+    // NOTE the unit: this cap applies to sessions AND, separately, to agent
+    // lanes — so a pass reads up to 2x this many canonicals. 100 means ~200
+    // object reads per pass, and the rotation is continuous rather than
+    // one-shot, so budget that egress (README documents it).
+    const DEFAULT_DEEP_VERIFY_PER_PASS = 100;
+    // Set-but-EMPTY means the default, never 0. `Number("")` is 0, so the naive
+    // read silently disables the only detector for this damage class when a
+    // .env template carries a blank line — and every other knob in this codebase
+    // treats blank as "use the default" for exactly that reason. Only an
+    // explicit 0 turns it off, and that says so in the log.
+    const deepVerifyEnv = process.env.FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS;
+    const deepVerifyRaw =
+      deepVerifyEnv === undefined || deepVerifyEnv.trim() === "" ? NaN : Number(deepVerifyEnv);
+    const deepVerifyPerPass = Number.isFinite(deepVerifyRaw)
+      ? Math.max(0, Math.trunc(deepVerifyRaw))
+      : DEFAULT_DEEP_VERIFY_PER_PASS;
+    if (deepVerifyPerPass === 0) {
+      bus.scopeFor("guarantor").warn(
+        "count sweep DISABLED (FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS=0) — damage the byte gate cannot see will go undetected",
+      );
+    }
     const batchDelayRaw = Number(process.env.FORTRESS_GUARANTOR_BATCH_DELAY_MS);
     const batchDelayMs =
       Number.isFinite(batchDelayRaw) && batchDelayRaw >= 0 ? Math.trunc(batchDelayRaw) : undefined;
@@ -494,6 +534,11 @@ export async function runFortressHost(
         // exists to repair. FORTRESS_GUARANTOR_REPAIR_STALE=false leaves the
         // detection (staleIndexes in every pass) but stops it acting.
         repairStaleIndexes: repairStaleFromEnv(process.env.FORTRESS_GUARANTOR_REPAIR_STALE),
+        deepVerifyPerPass,
+        // Yield to live ingest. Repair has no caller waiting on it, so when the
+        // live pool is starved the guarantor stands down for the pass instead of
+        // adding its own load to a database already short of connections.
+        isSaturated: () => guardedDb?.saturated() ?? false,
       },
     });
     guarantor.start();

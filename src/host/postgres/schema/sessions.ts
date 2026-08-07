@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { doublePrecision, index, text, unique, uuid } from "drizzle-orm/pg-core";
 
 import { bigCounter, counter, createdAt, deletedAt, pk, ts, updatedAt } from "./columns";
@@ -58,12 +59,27 @@ export const hxSessions = hxSchema.table(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: deletedAt(),
+    /** When this row's record count was last PROVEN whole against its canonical.
+     *  NULL = never proven; this is what the unproven-backlog counts. */
+    deepVerifiedAt: ts("deep_verified_at"),
+    /** When the sweep last LOOKED at this row, whatever the outcome. Drives the
+     *  rotation order so a row that can never be proven cannot wedge the queue
+     *  at its head — see migration 0016. */
+    deepAttemptedAt: ts("deep_attempted_at"),
   },
   (t) => [
     unique("hx_sessions_natural_unique").on(t.userId, t.family, t.sessionId),
     index("hx_sessions_user_activity_idx").on(t.userId, t.lastActivityAt),
     index("hx_sessions_org_activity_idx").on(t.orgId, t.lastActivityAt),
     index("hx_sessions_project_activity_idx").on(t.projectId, t.lastActivityAt),
+    // FK cover: an unindexed foreign key makes every cascading delete scan this
+    // whole table ONCE PER DELETED PARENT ROW. Declared here as well as in the
+    // migration so drizzle-kit never generates a DROP for it.
+    index("hx_sessions_device_id_idx").on(t.deviceId),
+    // Sweep cursor: least-recently-proven first, live rows only.
+    index("hx_sessions_deep_verify_idx")
+      .on(t.deepAttemptedAt.nullsFirst())
+      .where(sql`${t.deletedAt} is null`),
     index("hx_sessions_repo_idx").on(t.repoId),
     index("hx_sessions_model_idx").on(t.modelId),
   ],
@@ -107,9 +123,23 @@ export const hxSessionAgents = hxSchema.table(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: deletedAt(),
+    /** When this row's record count was last PROVEN whole against its canonical.
+     *  NULL = never proven; this is what the unproven-backlog counts. */
+    deepVerifiedAt: ts("deep_verified_at"),
+    /** When the sweep last LOOKED at this row, whatever the outcome. Drives the
+     *  rotation order so a row that can never be proven cannot wedge the queue
+     *  at its head — see migration 0016. */
+    deepAttemptedAt: ts("deep_attempted_at"),
   },
   (t) => [
     unique("hx_session_agents_natural_unique").on(t.sessionId, t.agentExternalId),
+    // FK cover: an unindexed foreign key makes every cascading delete scan this
+    // whole table ONCE PER DELETED PARENT ROW. Declared here as well as in the
+    // migration so drizzle-kit never generates a DROP for it.
+    index("hx_session_agents_model_id_idx").on(t.modelId),
+    index("hx_session_agents_deep_verify_idx")
+      .on(t.deepAttemptedAt.nullsFirst())
+      .where(sql`${t.deletedAt} is null`),
     index("hx_session_agents_session_idx").on(t.sessionId),
   ],
 );

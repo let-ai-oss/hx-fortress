@@ -71,3 +71,34 @@ jobs:
         env:
           FORTRESS_PG_CI_DSN: postgresql://postgres:hx@127.0.0.1:5432/postgres
         run: bun test test/e2e/pg-resilience-ci.e2e.test.ts
+
+      # The DB-backed suites gate on FORTRESS_DATABASE_URL, and the plain
+      # `bun test` job above sets no DSN — so until now every one of them SKIPPED
+      # in CI. That included the guarantor's repair/verification tests and the
+      # FK-index invariant, whose own header calls itself "the only thing
+      # standing between the next FK and a repeat". It never ran.
+      #
+      # One database PER FILE: these suites share the `hx` tables, so running
+      # them together against a single database makes them collide and fail for
+      # reasons that have nothing to do with the code.
+      - name: DB-backed suites (one database per file)
+        env:
+          PGPASSWORD: hx
+        run: |
+          set -euo pipefail
+          # `set -e` does not observe a command substitution used as a for-loop
+          # word list, so an empty match would make this step a silent no-op
+          # reporting success — the exact "it never ran" failure this job exists
+          # to end. Collect first and refuse to pass on nothing.
+          mapfile -t files < <(grep -rl "FORTRESS_DATABASE_URL" test --include='*.test.ts' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no DB-backed suites matched — refusing to report success"
+            exit 1
+          fi
+          echo "running ${#files[@]} DB-backed suites"
+          for f in "${files[@]}"; do
+            db="ci_$(basename "$f" .test.ts | tr -c 'a-zA-Z0-9' '_')"
+            psql -h 127.0.0.1 -U postgres -q -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"
+            echo "--- $f -> $db"
+            FORTRESS_DATABASE_URL="postgresql://postgres:hx@127.0.0.1:5432/$db" bun test "$f"
+          done

@@ -89,6 +89,10 @@ export const hxTurns = hxSchema.table(
     unique("hx_turns_lane_seq_unique").on(t.sessionId, t.agentId, t.seq).nullsNotDistinct(),
     index("hx_turns_tsv_idx").using("gin", t.textTsv),
     index("hx_turns_text_trgm_idx").using("gin", t.text.op("gin_trgm_ops")),
+    // FK cover: an unindexed foreign key makes every cascading delete scan this
+    // whole table ONCE PER DELETED PARENT ROW. Declared here as well as in the
+    // migration so drizzle-kit never generates a DROP for it.
+    index("hx_turns_agent_id_idx").on(t.agentId),
     index("hx_turns_session_seq_idx").on(t.sessionId, t.seq),
     index("hx_turns_role_idx").on(t.role),
     index("hx_turns_kind_idx").on(t.kind),
@@ -123,6 +127,11 @@ export const hxToolCalls = hxSchema.table(
   },
   (t) => [
     unique("hx_tool_calls_natural_unique").on(t.sessionId, t.toolUseId),
+    // FK cover: an unindexed foreign key makes every cascading delete scan this
+    // whole table ONCE PER DELETED PARENT ROW. Declared here as well as in the
+    // migration so drizzle-kit never generates a DROP for it.
+    index("hx_tool_calls_turn_id_idx").on(t.turnId),
+    index("hx_tool_calls_agent_id_idx").on(t.agentId),
     index("hx_tool_calls_session_tool_idx").on(t.sessionId, t.toolName),
     index("hx_tool_calls_tool_idx").on(t.toolName),
   ],

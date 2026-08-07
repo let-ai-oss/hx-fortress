@@ -14,6 +14,7 @@ import {
 } from "../src/ingest/ingest";
 import { markSessionDeleted } from "../src/ingest/delete";
 import { reconcileOrphans } from "../src/ingest/reconciler";
+import { parseChunk } from "../src/ingest/parse";
 import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
 import { hxTurns } from "../src/host/postgres/schema/transcript";
 import { hxUsers } from "../src/host/postgres/schema/dimensions";
@@ -1252,5 +1253,933 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .from(hxTurns)
       .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
     expect(rows.length).toBe(10);
+  });
+
+  // THE case the byte gate cannot see. A canonical holding 9 records indexed as
+  // 6 is seq-dense (0..5, no holes) and its watermark covers the canonical, so
+  // the staleness gate never selects it and every detector calls it healthy.
+  // Only the canonical's own record count reveals it.
+  test("the count sweep finds records missing from a session the byte gate calls healthy", async () => {
+    const key: SessionKey = {
+      userId: `deep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(9);
+    const short = body(6);
+
+    // Index only 6 records but stamp the FULL canonical size — the exact shape a
+    // lost middle chunk leaves behind: dense, byte-covering, and 3 records light.
+    await ingestCommit(db, {
+      key, chunkId: "deep-c1", replace: false, chunkText: short,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    // Key-aware: this suite shares one database, so a store that answered for
+    // EVERY session would make the sweep judge unrelated rows against this
+    // canonical and trip the systematic-bug ceiling.
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const rowOf = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const t = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)));
+      return t.length;
+    };
+
+    // Pre-state: byte-covering and dense, so the ordinary path has nothing to do.
+    expect(await rowOf()).toBe(6);
+    const blind = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+    });
+    expect(blind.staleIndexes).toBe(0);   // the byte gate sees nothing wrong…
+    expect(await rowOf()).toBe(6);        // …and nothing is repaired
+
+    // With the sweep on, the count is the authority.
+    const swept = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    expect(swept.deepMismatched).toBeGreaterThanOrEqual(1);
+    expect(swept.deepRepaired).toBeGreaterThanOrEqual(1);
+    expect(await rowOf()).toBe(9); // the three missing records are now indexed
+  });
+
+  // A healthy session must be proven and then LEFT ALONE — the sweep must not
+  // rewrite the corpus just because it is looking at it.
+  test("the count sweep stamps a matching session and rebuilds nothing", async () => {
+    const key: SessionKey = {
+      userId: `deepok-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(7);
+    await ingestCommit(db, {
+      key, chunkId: "deepok-c1", replace: false, chunkText: whole,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const [pre] = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const idsBefore = (
+      await db
+        .select({ id: hxTurns.id })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, pre!.id), isNull(hxTurns.agentId)))
+    )
+      .map((r) => r.id)
+      .sort();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    // Counters are corpus-wide and this suite shares one database, so the
+    // load-bearing assertions are about THIS session: it stays exactly as it
+    // was, and it gets stamped.
+    expect(res.deepVerified).toBeGreaterThanOrEqual(1);
+
+    const [me] = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const mine = await db
+      .select({ seq: hxTurns.seq, id: hxTurns.id })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, me!.id), isNull(hxTurns.agentId)));
+    expect(mine.length).toBe(7);
+    // Turn COUNT alone would survive a bug that rebuilt every matching session,
+    // so pin identity and the repair counters too: a replace would mint new ids.
+    expect(res.deepRepaired).toBe(0);
+    expect(res.deepMismatched).toBe(0);
+    expect(mine.map((r) => r.id).sort()).toEqual(idsBefore);
+
+    // Proven means stamped, so the rotation moves on instead of re-reading it.
+    const [row] = await db
+      .select({ at: hxSessions.deepVerifiedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.at).not.toBeNull();
+  });
+
+  // A repair that fails to reach the canonical's count must NOT be stamped —
+  // stamping would retire a still-damaged session from the sweep, which is the
+  // exact failure the sweep exists to prevent.
+  test("the count sweep never stamps a session it could not make whole", async () => {
+    const key: SessionKey = {
+      userId: `deepfail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(4);
+    await ingestCommit(db, {
+      key, chunkId: "deepfail-c1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    // An unreadable canonical: the sweep cannot prove anything, so it must
+    // record the failure and leave the row unstamped for the next pass.
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async () => { throw new Error("canonical unreadable"); },
+      statCanonical: async () => Buffer.byteLength(indexed),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    expect(res.deepErrors).toBeGreaterThanOrEqual(1);
+
+    const [row] = await db
+      .select({ at: hxSessions.deepVerifiedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.at).toBeNull();
+  });
+
+  // Agent lanes are SEPARATE canonical objects with their own rows and their own
+  // turns — rebuilding the parent does not re-derive a byte of them. A sweep
+  // that skipped lanes would leave every agent transcript unverifiable.
+  test("the count sweep proves agent lanes too, not just parents", async () => {
+    const sessionId = crypto.randomUUID();
+    const agentId = "agent-sweep-1";
+    const key: SessionKey = {
+      userId: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId,
+    };
+    // Store key carries the :a: suffix; the commit key is the bare session id.
+    const laneStoreKey: SessionKey = { ...key, sessionId: `${sessionId}:a:${agentId}` };
+    const parent = body(3);
+    const laneWhole = body(8);
+    const laneShort = body(5);
+
+    await ingestCommit(db, {
+      key, chunkId: "lane-p1", replace: false, chunkText: parent,
+      totalBytes: Buffer.byteLength(parent), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    // The lane lands SHORT but stamped with the full canonical size — dense,
+    // byte-covering, three records missing. Invisible to every byte check.
+    await ingestAgentCommit(db, {
+      key, agentId, chunkId: "lane-a1", replace: false, chunkText: laneShort,
+      totalBytes: Buffer.byteLength(laneWhole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId === laneStoreKey.sessionId) return laneWhole;
+        if (k.sessionId === sessionId) return parent;
+        throw new Error("not this test's session");
+      },
+      statCanonical: async () => Buffer.byteLength(laneWhole),
+    } as unknown as SessionStore;
+
+    const laneTurns = async () => {
+      const [srow] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, sessionId)))
+        .limit(1);
+      const [lrow] = await db
+        .select({ id: hxSessionAgents.id })
+        .from(hxSessionAgents)
+        .where(
+          and(
+            eq(hxSessionAgents.sessionId, srow!.id),
+            eq(hxSessionAgents.agentExternalId, agentId),
+          ),
+        )
+        .limit(1);
+      const t = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, srow!.id), eq(hxTurns.agentId, lrow!.id)));
+      return t.length;
+    };
+
+    expect(await laneTurns()).toBe(5);
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    expect(res.deepMismatched).toBeGreaterThanOrEqual(1);
+    expect(await laneTurns()).toBe(8); // the lane's missing records are indexed
+  });
+
+  // Repair is the lower-priority workload — it must yield to live ingest rather
+  // than add load to a pool that is already starved.
+  test("a saturated live pool stands the pass down instead of competing", async () => {
+    const key: SessionKey = {
+      userId: `sat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(6);
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async () => whole,
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000,
+      isSaturated: () => true,
+    });
+
+    expect(res.yieldedToLive).toBeGreaterThanOrEqual(1);
+    expect(res.restored).toBe(0);      // nothing rebuilt while live is starved
+    expect(res.deepVerified).toBe(0);  // and the sweep's extra reads never happen
+
+    // The orphan is still there, untouched, for a healthier pass to pick up.
+    const rows = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)));
+    expect(rows.length).toBe(0);
+  });
+
+  // C1 REGRESSION. parseChunk is stateful across the whole text, so a lane BUILT
+  // by appending chunks legally holds MORE turns than parse(whole) yields — a
+  // Codex lane appended as 3 turns parses whole to 1. Treating parse(whole) as
+  // an equality oracle made the sweep classify every such session as duplicated
+  // and rebuild it with replace:true, destroying its embeddings, every rotation,
+  // forever. The count is a LOWER BOUND and nothing more.
+  test("an append-built lane holding MORE turns than parse(whole) is never rebuilt", async () => {
+    const key: SessionKey = {
+      userId: `over-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "codex-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const ri = (t: string, role: string) =>
+      JSON.stringify({
+        type: "response_item", timestamp: TS,
+        payload: { type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text: t }] },
+      }) + "\n";
+    const ev = JSON.stringify({
+      type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: "c" },
+    }) + "\n";
+    const c1 = ri("a", "assistant") + ri("b", "user");
+    const c2 = ev;
+    const whole = c1 + c2;
+
+    // Ingested as two appends, exactly as live traffic arrives.
+    await ingestCommit(db, {
+      key, chunkId: "ov-1", replace: false, chunkText: c1,
+      totalBytes: Buffer.byteLength(c1), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestCommit(db, {
+      key, chunkId: "ov-2", replace: false, chunkText: c2,
+      totalBytes: Buffer.byteLength(whole), componentCount: 2, meta: null, attribution: ATTR,
+    });
+
+    const rowOf = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return db
+        .select({ id: hxTurns.id })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)));
+    };
+    const before = (await rowOf()).map((r) => r.id).sort();
+    // The premise: appending really does yield more turns than parse(whole).
+    expect(before.length).toBeGreaterThan(parseChunk(whole).turns.length);
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // Reported, never acted on — and the turns are the SAME rows, not reinserted.
+    expect(res.deepOvercount).toBeGreaterThanOrEqual(1);
+    expect(res.deepMismatched).toBe(0);
+    expect(res.deepRepaired).toBe(0);
+    expect((await rowOf()).map((r) => r.id).sort()).toEqual(before);
+  });
+
+  // A lane whose whole-canonical parse COLLAPSES (Codex: response_item turns are
+  // dropped once an event_msg appears) legitimately holds MORE turns than
+  // parse(whole) when built by appending. The tail repair must ACCEPT that.
+  //
+  // Converging it instead — which is what demanding parse(whole) here does —
+  // rebuilds a session that is exactly what was asked for, destroys its
+  // embeddings, and does it again next pass: for Codex the parse collapses on
+  // essentially every assistant turn, so the tail fast path would be dead for
+  // the whole family and every stale repair a full rebuild. The divergence is
+  // recorded as `laneDrift` rather than acted on.
+  test("a collapsing lane's tail is accepted, not rebuilt, and stays stable", async () => {
+    const key: SessionKey = {
+      userId: `converge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "codex-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const ri = (t: string, role: string) =>
+      JSON.stringify({
+        type: "response_item",
+        timestamp: TS,
+        payload: {
+          type: "message",
+          role,
+          content: [{ type: role === "user" ? "input_text" : "output_text", text: t }],
+        },
+      }) + "\n";
+    const ev = (m: string) =>
+      JSON.stringify({ type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: m } }) + "\n";
+    const head = ri("a", "assistant") + ri("b", "user");
+    const tail = ev("c");
+    const whole = head + tail;
+    const appended = parseChunk(head).turns.length + parseChunk(tail).turns.length;
+    // The premise: appending yields strictly more than a whole parse.
+    expect(appended).toBeGreaterThan(parseChunk(whole).turns.length);
+
+    await ingestCommit(db, {
+      key, chunkId: "cv-1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(whole) }],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const turns = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ id: hxTurns.id }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).map((x) => x.id).sort();
+    };
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
+    });
+
+    // The tail landed on the FAST path — no rebuild, no destroyed embeddings.
+    expect(res.repairedTail).toBe(1);
+    expect(res.repairedFull).toBe(0);
+    expect(res.verifyFallbacks).toBe(0);
+    // …and the divergence from the whole parse is recorded, not hidden.
+    expect(res.laneDrift).toBe(1);
+    const after = await turns();
+    expect(after.length).toBe(appended);
+
+    // Stable: a second pass finds nothing to do and rewrites nothing. This is
+    // where a permanent rebuild + re-embed loop would show up.
+    const again = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
+    });
+    expect(again.repairedFull).toBe(0);
+    expect(again.staleIndexes).toBe(0);
+    expect(await turns()).toEqual(after);
+  });
+
+  // The rotation cursor is the thing that stops an unprovable row parking itself
+  // at the head of the queue forever. Pin that a FAILED check still advances it
+  // while leaving the row unverified.
+  test("a row the sweep cannot check still advances the rotation cursor", async () => {
+    const key: SessionKey = {
+      userId: `cursor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const text = body(4);
+    await ingestCommit(db, {
+      key, chunkId: "cu-1", replace: false, chunkText: text,
+      totalBytes: Buffer.byteLength(text), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async () => { throw new Error("canonical unreadable"); },
+      statCanonical: async () => null,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+    expect(res.deepErrors).toBeGreaterThanOrEqual(1);
+
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    // Never claimed as checked-clean…
+    expect(row!.ok).toBeNull();
+    // …but the cursor MOVED, or this row sits at the head of the queue forever
+    // and the sweep never reaches another one.
+    expect(row!.tried).not.toBeNull();
+  });
+
+  // The stand-down must happen before the pass does any work at all — a check
+  // after the bulk gate protects nothing, the database has already paid.
+  test("a saturated pass issues no queries and lists no canonicals", async () => {
+    let listed = 0;
+    const store = {
+      listAllCanonicalKeys: async () => { listed += 1; return []; },
+      readCanonicalText: async () => { throw new Error("must not read"); },
+      statCanonical: async () => null,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000, isSaturated: () => true,
+    });
+
+    expect(res.yieldedToLive).toBe(1);   // one stand-down is one event
+    expect(res.scanned).toBe(0);         // the bulk gate never ran
+    expect(listed).toBe(0);              // the bucket was never listed
+    expect(res.deepVerifyBacklog).toBeNull();
+  });
+
+  // C1-DELTA. Moving the stat BEFORE the read left growth in the stat->read
+  // window uncovered: the text in hand is newer than the watermark it is judged
+  // against, so a healthy session reads as `actual < expected` and gets rebuilt
+  // — deleting live turns, after which the deferred gateway commit lands and
+  // duplicates them, all stamped verified. The arm that used to catch this was
+  // `statBytes > readBytes`; moving the stat inverted the comparison.
+  test("a canonical that grows between the stat and the read is never judged", async () => {
+    const key: SessionKey = {
+      userId: `statgrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(4);
+    const grown = body(9); // what the READ returns, after a compose lands
+    await ingestCommit(db, {
+      key, chunkId: "sg-1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    // A canonical that really grew stats SMALL before the compose lands and
+    // LARGE afterwards. Modelling it with a constant stat would be untruthful —
+    // and would let a "growth" test silently pass through the lossy-decode path
+    // instead, which is the opposite verdict.
+    let stats = 0;
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      statCanonical: async () => {
+        stats += 1;
+        return stats === 1 ? Buffer.byteLength(indexed) : Buffer.byteLength(grown);
+      },
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return grown;
+      },
+    } as unknown as SessionStore;
+
+    const ids = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ id: hxTurns.id }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).map((x) => x.id).sort();
+    };
+    const before = await ids();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // Deferred, not judged: no false damage, no rebuild, same rows.
+    expect(res.liveRaces).toBeGreaterThanOrEqual(1);
+    // The direct statement of "never judged" — the other two only imply it for
+    // this particular fixture.
+    expect(res.deepVerified).toBe(0);
+    expect(res.deepMismatched).toBe(0);
+    expect(res.deepRepaired).toBe(0);
+    expect(await ids()).toEqual(before);
+
+    // And not stamped — it is still owed a real check.
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.ok).toBeNull();
+    expect(row!.tried).not.toBeNull();
+  });
+
+  // The lane sweep carries a hand-copied twin of the growth guard — different
+  // stamp function, different key, different row. Untested, it is exactly what
+  // a later round regresses silently.
+  test("a LANE canonical that grows between stat and read is never judged", async () => {
+    const sessionId = crypto.randomUUID();
+    const agentId = "agent-grow-1";
+    const key: SessionKey = {
+      userId: `lanegrow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId,
+    };
+    const parent = body(2);
+    const laneIndexed = body(4);
+    const laneGrown = body(9);
+
+    await ingestCommit(db, {
+      key, chunkId: "lg-p", replace: false, chunkText: parent,
+      totalBytes: Buffer.byteLength(parent), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestAgentCommit(db, {
+      key, agentId, chunkId: "lg-a", replace: false, chunkText: laneIndexed,
+      totalBytes: Buffer.byteLength(laneIndexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const laneStoreId = `${sessionId}:a:${agentId}`;
+    let laneStats = 0;
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      statCanonical: async (k: SessionKey) => {
+        if (k.sessionId !== laneStoreId) return Buffer.byteLength(parent);
+        laneStats += 1;
+        return laneStats === 1 ? Buffer.byteLength(laneIndexed) : Buffer.byteLength(laneGrown);
+      },
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId === laneStoreId) return laneGrown; // the read sees the growth
+        if (k.sessionId === sessionId) return parent;
+        throw new Error("not this test's session");
+      },
+    } as unknown as SessionStore;
+
+    const laneRows = async () => {
+      const [srow] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, sessionId)))
+        .limit(1);
+      const [lrow] = await db
+        .select({ id: hxSessionAgents.id, ok: hxSessionAgents.deepVerifiedAt, tried: hxSessionAgents.deepAttemptedAt })
+        .from(hxSessionAgents)
+        .where(and(eq(hxSessionAgents.sessionId, srow!.id), eq(hxSessionAgents.agentExternalId, agentId)))
+        .limit(1);
+      const turns = await db
+        .select({ id: hxTurns.id })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, srow!.id), eq(hxTurns.agentId, lrow!.id)));
+      return { lrow: lrow!, ids: turns.map((t) => t.id).sort() };
+    };
+    const before = await laneRows();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    expect(res.liveRaces).toBeGreaterThanOrEqual(1);
+    expect(res.deepRepaired).toBe(0);
+    const after = await laneRows();
+    expect(after.ids).toEqual(before.ids);   // the lane was not rebuilt
+    expect(after.lrow.ok).toBeNull();        // and not claimed as checked
+    expect(after.lrow.tried).not.toBeNull(); // but the rotation advanced
+  });
+
+  // A canonical holding non-UTF-8 bytes reads LARGER than its object (U+FFFD is
+  // three bytes) — permanently, on every pass. Deferring it as "growth" would
+  // retire the session from the only detector that sees a missing middle
+  // record, forever, under a counter that says transient. It must be judged:
+  // U+FFFD never replaces a newline, so the record count is unaffected.
+  test("a canonical that merely decodes larger is judged, not deferred forever", async () => {
+    const key: SessionKey = {
+      userId: `lossy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(9);
+    const short = body(4);
+    // Byte-covering watermark over a lane holding only part of the records —
+    // the sweep's exact target damage.
+    await ingestCommit(db, {
+      key, chunkId: "lo-1", replace: false, chunkText: short,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      // The object is SMALLER than what the read returns, and stays that size:
+      // a stable lossy decode, not growth.
+      statCanonical: async () => Buffer.byteLength(whole) - 2,
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // Judged and repaired — NOT filed away as a live race.
+    expect(res.deepVerified).toBeGreaterThanOrEqual(1);
+    expect(res.deepMismatched).toBeGreaterThanOrEqual(1);
+    expect(res.deepRepaired).toBeGreaterThanOrEqual(1);
+  });
+
+  // The sweep must yield MID-FLIGHT, not just at the door. Checking saturation
+  // once before it starts still lets it issue a hundred canonical reads and a
+  // hundred 40-115s rebuilds however starved live ingest becomes.
+  test("the count sweep stops mid-flight when the live pool goes saturated", async () => {
+    const made: SessionKey[] = [];
+    for (let i = 0; i < 4; i++) {
+      const key: SessionKey = {
+        userId: `midyield-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+        family: "claude-cli",
+        sessionId: crypto.randomUUID(),
+      };
+      const t = body(3);
+      await ingestCommit(db, {
+        key, chunkId: `my-${i}`, replace: false, chunkText: t,
+        totalBytes: Buffer.byteLength(t), componentCount: 1, meta: null, attribution: ATTR,
+      });
+      made.push(key);
+    }
+
+    // Saturation appears after the first canonical is read.
+    let reads = 0;
+    let saturated = false;
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async () => {
+        reads += 1;
+        saturated = true;
+        return body(3);
+      },
+      statCanonical: async () => Buffer.byteLength(body(3)),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000,
+      isSaturated: () => saturated,
+    });
+
+    // It stopped instead of working through the rest of the corpus.
+    expect(reads).toBe(1);
+    expect(res.yieldedToLive).toBe(1);
+    expect(made.length).toBe(4); // (the corpus really was larger than one row)
+  });
+
+  // C1-ROUND-4. The gateway acks a chunk once the canonical is composed and
+  // DEFERS the indexing, so there is a real window where the canonical holds
+  // records the index has not seen. In that window a count check sees
+  // `actual < expected` and cannot distinguish it from missing records — and
+  // answering with replace:true deletes a healthy lane and its embeddings, after
+  // which the deferred commit lands and re-appends, DUPLICATING it. The sweep
+  // only judges byte-COVERING rows; behind-ness belongs to the byte gate.
+  test("a session merely behind its canonical is left for the byte gate, not rebuilt", async () => {
+    const key: SessionKey = {
+      userId: `behind-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(4);
+    const whole = body(9); // the canonical is ahead — the commit has not run yet
+    await ingestCommit(db, {
+      key, chunkId: "bh-1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(indexed), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      // Not listed as an orphan: the byte gate is not part of this test.
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const ids = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ id: hxTurns.id }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).map((x) => x.id).sort();
+    };
+    const before = await ids();
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // No false damage report, no rebuild, and the SAME rows are still there.
+    expect(res.deepMismatched).toBe(0);
+    expect(res.deepRepaired).toBe(0);
+    expect(await ids()).toEqual(before);
+
+    // Not stamped as checked — it is still owed a real check once it catches up.
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.ok).toBeNull();
+    expect(row!.tried).not.toBeNull();
+  });
+
+  // Without a stat there is no corroboration, so a truncated read is
+  // indistinguishable from a smaller canonical. Stamping such a row "checked" is
+  // PERMANENT: the backlog counts only NULL stamps, so a false clean never comes
+  // off and the convergence number is wrong forever.
+  test("a canonical whose size cannot be stat'd is never stamped as checked", async () => {
+    const key: SessionKey = {
+      userId: `nostat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const indexed = body(6);
+    const real = body(9); // the store really holds more than we can read
+    await ingestCommit(db, {
+      key, chunkId: "ns-1", replace: false, chunkText: indexed,
+      totalBytes: Buffer.byteLength(real), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return indexed; // a SHORT read — undetectable without a stat
+      },
+      statCanonical: async () => null,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+    expect(res.deepErrors).toBeGreaterThanOrEqual(1);
+
+    const [row] = await db
+      .select({ ok: hxSessions.deepVerifiedAt, tried: hxSessions.deepAttemptedAt })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    expect(row!.ok).toBeNull();        // never claimed as checked
+    expect(row!.tried).not.toBeNull(); // but the rotation still advanced
+  });
+
+  // The documented emergency brake must actually brake the sweep's writes.
+  test("REPAIR_STALE=false leaves the count sweep detecting but not writing", async () => {
+    const key: SessionKey = {
+      userId: `brake-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(9);
+    const short = body(6);
+    await ingestCommit(db, {
+      key, chunkId: "br-1", replace: false, chunkText: short,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const turns = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return (
+        await db.select({ seq: hxTurns.seq }).from(hxTurns)
+          .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)))
+      ).length;
+    };
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000, repairStaleIndexes: false,
+    });
+    expect(res.deepMismatched).toBeGreaterThanOrEqual(1); // detection still runs
+    expect(res.deepRepaired).toBe(0);                     // and nothing is written
+    expect(await turns()).toBe(6);
+  });
+
+  // "Is the corpus whole?" is only answerable if you can see how much of it has
+  // never been looked at. A clean pass over a slice proves nothing about the
+  // rest, so the backlog is the number that makes convergence observable.
+  test("the backlog reports what has never been proven, and falls as the sweep runs", async () => {
+    const key: SessionKey = {
+      userId: `backlog-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const whole = body(5);
+    await ingestCommit(db, {
+      key, chunkId: "bk-c1", replace: false, chunkText: whole,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    // A pass that proves NOTHING still reports the backlog, so an operator can
+    // never mistake "found nothing" for "everything is verified".
+    // Sweep disabled: the backlog was not MEASURED, and "not measured" must be
+    // reported as such. Rendering it 0 would be the strongest possible claim
+    // made after looking at nothing.
+    const idle = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
+    });
+    expect(idle.deepVerified).toBe(0);
+    expect(idle.deepVerifyBacklog).toBeNull();
+
+    // A pass that stood down for load must report "not measured", NEVER 0 —
+    // `0` is the value that means "the corpus is fully proven", and printing it
+    // after measuring nothing is the exact misreading this counter exists to
+    // prevent.
+    const saturated = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000, isSaturated: () => true,
+    });
+    expect(saturated.deepVerifyBacklog).toBeNull();
+
+    // A pass that actually ran the sweep reports a real number.
+    const swept = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
+    });
+    expect(swept.deepVerifyBacklog).not.toBeNull();
+    // …and a second sweep, having checked more rows, cannot report a larger one.
+    const again = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+    expect(again.deepVerifyBacklog as number).toBeLessThanOrEqual(
+      swept.deepVerifyBacklog as number,
+    );
   });
 });

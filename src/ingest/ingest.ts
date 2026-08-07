@@ -641,6 +641,21 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
         .from(hxTurns)
         .where(and(eq(hxTurns.sessionId, existing.id), isNull(hxTurns.agentId)));
       const actualTurns = Number(priorAgg?.n ?? 0);
+      // EXACT, deliberately, and it took two wrong turns to settle here.
+      //
+      // parseChunk is stateful across the text, so a lane built by APPENDING
+      // chunks can hold more turns than parse(prefix) yields. The tempting fix
+      // is to relax this to a lower bound — but that lets a tail sliced from a
+      // STALE prefix splice content the lane already holds, which is silent
+      // duplication, and there is no byte check that can see it (the CAS agrees:
+      // both sides are wrong in the same direction).
+      //
+      // The deeper reason equality is right: the canonical-faithful state of a
+      // lane is `parse(whole)` — that is precisely what a `replace` produces and
+      // what the post-rebuild verification checks. A count that disagrees means
+      // the lane has DRIFTED from what a whole-canonical parse says, whatever
+      // produced the drift. Refusing the tail and taking the full rebuild
+      // converges it to the canonical; that is repair, not loss.
       if (actualTurns !== input.expectPriorTurns) {
         throw new LanePrefixMismatchError(input.expectPriorTurns, actualTurns);
       }
@@ -979,6 +994,21 @@ export async function ingestAgentCommit(
         .from(hxTurns)
         .where(and(eq(hxTurns.sessionId, sessionRowId), eq(hxTurns.agentId, existingAgent.id)));
       const actualTurns = Number(priorAgg?.n ?? 0);
+      // EXACT, deliberately, and it took two wrong turns to settle here.
+      //
+      // parseChunk is stateful across the text, so a lane built by APPENDING
+      // chunks can hold more turns than parse(prefix) yields. The tempting fix
+      // is to relax this to a lower bound — but that lets a tail sliced from a
+      // STALE prefix splice content the lane already holds, which is silent
+      // duplication, and there is no byte check that can see it (the CAS agrees:
+      // both sides are wrong in the same direction).
+      //
+      // The deeper reason equality is right: the canonical-faithful state of a
+      // lane is `parse(whole)` — that is precisely what a `replace` produces and
+      // what the post-rebuild verification checks. A count that disagrees means
+      // the lane has DRIFTED from what a whole-canonical parse says, whatever
+      // produced the drift. Refusing the tail and taking the full rebuild
+      // converges it to the canonical; that is repair, not loss.
       if (actualTurns !== input.expectPriorTurns) {
         throw new LanePrefixMismatchError(input.expectPriorTurns, actualTurns);
       }

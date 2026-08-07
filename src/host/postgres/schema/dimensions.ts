@@ -1,4 +1,4 @@
-import { bigint, doublePrecision, integer, text, unique, uuid } from "drizzle-orm/pg-core";
+import { bigint, doublePrecision, index, integer, text, unique, uuid } from "drizzle-orm/pg-core";
 
 import { createdAt, deletedAt, pk, ts, updatedAt } from "./columns";
 import { hxSchema } from "./namespace";
@@ -61,7 +61,13 @@ export const hxRepos = hxSchema.table(
     updatedAt: updatedAt(),
     deletedAt: deletedAt(),
   },
-  (t) => [unique("hx_repos_slug_unique").on(t.slug)],
+  (t) => [
+    unique("hx_repos_slug_unique").on(t.slug),
+    // FK cover: an unindexed foreign key makes every cascading delete (here a
+    // SET NULL) scan this whole table ONCE PER DELETED PARENT ROW. Declared
+    // here as well as in the migration so drizzle-kit never generates a DROP.
+    index("hx_repos_project_id_idx").on(t.projectId),
+  ],
 );
 
 export const hxDevices = hxSchema.table(
