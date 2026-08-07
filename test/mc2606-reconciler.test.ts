@@ -14,6 +14,7 @@ import {
 } from "../src/ingest/ingest";
 import { markSessionDeleted } from "../src/ingest/delete";
 import { reconcileOrphans } from "../src/ingest/reconciler";
+import { parseChunk } from "../src/ingest/parse";
 import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
 import { hxTurns } from "../src/host/postgres/schema/transcript";
 import { hxUsers } from "../src/host/postgres/schema/dimensions";
@@ -1339,6 +1340,21 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       statCanonical: async () => Buffer.byteLength(whole),
     } as unknown as SessionStore;
 
+    const [pre] = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const idsBefore = (
+      await db
+        .select({ id: hxTurns.id })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, pre!.id), isNull(hxTurns.agentId)))
+    )
+      .map((r) => r.id)
+      .sort();
+
     const res = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
     });
@@ -1354,10 +1370,15 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
       .limit(1);
     const mine = await db
-      .select({ seq: hxTurns.seq })
+      .select({ seq: hxTurns.seq, id: hxTurns.id })
       .from(hxTurns)
       .where(and(eq(hxTurns.sessionId, me!.id), isNull(hxTurns.agentId)));
-    expect(mine.length).toBe(7); // untouched — proving is not rewriting
+    expect(mine.length).toBe(7);
+    // Turn COUNT alone would survive a bug that rebuilt every matching session,
+    // so pin identity and the repair counters too: a replace would mint new ids.
+    expect(res.deepRepaired).toBe(0);
+    expect(res.deepMismatched).toBe(0);
+    expect(mine.map((r) => r.id).sort()).toEqual(idsBefore);
 
     // Proven means stamped, so the rotation moves on instead of re-reading it.
     const [row] = await db
@@ -1510,6 +1531,76 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     expect(rows.length).toBe(0);
   });
 
+  // C1 REGRESSION. parseChunk is stateful across the whole text, so a lane BUILT
+  // by appending chunks legally holds MORE turns than parse(whole) yields — a
+  // Codex lane appended as 3 turns parses whole to 1. Treating parse(whole) as
+  // an equality oracle made the sweep classify every such session as duplicated
+  // and rebuild it with replace:true, destroying its embeddings, every rotation,
+  // forever. The count is a LOWER BOUND and nothing more.
+  test("an append-built lane holding MORE turns than parse(whole) is never rebuilt", async () => {
+    const key: SessionKey = {
+      userId: `over-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "codex-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const ri = (t: string, role: string) =>
+      JSON.stringify({
+        type: "response_item", timestamp: TS,
+        payload: { type: "message", role, content: [{ type: role === "user" ? "input_text" : "output_text", text: t }] },
+      }) + "\n";
+    const ev = JSON.stringify({
+      type: "event_msg", timestamp: TS, payload: { type: "agent_message", message: "c" },
+    }) + "\n";
+    const c1 = ri("a", "assistant") + ri("b", "user");
+    const c2 = ev;
+    const whole = c1 + c2;
+
+    // Ingested as two appends, exactly as live traffic arrives.
+    await ingestCommit(db, {
+      key, chunkId: "ov-1", replace: false, chunkText: c1,
+      totalBytes: Buffer.byteLength(c1), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestCommit(db, {
+      key, chunkId: "ov-2", replace: false, chunkText: c2,
+      totalBytes: Buffer.byteLength(whole), componentCount: 2, meta: null, attribution: ATTR,
+    });
+
+    const rowOf = async () => {
+      const [r] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      return db
+        .select({ id: hxTurns.id })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, r!.id), isNull(hxTurns.agentId)));
+    };
+    const before = (await rowOf()).map((r) => r.id).sort();
+    // The premise: appending really does yield more turns than parse(whole).
+    expect(before.length).toBeGreaterThan(parseChunk(whole).turns.length);
+
+    const store = {
+      listAllCanonicalKeys: async () => [],
+      readCanonicalText: async (k: SessionKey) => {
+        if (k.sessionId !== key.sessionId) throw new Error("not this test's session");
+        return whole;
+      },
+      statCanonical: async () => Buffer.byteLength(whole),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000,
+    });
+
+    // Reported, never acted on — and the turns are the SAME rows, not reinserted.
+    expect(res.deepOvercount).toBeGreaterThanOrEqual(1);
+    expect(res.deepMismatched).toBe(0);
+    expect(res.deepRepaired).toBe(0);
+    expect((await rowOf()).map((r) => r.id).sort()).toEqual(before);
+  });
+
   // "Is the corpus whole?" is only answerable if you can see how much of it has
   // never been looked at. A clean pass over a slice proves nothing about the
   // rest, so the backlog is the number that makes convergence observable.
@@ -1539,13 +1630,24 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
       batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 0,
     });
     expect(idle.deepVerified).toBe(0);
-    expect(idle.deepVerifyBacklog).toBeGreaterThan(0);
+    expect(idle.deepVerifyBacklog).not.toBeNull();
+    expect(idle.deepVerifyBacklog as number).toBeGreaterThan(0);
+
+    // A pass that stood down for load must report "not measured", NEVER 0 —
+    // `0` is the value that means "the corpus is fully proven", and printing it
+    // after measuring nothing is the exact misreading this counter exists to
+    // prevent.
+    const saturated = await reconcileOrphans(db, store, {
+      batchDelayMs: 0, correctExistingTitles: false,
+      deepVerifyPerPass: 1000, isSaturated: () => true,
+    });
+    expect(saturated.deepVerifyBacklog).toBeNull();
 
     const swept = await reconcileOrphans(db, store, {
       batchDelayMs: 0, correctExistingTitles: false,
       deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
     });
     // Everything reachable got proven, so the backlog strictly fell.
-    expect(swept.deepVerifyBacklog).toBeLessThan(idle.deepVerifyBacklog);
+    expect(swept.deepVerifyBacklog as number).toBeLessThan(idle.deepVerifyBacklog as number);
   });
 });

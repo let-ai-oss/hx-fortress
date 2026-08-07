@@ -136,15 +136,23 @@ export interface ReconcileResult {
   /** Deep verifications that could not be completed (unreadable canonical,
    *  transient DB error). NOT stamped, so they are retried next pass. */
   deepErrors: number;
-  /** Sessions + lanes that have NEVER been proven against their canonical.
+  /** Lanes holding MORE turns than parse(whole) yields. Reported, never acted
+   *  on: parseChunk is stateful across the text, so an append-built lane legally
+   *  holds the SUM of per-chunk parses, which is >= parse(whole). This counter
+   *  is therefore expected to be non-zero on a healthy corpus and is NOT a
+   *  damage signal — detecting genuine duplication needs its own oracle. */
+  deepOvercount: number;
+  /** Sessions + lanes that have NEVER been proven against their canonical, or
+   *  `null` when this pass did not measure it (sweep disabled, stood down for
+   *  load, or the count query failed).
    *
-   *  This is the honest answer to "is the corpus whole?" — until it reaches
-   *  zero, the guarantor has not looked at everything, and a clean pass means
-   *  only that nothing was found in the slice it examined. Watching this fall
-   *  is how an operator sees the corpus converge instead of taking it on faith.
-   *  It rises again whenever new sessions arrive, which is correct: they are
-   *  unproven until proven. */
-  deepVerifyBacklog: number;
+   *  Nullable deliberately. This is the honest answer to "is the corpus whole?",
+   *  so "not measured" must never render as `0` — a saturated pass printing
+   *  `deepVerifyBacklog: 0` would read as "fully proven", which is the exact
+   *  opposite of what happened, and it is the case where an operator most needs
+   *  the truth. It rises again as new sessions arrive: they are unproven until
+   *  proven. */
+  deepVerifyBacklog: number | null;
   /** Repairs the no-clobber guard REFUSED because a live row was already there —
    *  the guard working as intended, not a defect. Counted apart from noOpRepairs
    *  so the bug signal stays a bug signal. */
@@ -373,16 +381,17 @@ function classifyShortfall(
   scanBytes: number | null,
 ): ShortfallKind {
   const grew = scanBytes != null && v.canonical != null && v.canonical > scanBytes;
-  // A count mismatch is damage — EXCEPT when the canonical outgrew the text we
-  // rebuilt from, in which case the index legitimately holds more records than
-  // our stale parse predicted and the tail lands next pass.
-  if (v.expected != null && v.turns !== v.expected) {
-    if (v.turns > v.expected && grew) return "grew";
-    return "damage";
-  }
-  // Anything less than a dense lane covering every byte we read is real damage,
-  // whatever the store reports.
+  // Structural damage decides FIRST and unconditionally. A hole, or fewer bytes
+  // than the text we read, is damage whatever the counts or the store say —
+  // letting the count branch run first meant a genuinely holed lane whose
+  // canonical happened to grow was reported as a harmless live race.
   if (!v.dense || v.bytes < readBytes) return "damage";
+  // Count as a LOWER bound only. parseChunk is stateful across the text, so an
+  // append-built lane legally holds MORE turns than parse(whole) yields; that
+  // direction proves nothing. Fewer turns than records means records are
+  // genuinely missing — unless the canonical grew under us, where our expected
+  // count came from a stale read.
+  if (v.expected != null && v.turns < v.expected && !grew) return "damage";
   if (v.canonical == null) return "damage";
   if (grew) return "grew";
   return "shortRead";
@@ -491,7 +500,8 @@ export async function reconcileOrphans(
     deepMismatched: 0,
     deepRepaired: 0,
     deepErrors: 0,
-    deepVerifyBacklog: 0,
+    deepOvercount: 0,
+    deepVerifyBacklog: null,
   };
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
@@ -639,6 +649,16 @@ export async function reconcileOrphans(
     return (m.get(nat) ?? 0) < k.bytes ? n + 1 : n;
   }, 0);
   const ceiling = opts.staleRepairCeiling ?? 0.25;
+  // Stand down BEFORE the bulk gate, not after it. What follows is the most
+  // expensive thing the pass does — a scan of hx.sessions plus grouped
+  // aggregates over hx.turns (14 GB with two GIN indexes on the reference
+  // deployment). Checking saturation only inside the per-key loop meant a
+  // starved database still paid for all of it.
+  if (opts.isSaturated?.()) {
+    res.yieldedToLive += 1;
+    opts.logger?.info?.("reconciler: live pool saturated — pass stood down before the scan");
+    return res;
+  }
   const wantRepair = opts.repairStaleIndexes ?? true;
   // The ceiling guards against ONE thing: a byte comparison that regressed and
   // now flags the whole corpus, where repairing would re-ingest everything. A
@@ -1099,7 +1119,9 @@ export async function reconcileOrphans(
   // and rotate. A failure never stamps, so it is retried rather than skipped.
   try {
     if (opts.isSaturated?.()) {
-      res.yieldedToLive += 1;
+      // Already counted if the orphan loop stood down for the same reason —
+      // one stand-down is one event, not two.
+      if (res.yieldedToLive === 0) res.yieldedToLive += 1;
       opts.logger?.info?.("reconciler: live pool saturated — skipping the count sweep this pass");
       throw new SweepSkipped();
     }
@@ -1185,7 +1207,7 @@ async function deepVerifySweep(
     // arbitrary order, so successive passes could revisit an overlapping subset
     // instead of walking the corpus. Stamping guarantees forward progress
     // either way, but a deterministic order makes the rotation predictable.
-    .orderBy(dsql`${hxSessions.deepVerifiedAt} asc nulls first`, hxSessions.id)
+    .orderBy(dsql`${hxSessions.deepAttemptedAt} asc nulls first`, hxSessions.id)
     .limit(limit);
 
   for (const row of candidates) {
@@ -1196,30 +1218,76 @@ async function deepVerifySweep(
     };
     try {
       if (await isSessionDeleted(db, key.userId, key.sessionId)) {
-        // Tombstoned between selection and now — stamp so it leaves the queue.
-        await stampDeepVerified(db, row.rowId);
+        // Tombstoned between selection and now. Advance the cursor so it leaves
+        // the queue, but never claim it was PROVEN — nothing was read. If a
+        // purge is abandoned half-way the row survives, and a false proof on it
+        // would be permanent.
+        await stampAttempted(db, row.rowId);
         continue;
       }
+      // CAS anchor sampled BEFORE the read. The window that matters is between
+      // reading the canonical and committing the rebuild; an anchor taken after
+      // the read cannot see a commit that landed during it, and the rebuild
+      // would then delete that commit's turns and reinstate stale text.
+      const anchor = await currentBytes(db, key);
       const text = await store.readCanonicalText(key);
+      // A read that came back SHORT of the object makes `expected` too small and
+      // would frame a healthy session as over-indexed. Corroborate before
+      // concluding anything; if the stat disagrees, this is the store's problem
+      // and no rebuild can fix it.
+      let statBytes: number | null = null;
+      try {
+        statBytes = await store.statCanonical(key);
+      } catch {
+        // unreadable stat — treated as "unknown" below, which never repairs
+      }
+      const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.rowId, null);
       res.deepVerified += 1;
 
-      if (actual === expected) {
+      if (statBytes != null && statBytes > readBytes) {
+        res.shortReads += 1;
+        opts.logger?.warn?.("reconciler: count sweep read short of the canonical — cannot judge", {
+          sessionId: key.sessionId, family: key.family, readBytes, statBytes,
+        });
+        await stampAttempted(db, row.rowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      // THE ORACLE, and its exact strength. `parseChunk` is stateful across the
+      // whole text — cross-record dedup, retroactive Codex filtering, queue
+      // operations that consume an earlier record — so a lane BUILT by appending
+      // chunks holds the SUM of per-chunk parses, which is >= parse(whole).
+      // Measured on real fixtures: a Codex lane appended as 3 turns parses whole
+      // to 1.
+      //
+      // So parse(whole) is a valid LOWER BOUND and nothing more:
+      //   actual <  expected  -> records are definitely missing. Repairable.
+      //   actual >= expected  -> proves nothing. Could be the statefulness above
+      //                          (overwhelmingly the common case) or genuine
+      //                          duplication, and this oracle cannot tell them
+      //                          apart. Rebuilding on it would delete-and-reinsert
+      //                          healthy sessions corpus-wide and destroy their
+      //                          embeddings, every rotation, forever.
+      //
+      // Treating it as equality was the bug. Duplication needs its own detector;
+      // it does not get to borrow this one.
+      if (actual >= expected) {
+        if (actual > expected) res.deepOvercount += 1;
         await stampDeepVerified(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
 
       res.deepMismatched += 1;
-      opts.logger?.warn?.("reconciler: count sweep found a session the byte gate calls healthy", {
+      opts.logger?.warn?.("reconciler: count sweep found records missing from a session the byte gate calls healthy", {
         sessionId: key.sessionId,
         family: key.family,
         indexedTurns: actual,
         canonicalRecords: expected,
-        // Sign is the diagnosis: short means records never landed, over means
-        // the same records landed twice.
-        kind: actual < expected ? "missing_records" : "duplicate_records",
+        kind: "missing_records",
       });
 
       // Systematic-bug ceiling. If MOST of what we prove comes back mismatched,
@@ -1235,14 +1303,14 @@ async function deepVerifySweep(
         opts.logger?.warn?.("reconciler: count sweep mismatch rate implausible — repairs stood down", {
           mismatched: res.deepMismatched, verified: res.deepVerified,
         });
+        await stampAttempted(db, row.rowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
 
-      // Rebuild from the text we just read. The CAS anchors to the byte count
-      // observed NOW, so a live commit that lands in between aborts the rebuild
-      // rather than deleting what it wrote.
-      const anchor = await currentBytes(db, key);
+      // Rebuild from the text we just read, CAS-anchored to the byte count taken
+      // BEFORE that read (above), so any commit landing in the meantime aborts
+      // the rebuild instead of being deleted by it.
       let outcome: Awaited<ReturnType<typeof ingestCommit>>;
       try {
         outcome = await ingestCommit(db, {
@@ -1299,15 +1367,20 @@ async function deepVerifySweep(
           sessionId: key.sessionId, family: key.family,
           indexedTurns: after, canonicalRecords: expected,
         });
+        await stampAttempted(db, row.rowId);
       }
     } catch (err) {
-      // Never stamp on failure: an unproven session must stay in the queue.
+      // Never stamp PROVEN on failure — but do advance the rotation cursor, or
+      // a permanently unreadable canonical parks itself at the head of the queue
+      // and, once there are as many such rows as the per-pass cap, the sweep
+      // never reaches another row again.
       res.deepErrors += 1;
       opts.logger?.warn?.("reconciler: count sweep skipped one session", {
         err: sanitizeDbError(err),
         sessionId: key.sessionId,
         family: key.family,
       });
+      await stampAttempted(db, row.rowId).catch(() => {});
     }
     if (delay > 0) await sleep(delay);
   }
@@ -1324,6 +1397,7 @@ async function deepVerifyLanes(
   delay: number,
   limit: number,
 ): Promise<void> {
+  if (limit <= 0) return;
   const candidates = await db
     .select({
       laneRowId: hxSessionAgents.id,
@@ -1337,7 +1411,7 @@ async function deepVerifyLanes(
     .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
     .where(and(isNull(hxSessionAgents.deletedAt), isNull(hxSessions.deletedAt)))
-    .orderBy(dsql`${hxSessionAgents.deepVerifiedAt} asc nulls first`, hxSessionAgents.id)
+    .orderBy(dsql`${hxSessionAgents.deepAttemptedAt} asc nulls first`, hxSessionAgents.id)
     .limit(limit);
 
   for (const row of candidates) {
@@ -1358,25 +1432,51 @@ async function deepVerifyLanes(
     };
     try {
       if (await isSessionDeleted(db, commitKey.userId, row.sessionId)) {
-        await stampLaneVerified(db, row.laneRowId);
+        // Advance the cursor, never claim proof — see the parent path.
+        await stampLaneAttempted(db, row.laneRowId);
         continue;
       }
+      // CAS anchor BEFORE the read, same reasoning as the parent path: the
+      // window that matters is the read itself. The lane path previously passed
+      // no anchor at all, so a live lane commit that landed while the sweep held
+      // the text was deleted by the rebuild and the lane then stamped verified.
+      const laneAnchor = await currentLaneBytes(db, row.laneRowId);
       const text = await store.readCanonicalText(storeKey);
+      let statBytes: number | null = null;
+      try {
+        statBytes = await store.statCanonical(storeKey);
+      } catch {
+        // unknown — never repairs below
+      }
+      const readBytes = Buffer.byteLength(text);
       const expected = parseChunk(text).turns.length;
       const actual = await countLaneTurns(db, row.sessionRowId, row.laneRowId);
       res.deepVerified += 1;
 
-      if (actual === expected) {
+      if (statBytes != null && statBytes > readBytes) {
+        res.shortReads += 1;
+        opts.logger?.warn?.("reconciler: count sweep read a lane short of its canonical — cannot judge", {
+          sessionId: row.sessionId, agentId: row.agentId, readBytes, statBytes,
+        });
+        await stampLaneAttempted(db, row.laneRowId);
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
+
+      // Lower bound only — see the parent sweep for why parse(whole) cannot be
+      // an equality oracle against an append-built lane.
+      if (actual >= expected) {
+        if (actual > expected) res.deepOvercount += 1;
         await stampLaneVerified(db, row.laneRowId);
         if (delay > 0) await sleep(delay);
         continue;
       }
 
       res.deepMismatched += 1;
-      opts.logger?.warn?.("reconciler: count sweep found an agent lane the byte gate calls healthy", {
+      opts.logger?.warn?.("reconciler: count sweep found records missing from an agent lane", {
         sessionId: row.sessionId, agentId: row.agentId, family: row.family,
         indexedTurns: actual, canonicalRecords: expected,
-        kind: actual < expected ? "missing_records" : "duplicate_records",
+        kind: "missing_records",
       });
 
       if (
@@ -1409,6 +1509,7 @@ async function deepVerifyLanes(
           },
           recovered: true,
           rebuild: true,
+          ...(laneAnchor !== undefined ? { expectIndexedBytes: laneAnchor } : {}),
         });
       } catch (err) {
         if (!(err instanceof IndexAdvancedError)) throw err;
@@ -1441,6 +1542,7 @@ async function deepVerifyLanes(
           sessionId: row.sessionId, agentId: row.agentId,
           indexedTurns: after, canonicalRecords: expected,
         });
+        await stampLaneAttempted(db, row.laneRowId);
       }
     } catch (err) {
       res.deepErrors += 1;
@@ -1448,16 +1550,35 @@ async function deepVerifyLanes(
         err: sanitizeDbError(err),
         sessionId: row.sessionId, agentId: row.agentId,
       });
+      await stampLaneAttempted(db, row.laneRowId).catch(() => {});
     }
     if (delay > 0) await sleep(delay);
   }
 }
 
 async function stampLaneVerified(db: HxDb, laneRowId: string): Promise<void> {
+  const now = new Date().toISOString();
   await db
     .update(hxSessionAgents)
-    .set({ deepVerifiedAt: new Date().toISOString() })
+    .set({ deepVerifiedAt: now, deepAttemptedAt: now })
     .where(eq(hxSessionAgents.id, laneRowId));
+}
+
+async function stampLaneAttempted(db: HxDb, laneRowId: string): Promise<void> {
+  await db
+    .update(hxSessionAgents)
+    .set({ deepAttemptedAt: new Date().toISOString() })
+    .where(eq(hxSessionAgents.id, laneRowId));
+}
+
+/** The lane row's byte count right now, for the rebuild CAS. */
+async function currentLaneBytes(db: HxDb, laneRowId: string): Promise<number | undefined> {
+  const [row] = await db
+    .select({ bytes: hxSessionAgents.bytesUploaded })
+    .from(hxSessionAgents)
+    .where(eq(hxSessionAgents.id, laneRowId))
+    .limit(1);
+  return row ? Number(row.bytes ?? 0) : undefined;
 }
 
 /** Turns indexed for one lane of a session row (null agent = the parent). */
@@ -1477,8 +1598,19 @@ async function countLaneTurns(db: HxDb, sessionRowId: string, agentRowId: string
 /** Record that this row's count was proven NOW. Only ever called after an exact
  *  match — never after a repair that failed to reach the expected count. */
 async function stampDeepVerified(db: HxDb, sessionRowId: string): Promise<void> {
+  const now = new Date().toISOString();
   await db
     .update(hxSessions)
-    .set({ deepVerifiedAt: new Date().toISOString() })
+    .set({ deepVerifiedAt: now, deepAttemptedAt: now })
+    .where(eq(hxSessions.id, sessionRowId));
+}
+
+/** Record that the sweep LOOKED at this row without proving it. Advances the
+ *  rotation so an unprovable row cannot sit at the head of the queue forever,
+ *  while leaving `deep_verified_at` NULL so the backlog stays truthful. */
+async function stampAttempted(db: HxDb, sessionRowId: string): Promise<void> {
+  await db
+    .update(hxSessions)
+    .set({ deepAttemptedAt: new Date().toISOString() })
     .where(eq(hxSessions.id, sessionRowId));
 }

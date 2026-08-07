@@ -335,8 +335,15 @@ export function hxPoolOptionsFor(
       // attempt next pass — see DEFAULT_BG_ACQUIRE_TIMEOUT_MS.
       acquireTimeoutMs: backgroundAcquireTimeoutMs(env),
       // Sized to FINISH a large single-transaction rebuild rather than kill it
-      // — see DEFAULT_BG_STATEMENT_TIMEOUT_MS.
-      statementTimeoutMs: backgroundStatementTimeoutMs(env),
+      // (see DEFAULT_BG_STATEMENT_TIMEOUT_MS) — but an operator who LOWERS the
+      // fortress-wide bound is protecting a shared Postgres, and background
+      // repair must not be quietly exempt from that. So the background budget
+      // applies only while it is the more permissive reading of a default
+      // shared bound; an explicitly lowered shared bound wins.
+      statementTimeoutMs:
+        statementTimeoutMs(env) < DEFAULT_STATEMENT_TIMEOUT_MS
+          ? statementTimeoutMs(env)
+          : backgroundStatementTimeoutMs(env),
     });
   }
   if (role === "ro") return hxPoolOptions(env);

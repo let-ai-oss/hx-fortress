@@ -15,11 +15,47 @@
 -- `hx.turns.agent_id` -> `hx.session_agents` is the same trap on a 2.3 GB child,
 -- reached when a session_agents row is deleted.
 --
+-- UPGRADE NOTE. The runner executes this file as ONE transaction bounded by
+-- FORTRESS_DB_MIGRATION_TIMEOUT_MS (default 300 s), holding ShareLock on each
+-- table it touches until commit — writes to those tables block for the build.
+-- Measured on the reference deployment (546 MB tool_calls, 2.3 GB turns) the
+-- three large builds took 0.4 s / 0.5 s / 1.3 s, so this is a ~1 s pause, not
+-- an outage. On a substantially larger corpus, raise
+-- FORTRESS_DB_MIGRATION_TIMEOUT_MS before upgrading: a build that exceeds it
+-- rolls the batch back un-journalled and retries on every boot.
+--
 -- On an existing deployment these are built out-of-band with CREATE INDEX
 -- CONCURRENTLY (no write lock) BEFORE this migration runs; IF NOT EXISTS then
 -- makes this a no-op there. A migration cannot use CONCURRENTLY itself — the
 -- runner wraps each batch in a transaction and CONCURRENTLY is forbidden inside
 -- one. On a fresh/small database the plain build here is instant.
+-- `IF NOT EXISTS` matches on NAME, not validity. An index left behind by a
+-- failed CREATE INDEX CONCURRENTLY exists under its name but is IGNORED by the
+-- planner, so every statement below would no-op and the migration would journal
+-- as applied while the cascade stayed unindexed — the original outage, now
+-- invisible. Drop any invalid leftovers first.
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT c.relname
+    FROM pg_class c
+    JOIN pg_index i ON i.indexrelid = c.oid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'hx'
+      AND (NOT i.indisvalid OR NOT i.indisready)
+      AND c.relname IN (
+        'hx_tool_calls_turn_id_idx','hx_tool_calls_agent_id_idx','hx_turns_agent_id_idx',
+        'hx_sessions_device_id_idx','hx_session_agents_model_id_idx','hx_repos_project_id_idx',
+        'hx_analysis_runs_definition_id_idx','hx_analysis_runs_model_id_idx',
+        'hx_usage_rollup_user_id_idx','hx_usage_rollup_project_id_idx','hx_usage_rollup_model_id_idx'
+      )
+  LOOP
+    EXECUTE format('DROP INDEX IF EXISTS hx.%I', r.relname);
+    RAISE NOTICE 'dropped invalid index hx.%', r.relname;
+  END LOOP;
+END $$;
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "hx_tool_calls_turn_id_idx"
   ON "hx"."tool_calls" ("turn_id");
 --> statement-breakpoint

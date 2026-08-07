@@ -52,6 +52,17 @@ describe.skipIf(!DSN)("hx schema — every foreign key is index-covered", () => 
           select 1 from pg_index i
           where i.indrelid = c.conrelid
             and (i.indkey::int2[])[0:array_length(c.conkey, 1) - 1] = c.conkey
+            -- A PARTIAL index cannot serve an FK check: the referential
+            -- integrity lookup has no idea about the predicate, so rows outside
+            -- it are invisible and Postgres falls back to a scan.
+            and i.indpred is null
+            -- An index left behind by a failed CREATE INDEX CONCURRENTLY is
+            -- present under its name but IGNORED by the planner. Counting it as
+            -- cover is how a "fixed" cascade silently stays broken — and this
+            -- repo builds these indexes CONCURRENTLY out-of-band on prod, so it
+            -- is a live possibility, not a hypothetical.
+            and i.indisvalid
+            and i.indisready
         )
       order by pg_relation_size(c.conrelid) desc
     `)) as unknown as Array<Record<string, unknown>>;

@@ -233,6 +233,8 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
         staleRepairCeiling: cfg.reconcile?.staleRepairCeiling,
         correctExistingTitles: firstPass && correctTitles,
         logger: cfg.logger,
+        deepVerifyPerPass: cfg.reconcile?.deepVerifyPerPass,
+        isSaturated: cfg.reconcile?.isSaturated,
       });
       firstPass = false;
       return res;

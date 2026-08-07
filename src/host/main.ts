@@ -496,10 +496,22 @@ export async function runFortressHost(
     // the extra reads never come at the live path's expense. `deepVerifyBacklog`
     // in every pass log is how you watch it converge.
     const DEFAULT_DEEP_VERIFY_PER_PASS = 100;
-    const deepVerifyRaw = Number(process.env.FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS);
+    // Set-but-EMPTY means the default, never 0. `Number("")` is 0, so the naive
+    // read silently disables the only detector for this damage class when a
+    // .env template carries a blank line — and every other knob in this codebase
+    // treats blank as "use the default" for exactly that reason. Only an
+    // explicit 0 turns it off, and that says so in the log.
+    const deepVerifyEnv = process.env.FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS;
+    const deepVerifyRaw =
+      deepVerifyEnv === undefined || deepVerifyEnv.trim() === "" ? NaN : Number(deepVerifyEnv);
     const deepVerifyPerPass = Number.isFinite(deepVerifyRaw)
       ? Math.max(0, Math.trunc(deepVerifyRaw))
       : DEFAULT_DEEP_VERIFY_PER_PASS;
+    if (deepVerifyPerPass === 0) {
+      bus.scopeFor("guarantor").warn(
+        "count sweep DISABLED (FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS=0) — damage the byte gate cannot see will go undetected",
+      );
+    }
     const batchDelayRaw = Number(process.env.FORTRESS_GUARANTOR_BATCH_DELAY_MS);
     const batchDelayMs =
       Number.isFinite(batchDelayRaw) && batchDelayRaw >= 0 ? Math.trunc(batchDelayRaw) : undefined;
