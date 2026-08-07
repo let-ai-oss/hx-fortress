@@ -812,7 +812,14 @@ export async function reconcileOrphans(
               chunkId: repairChunkId("tail"),
               replace: false,
               chunkText: buf.subarray(alreadyIndexedBytes).toString("utf8"),
-              totalBytes: canonicalBytes ?? buf.length,
+              // The bytes this append actually indexes — NEVER the size the store
+              // claims. `canonicalBytes` is the LISTED/stat size; when the read
+              // comes back shorter (a non-UTF-8 canonical, a truncated download)
+              // stamping it here marks a partial session complete: the row reads
+              // as fully covered, the staleness gate stops selecting it, and the
+              // shortfall is never revisited. The full-rebuild path below already
+              // records `Buffer.byteLength(chunkText)` for exactly this reason.
+              totalBytes: buf.length,
               expectIndexedBytes: alreadyIndexedBytes,
               expectPriorTurns,
             });
