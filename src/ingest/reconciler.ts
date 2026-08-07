@@ -201,6 +201,15 @@ async function verifyLane(
   store?: SessionStore,
   /** Agent lane to verify. Omitted / null = the parent lane. */
   agentId?: string | null,
+  /** Records the canonical PARSES to for this lane — the only ground truth for
+   *  completeness. Bytes and density both miss a lost middle record (a 9-record
+   *  canonical indexed as 6 is still seq-dense and can still be byte-covering)
+   *  and both miss duplication. Omit only when the count is genuinely unknown.
+   *
+   *  Must be the count from parsing the WHOLE canonical: parseChunk is stateful
+   *  across the text (cross-record dedup, retroactive filtering), so
+   *  parse(prefix) + parse(tail) does not equal parse(whole). */
+  expectedTurns?: number | null,
   /** Canonical object to re-measure. For a lane this is the `sid:a:agentId`
    *  composite, NOT the parent key used to find the row — statting the parent
    *  compares a lane against the wrong object entirely, and with a median parent
@@ -215,6 +224,9 @@ async function verifyLane(
    *  otherwise the scan-time size. Callers diff this against the size they
    *  rebuilt from to tell live growth apart from real damage. */
   canonical: number | null;
+  /** Records the canonical was expected to yield, echoed back for logging.
+   *  null when the caller could not supply one. */
+  expected: number | null;
 }> {
   // Re-measure the canonical NOW. The size read at scan time can be minutes old,
   // and for a live session it is already wrong by the time a repair finishes.
@@ -239,7 +251,7 @@ async function verifyLane(
       ),
     )
     .limit(1);
-  if (!row) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes };
+  if (!row) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes, expected: expectedTurns ?? null };
   // hx.turns.agent_id holds the lane ROW id, not the external agent id — resolve
   // it before counting, and read the lane's OWN byte count while we are here.
   let bytes = Number(row.bytes ?? 0);
@@ -256,7 +268,7 @@ async function verifyLane(
         ),
       )
       .limit(1);
-    if (!laneRow) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes };
+    if (!laneRow) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes, expected: expectedTurns ?? null };
     laneRowId = laneRow.id;
     bytes = Number(laneRow.bytes ?? 0);
   }
@@ -280,7 +292,21 @@ async function verifyLane(
   // the canonical", not "equals a number captured minutes ago" — so >= passes, and
   // only genuinely BEHIND counts as incomplete.
   const bytesOk = canonicalBytes == null || bytes >= canonicalBytes;
-  return { ok: bytesOk && dense, bytes, turns, dense, canonical: canonicalBytes };
+  // The count is the authority. Bytes prove we reached the end of the object;
+  // density proves the seq column has no holes. Neither can see that a record
+  // in the MIDDLE never landed, nor that one landed twice — only comparing the
+  // canonical's own record count to what is indexed can. When the caller can
+  // supply that count it decides the verdict, with bytes/density kept as the
+  // cheap corroborating checks.
+  const countOk = expectedTurns == null || turns === expectedTurns;
+  return {
+    ok: bytesOk && dense && countOk,
+    bytes,
+    turns,
+    dense,
+    canonical: canonicalBytes,
+    expected: expectedTurns ?? null,
+  };
 }
 
 /** Why a post-rebuild verification came back short.
@@ -301,17 +327,25 @@ async function verifyLane(
 type ShortfallKind = "damage" | "grew" | "shortRead";
 
 function classifyShortfall(
-  v: { bytes: number; dense: boolean; canonical: number | null },
+  v: { bytes: number; dense: boolean; canonical: number | null; turns: number; expected: number | null },
   /** Bytes the rebuild actually indexed — `Buffer.byteLength` of the text read. */
   readBytes: number,
   /** Object size when the pass listed this canonical, for the growth comparison. */
   scanBytes: number | null,
 ): ShortfallKind {
+  const grew = scanBytes != null && v.canonical != null && v.canonical > scanBytes;
+  // A count mismatch is damage — EXCEPT when the canonical outgrew the text we
+  // rebuilt from, in which case the index legitimately holds more records than
+  // our stale parse predicted and the tail lands next pass.
+  if (v.expected != null && v.turns !== v.expected) {
+    if (v.turns > v.expected && grew) return "grew";
+    return "damage";
+  }
   // Anything less than a dense lane covering every byte we read is real damage,
   // whatever the store reports.
   if (!v.dense || v.bytes < readBytes) return "damage";
   if (v.canonical == null) return "damage";
-  if (scanBytes != null && v.canonical > scanBytes) return "grew";
+  if (grew) return "grew";
   return "shortRead";
 }
 
@@ -678,10 +712,18 @@ export async function reconcileOrphans(
         continue;
       }
       const chunkText = await store.readCanonicalText(key);
+      // Parse the WHOLE canonical once. Its record count is the completeness
+      // authority for this lane — bytes only prove we reached the end of the
+      // object and density only proves seq has no holes, so neither can see a
+      // record that never landed in the MIDDLE, nor one that landed twice.
+      // It must come from parsing the whole text: parseChunk is stateful across
+      // the text, so parse(prefix) + parse(tail) != parse(whole).
+      const parsedCanonical = parseChunk(chunkText);
+      const expectedTurns = parsedCanonical.turns.length;
       // The candidate from above, decided on CONTENT rather than on bytes.
       // Parsing to anything at all means this is masked damage, not an empty
       // canonical — fall through and restore it.
-      if (coveredByRow && parseChunk(chunkText).eventCount === 0) {
+      if (coveredByRow && parsedCanonical.eventCount === 0) {
         res.emptyCanonicals += 1;
         if (delay > 0) await sleep(delay);
         continue;
@@ -747,7 +789,7 @@ export async function reconcileOrphans(
             });
           }
         } else {
-          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, key);
+          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, expectedTurns, key);
           if (v.ok) {
             res.repairedFull += 1;
           } else {
@@ -855,7 +897,7 @@ export async function reconcileOrphans(
             });
           } else if (outcome) {
             tailApplied = true;
-            const v = await verifyLane(db, key, canonicalBytes, store);
+            const v = await verifyLane(db, key, canonicalBytes, store, null, expectedTurns);
             if (v.ok) {
               landed = true;
               res.repairedTail += 1;
@@ -938,7 +980,7 @@ export async function reconcileOrphans(
             }
           } else {
             res.restored += 1;
-            const v = await verifyLane(db, key, canonicalBytes, store);
+            const v = await verifyLane(db, key, canonicalBytes, store, null, expectedTurns);
             if (v.ok) {
               res.repairedFull += 1;
             } else {
