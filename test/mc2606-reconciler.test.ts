@@ -1204,4 +1204,53 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     // not read. Inflating it to STAT would be the guarantor lying about coverage.
     expect(Number(row!.bytes)).toBe(readBytes);
   });
+
+  // A tail append must stamp the watermark with the bytes it actually indexed,
+  // never with the size the store CLAIMS the object is. Recording the stat while
+  // holding only the read marks a partial session complete: the staleness gate
+  // stops selecting it, no later pass revisits it, and the shortfall becomes
+  // permanently invisible. Partial-and-marked-done is corruption.
+  test("a tail append never stamps a watermark it did not index", async () => {
+    const key: SessionKey = {
+      userId: `wm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const head = body(4);
+    const read = body(10);            // everything the store hands back
+    const readBytes = Buffer.byteLength(read);
+    const STAT = readBytes + 4096;    // what the store CLAIMS it holds
+
+    await ingestCommit(db, {
+      key, chunkId: "wm-c1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: STAT }],
+      readCanonicalText: async () => read,
+      statCanonical: async () => STAT,
+    } as unknown as SessionStore;
+
+    await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    const [row] = await db
+      .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+
+    // The load-bearing assertion: the watermark equals the bytes indexed, NOT the
+    // stat. At STAT the row would read as fully covered and never be revisited.
+    expect(Number(row!.bytes)).toBe(readBytes);
+    expect(Number(row!.bytes)).toBeLessThan(STAT);
+
+    // And the content really is all there.
+    const rows = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    expect(rows.length).toBe(10);
+  });
 });
