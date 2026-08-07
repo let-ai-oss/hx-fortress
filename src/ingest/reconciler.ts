@@ -1087,12 +1087,6 @@ export async function reconcileOrphans(
 }
 
 
-/** Default sessions proven per pass. One canonical read each, so this paces the
- *  store: at the hourly sweep it works through a few thousand sessions a day and
- *  then keeps rotating, which is the right shape for "prove the corpus and keep
- *  it proven" rather than a one-shot audit that is stale the moment it ends. */
-const DEFAULT_DEEP_VERIFY_PER_PASS = 25;
-
 /** Above this share of deep-verified sessions coming back mismatched, the sweep
  *  stops REPAIRING (it keeps detecting and reporting). A corpus does not rot at
  *  that rate; a comparison bug does. */
@@ -1135,7 +1129,11 @@ async function deepVerifySweep(
     .from(hxSessions)
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
     .where(isNull(hxSessions.deletedAt))
-    .orderBy(dsql`${hxSessions.deepVerifiedAt} asc nulls first`)
+    // Tiebreaker on id: NULLS FIRST alone leaves the never-verified rows in an
+    // arbitrary order, so successive passes could revisit an overlapping subset
+    // instead of walking the corpus. Stamping guarantees forward progress
+    // either way, but a deterministic order makes the rotation predictable.
+    .orderBy(dsql`${hxSessions.deepVerifiedAt} asc nulls first`, hxSessions.id)
     .limit(limit);
 
   for (const row of candidates) {

@@ -1310,7 +1310,7 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
 
     // With the sweep on, the count is the authority.
     const swept = await reconcileOrphans(db, store, {
-      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 50,
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
     });
     expect(swept.deepMismatched).toBeGreaterThanOrEqual(1);
     expect(swept.deepRepaired).toBeGreaterThanOrEqual(1);
@@ -1340,7 +1340,7 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     } as unknown as SessionStore;
 
     const res = await reconcileOrphans(db, store, {
-      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 50,
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
     });
     // Counters are corpus-wide and this suite shares one database, so the
     // load-bearing assertions are about THIS session: it stays exactly as it
@@ -1392,7 +1392,7 @@ describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the re
     } as unknown as SessionStore;
 
     const res = await reconcileOrphans(db, store, {
-      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 50,
+      batchDelayMs: 0, correctExistingTitles: false, deepVerifyPerPass: 1000 /* shared DB: exceed the accumulated corpus */,
     });
     expect(res.deepErrors).toBeGreaterThanOrEqual(1);
 
