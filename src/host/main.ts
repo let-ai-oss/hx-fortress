@@ -467,9 +467,17 @@ export async function runFortressHost(
 
   let guarantor: Guarantor | null = null;
   if (guarantorEnabled()) {
+    // A pass repairs at most this many sessions. Previously UNBOUNDED, which was
+    // survivable only while the guarantor could repair each session once; lifting
+    // that freeze unfreezes every stuck session at once, and a full rebuild costs
+    // 40-115 s of IO against a 14 GB GIN-indexed table on a shared Postgres. The
+    // backlog drains across passes instead of in one thundering sweep.
+    const DEFAULT_MAX_ORPHANS_PER_PASS = 100;
     const maxOrphansRaw = Number(process.env.FORTRESS_GUARANTOR_MAX_ORPHANS_PER_PASS);
     const maxOrphans =
-      Number.isFinite(maxOrphansRaw) && maxOrphansRaw > 0 ? Math.trunc(maxOrphansRaw) : undefined;
+      Number.isFinite(maxOrphansRaw) && maxOrphansRaw > 0
+        ? Math.trunc(maxOrphansRaw)
+        : DEFAULT_MAX_ORPHANS_PER_PASS;
     const batchDelayRaw = Number(process.env.FORTRESS_GUARANTOR_BATCH_DELAY_MS);
     const batchDelayMs =
       Number.isFinite(batchDelayRaw) && batchDelayRaw >= 0 ? Math.trunc(batchDelayRaw) : undefined;

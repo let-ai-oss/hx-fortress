@@ -15,7 +15,7 @@
 // caller's responsibility (the scheduler), non-throwing per session.
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { and, eq, gt, isNull, sql as dsql } from "drizzle-orm";
+import { and, eq, gt, isNotNull, isNull, sql as dsql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
@@ -24,7 +24,13 @@ import { hxUsers } from "../host/postgres/schema/dimensions";
 import type { CanonicalEntry, SessionKey, SessionStore } from "../modules/session-vault/store/types";
 import { correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
-import { IndexAdvancedError, ingestAgentCommit, ingestCommit } from "./ingest";
+import {
+  IndexAdvancedError,
+  LanePrefixMismatchError,
+  ingestAgentCommit,
+  ingestCommit,
+} from "./ingest";
+import { parseChunk } from "./parse";
 
 const AGENT_LANE = ":a:";
 
@@ -59,6 +65,10 @@ export interface ReconcileOptions {
 
 export interface ReconcileResult {
   scanned: number;
+  /** Canonicals examined this pass with no indexed row — NOT a damage count.
+   *  It includes empty canonicals re-examined every pass (subtract
+   *  `emptyCanonicals`) and failed restores that will retry. Alert on
+   *  `noOpRepairs` / `integrityFailures` / `restored`, never on this. */
   orphans: number;
   restored: number;
   skippedTombstoned: number;
@@ -72,13 +82,50 @@ export interface ReconcileResult {
   repairedTail: number;
   /** Repairs that rebuilt the whole session from the canonical. */
   repairedFull: number;
-  /** Tail repairs whose post-repair verification failed and were escalated to a
-   *  full rebuild. A persistently non-zero value means the incremental path is
+  /** Tail repairs whose post-repair verification failed. Usually escalated to a
+   *  full rebuild — but when the canonical grew mid-iteration the escalation is
+   *  DEFERRED instead (a paired `liveRaces` in the same result says so), because
+   *  rebuilding from pre-growth text would delete content. A persistently non-zero value means the incremental path is
    *  mis-slicing and should be disabled (FORTRESS_GUARANTOR_TAIL_REPAIR=false). */
   verifyFallbacks: number;
   /** Sessions STILL not fully indexed after a full rebuild — the only outcome
    *  that leaves damage behind. Each one is logged with its id at error level. */
   integrityFailures: number;
+  /** Rebuilds that indexed EVERY byte the store handed back, densely, while the
+   *  store's own stat still reports a larger object. The index is complete with
+   *  respect to the read; the read and the stat disagree.
+   *
+   *  Two known producers. A canonical holding bytes that are not valid UTF-8:
+   *  `readCanonicalText` decodes to a JS string and the rebuild records
+   *  `Buffer.byteLength` of the RE-ENCODED text, which for a lossy round-trip
+   *  differs from the object size `statCanonical` reports. And a read that
+   *  returns short (a truncated or capped download).
+   *
+   *  Kept apart from `integrityFailures` because no rebuild can ever clear it —
+   *  scoring it as damage buries the real signal under a permanent floor, and
+   *  every pass would spend another full rebuild proving the same thing. A
+   *  non-zero value means investigate the STORE, not the indexer. */
+  shortReads: number;
+  /** Repairs the no-clobber guard REFUSED because a live row was already there —
+   *  the guard working as intended, not a defect. Counted apart from noOpRepairs
+   *  so the bug signal stays a bug signal. */
+  protectedSkips: number;
+  /** Canonicals that genuinely contain no events, already restored, left alone.
+   *  Neither damage nor work — recorded so an unexpected volume is visible. */
+  emptyCanonicals: number;
+  /** Repairs whose commit reported it did NOT apply — a dedupe hit or a guard.
+   *  This is the counter that would have surfaced the constant-repair-key freeze
+   *  on its first pass instead of a week later; a non-zero value means the
+   *  guarantor believes it repaired something and did nothing. */
+  noOpRepairs: number;
+  /** Tail repairs refused because the lane did not hold the prefix the slice was
+   *  cut from — a regressed byte count or a rewritten canonical. Escalates to a
+   *  full rebuild, which is canonical-faithful by construction. */
+  prefixMismatches: number;
+  /** Existing sessions whose canonical size the store did not report, so
+   *  completeness could not be judged at all. Counted so "we checked nothing"
+   *  can never read as "we found nothing". */
+  unjudgeable: number;
   /** Tail repairs abandoned because a live commit advanced the lane while the
    *  sweep was working. Not damage and not an error — the live write is the more
    *  current truth, and the next pass re-checks. */
@@ -97,24 +144,83 @@ export interface ReconcileResult {
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** A repair's dedupe key must be UNIQUE per attempt.
+ *
+ *  A constant chunkId ("reconcile") made `alreadyIngested` match on the second
+ *  attempt, so ingestCommit returned without doing anything and the guarantor
+ *  could repair a given session exactly once, ever — one session sat frozen for
+ *  a week and 2,202 more had the key already burned. Content-addressing does not
+ *  fix it either: any damage that leaves the canonical unchanged (a lane wiped by
+ *  a racing rebuild, a seq hole, manual surgery) hashes the same and freezes
+ *  again.
+ *
+ *  Dedupe carries no correctness here: the reconciler never retries inside a
+ *  pass, its own detection is the idempotency gate, `replace` is idempotent, and
+ *  the tail is guarded by two compare-and-swaps under the advisory lock. Live
+ *  chunk dedupe — where exactly-once genuinely matters — is untouched. */
+const repairChunkId = (kind: "full" | "tail"): string =>
+  `reconcile-${kind}:${crypto.randomUUID()}`;
+
+/** The row's byte count right now — used to re-anchor a compare-and-swap after
+ *  an earlier write in the same iteration moved it. */
+async function currentBytes(db: HxDb, key: SessionKey): Promise<number | undefined> {
+  const [row] = await db
+    .select({ bytes: hxSessions.bytesUploaded })
+    .from(hxSessions)
+    .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+    .where(
+      and(
+        eq(hxUsers.externalId, key.userId),
+        eq(hxSessions.family, key.family),
+        eq(hxSessions.sessionId, key.sessionId),
+        isNull(hxSessions.deletedAt),
+      ),
+    )
+    .limit(1);
+  return row ? Number(row.bytes ?? 0) : undefined;
+}
+
 /** Proof that a session's PARENT lane is whole, not merely present.
  *
  *  Two independent facts, because either alone can be satisfied by damaged data:
  *  the row must claim the canonical's full byte count, AND the lane's seq must be
  *  dense (insertTurns assigns 0,1,2… after max(seq), so count === max+1 exactly
  *  when nothing is missing in the middle). A tail repair that mis-sliced shows up
- *  as a byte mismatch; a lost chunk in the middle shows up as a seq hole. */
+ *  as a byte mismatch; turns deleted from a lane show up as a seq hole.
+ *
+ *  KNOWN GAP: neither fact sees a lost CHUNK. insertTurns numbers from
+ *  max(seq)+1, so a chunk whose commit failed while the next one succeeded
+ *  leaves the lane DENSE, and that next chunk carries the full totalBytes, so it
+ *  is also byte-COVERING. Reproduced: a 9-record canonical indexed as 6 turns
+ *  (records 3-5 absent) passes both checks and every detector in this file. Only
+ *  a whole-canonical record count would catch it. */
 async function verifyLane(
   db: HxDb,
   key: SessionKey,
   canonicalBytes: number | null,
   store?: SessionStore,
-): Promise<{ ok: boolean; bytes: number; turns: number; dense: boolean }> {
+  /** Agent lane to verify. Omitted / null = the parent lane. */
+  agentId?: string | null,
+  /** Canonical object to re-measure. For a lane this is the `sid:a:agentId`
+   *  composite, NOT the parent key used to find the row — statting the parent
+   *  compares a lane against the wrong object entirely, and with a median parent
+   *  of one turn that comparison passes trivially. */
+  statKey?: SessionKey,
+): Promise<{
+  ok: boolean;
+  bytes: number;
+  turns: number;
+  dense: boolean;
+  /** The size actually compared against — the FRESH stat when one was available,
+   *  otherwise the scan-time size. Callers diff this against the size they
+   *  rebuilt from to tell live growth apart from real damage. */
+  canonical: number | null;
+}> {
   // Re-measure the canonical NOW. The size read at scan time can be minutes old,
   // and for a live session it is already wrong by the time a repair finishes.
   if (store) {
     try {
-      const fresh = await store.statCanonical(key);
+      const fresh = await store.statCanonical(statKey ?? key);
       if (fresh != null) canonicalBytes = fresh;
     } catch {
       // keep the scan-time size — a stat failure must not fail the verification
@@ -133,24 +239,80 @@ async function verifyLane(
       ),
     )
     .limit(1);
-  if (!row) return { ok: false, bytes: 0, turns: 0, dense: false };
+  if (!row) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes };
+  // hx.turns.agent_id holds the lane ROW id, not the external agent id — resolve
+  // it before counting, and read the lane's OWN byte count while we are here.
+  let bytes = Number(row.bytes ?? 0);
+  let laneRowId: string | null = null;
+  if (agentId) {
+    const [laneRow] = await db
+      .select({ id: hxSessionAgents.id, bytes: hxSessionAgents.bytesUploaded })
+      .from(hxSessionAgents)
+      .where(
+        and(
+          eq(hxSessionAgents.sessionId, row.id),
+          eq(hxSessionAgents.agentExternalId, agentId),
+          isNull(hxSessionAgents.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (!laneRow) return { ok: false, bytes: 0, turns: 0, dense: false, canonical: canonicalBytes };
+    laneRowId = laneRow.id;
+    bytes = Number(laneRow.bytes ?? 0);
+  }
   const [agg] = await db
     .select({
       n: dsql<number>`count(*)::int`,
       maxSeq: dsql<number>`coalesce(max(${hxTurns.seq}), -1)::int`,
     })
     .from(hxTurns)
-    .where(and(eq(hxTurns.sessionId, row.id), isNull(hxTurns.agentId)));
+    .where(
+      and(
+        eq(hxTurns.sessionId, row.id),
+        laneRowId ? eq(hxTurns.agentId, laneRowId) : isNull(hxTurns.agentId),
+      ),
+    );
   const turns = Number(agg?.n ?? 0);
   const dense = turns === Number(agg?.maxSeq ?? -1) + 1;
-  const bytes = Number(row.bytes ?? 0);
   // A session that is still being written grows UNDER the sweep: a live chunk can
   // land between the repair and this check, leaving the row legitimately AHEAD of
   // whatever the canonical measured when the pass started. Complete means "covers
   // the canonical", not "equals a number captured minutes ago" — so >= passes, and
   // only genuinely BEHIND counts as incomplete.
   const bytesOk = canonicalBytes == null || bytes >= canonicalBytes;
-  return { ok: bytesOk && dense, bytes, turns, dense };
+  return { ok: bytesOk && dense, bytes, turns, dense, canonical: canonicalBytes };
+}
+
+/** Why a post-rebuild verification came back short.
+ *
+ *  `damage`     — a hole, or fewer bytes indexed than the text we actually read.
+ *                 The rebuild genuinely failed; this is the alert.
+ *  `grew`       — everything we read is indexed and the canonical has grown SINCE
+ *                 the pass listed it. A live session; the tail lands next pass.
+ *  `shortRead`  — everything we read is indexed, the canonical has not grown, yet
+ *                 the stat still reports more bytes than the read returned. No
+ *                 rebuild can close that; the store is the thing to look at.
+ *
+ *  Splitting the last two out of `integrityFailures` is what keeps that counter
+ *  meaning "the guarantor could not make this session whole". On a busy fortress
+ *  every actively-written session trips `grew`, and a single non-UTF-8 canonical
+ *  trips `shortRead` on every pass forever — conflating either one puts a
+ *  permanent floor under the alert. */
+type ShortfallKind = "damage" | "grew" | "shortRead";
+
+function classifyShortfall(
+  v: { bytes: number; dense: boolean; canonical: number | null },
+  /** Bytes the rebuild actually indexed — `Buffer.byteLength` of the text read. */
+  readBytes: number,
+  /** Object size when the pass listed this canonical, for the growth comparison. */
+  scanBytes: number | null,
+): ShortfallKind {
+  // Anything less than a dense lane covering every byte we read is real damage,
+  // whatever the store reports.
+  if (!v.dense || v.bytes < readBytes) return "damage";
+  if (v.canonical == null) return "damage";
+  if (scanBytes != null && v.canonical > scanBytes) return "grew";
+  return "shortRead";
 }
 
 /** Below this many stale sessions the ceiling never applies: a handful of rows
@@ -166,6 +328,8 @@ const STALE_CEILING_MIN_COUNT = 50;
  *  rebuilds the lane from the whole canonical), so treating it as an orphan is
  *  always safe: a genuinely empty canonical simply rebuilds to the same nothing. */
 const INDEXED = gt(hxSessions.eventCount, 0);
+/** The lane equivalent — a zero-event lane row carries no content either. */
+const LANE_INDEXED = gt(hxSessionAgents.eventCount, 0);
 
 /** The natural key a canonical maps to. Parent lanes key on hx.sessions; agent
  *  lanes (`baseSid:a:agentId`) key on hx.session_agents under their parent, so an
@@ -204,6 +368,9 @@ async function keyExists(db: HxDb, key: SessionKey): Promise<boolean> {
         eq(hxSessionAgents.agentExternalId, agentId),
         isNull(hxSessions.deletedAt),
         isNull(hxSessionAgents.deletedAt),
+        // Same gate as the bulk query: a content-less lane must not veto the
+        // restore of the canonical it is masking.
+        LANE_INDEXED,
       ),
     )
     .limit(1);
@@ -233,10 +400,16 @@ export async function reconcileOrphans(
     staleIndexes: 0,
     gappedLanes: 0,
     liveRaces: 0,
+    noOpRepairs: 0,
+    protectedSkips: 0,
+    emptyCanonicals: 0,
+    prefixMismatches: 0,
+    unjudgeable: 0,
     repairedTail: 0,
     repairedFull: 0,
     verifyFallbacks: 0,
     integrityFailures: 0,
+    shortReads: 0,
   };
 
   // Fast bulk gate: the natural keys the fortress already has a row for — parent
@@ -274,6 +447,32 @@ export async function reconcileOrphans(
       .groupBy(hxUsers.externalId, hxSessions.family, hxSessions.sessionId)
       .having(dsql`count(*) <> max(${hxTurns.seq}) + 1`);
     for (const h of holes) gapped.add(`${h.ext}/${h.family}/${h.sessionId}`);
+    // …and the same question per agent lane. Lanes are ~a third of all indexed
+    // content and were previously existence-only, so a holed lane was invisible.
+    const laneHoles = await db
+      .select({
+        ext: hxUsers.externalId,
+        family: hxSessions.family,
+        sessionId: hxSessions.sessionId,
+        agentId: hxSessionAgents.agentExternalId,
+      })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .innerJoin(hxTurns, eq(hxTurns.sessionId, hxSessions.id))
+      // turns carry the lane ROW id; the sweep keys on the EXTERNAL id.
+      .innerJoin(hxSessionAgents, eq(hxSessionAgents.id, hxTurns.agentId))
+      .where(
+        and(
+          isNull(hxSessions.deletedAt),
+          isNull(hxSessionAgents.deletedAt),
+          isNotNull(hxTurns.agentId),
+        ),
+      )
+      .groupBy(hxUsers.externalId, hxSessions.family, hxSessions.sessionId, hxSessionAgents.agentExternalId)
+      .having(dsql`count(*) <> max(${hxTurns.seq}) + 1`);
+    for (const h of laneHoles) {
+      gapped.add(`${h.ext}/${h.family}/${h.sessionId}${AGENT_LANE}${h.agentId}`);
+    }
   } catch (err) {
     // Never let the integrity sweep take the whole pass down with it.
     opts.logger?.warn?.("reconciler: seq-gap scan failed", { err: sanitizeDbError(err) });
@@ -284,12 +483,64 @@ export async function reconcileOrphans(
       family: hxSessions.family,
       sessionId: hxSessions.sessionId,
       agentId: hxSessionAgents.agentExternalId,
+      bytesUploaded: hxSessionAgents.bytesUploaded,
     })
     .from(hxSessionAgents)
     .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
-    .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionAgents.deletedAt)));
-  for (const r of agents) have.add(`${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`);
+    // A lane with zero events carries no content, exactly like a parent stub, and
+    // must not mask its own canonical from the orphan scan.
+    .where(
+      and(
+        isNull(hxSessions.deletedAt),
+        isNull(hxSessionAgents.deletedAt),
+        gt(hxSessionAgents.eventCount, 0),
+      ),
+    );
+  // Lanes hold ~a third of all indexed content, so they get the same byte-level
+  // completeness check as parents — keyed on their OWN bytes_uploaded.
+  // Every parent row, gate or no gate. A canonical that parses to nothing leaves
+  // a zero-event row which the INDEXED gate excludes — without this it looks
+  // orphaned again on every pass, forever.
+  const anyRowBytes = new Map<string, number>(
+    (
+      await db
+        .select({
+          ext: hxUsers.externalId,
+          family: hxSessions.family,
+          sessionId: hxSessions.sessionId,
+          bytesUploaded: hxSessions.bytesUploaded,
+        })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(isNull(hxSessions.deletedAt))
+    ).map((r) => [`${r.ext}/${r.family}/${r.sessionId}`, Number(r.bytesUploaded ?? 0)]),
+  );
+  const anyLaneBytes = new Map<string, number>(
+    (
+      await db
+        .select({
+          ext: hxUsers.externalId,
+          family: hxSessions.family,
+          sessionId: hxSessions.sessionId,
+          agentId: hxSessionAgents.agentExternalId,
+          bytesUploaded: hxSessionAgents.bytesUploaded,
+        })
+        .from(hxSessionAgents)
+        .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionAgents.deletedAt)))
+    ).map((r) => [
+      `${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`,
+      Number(r.bytesUploaded ?? 0),
+    ]),
+  );
+  const laneBytes = new Map<string, number>();
+  for (const r of agents) {
+    const k = `${r.ext}/${r.family}/${r.sessionId}${AGENT_LANE}${r.agentId}`;
+    have.add(k);
+    laneBytes.set(k, Number(r.bytesUploaded ?? 0));
+  }
 
   const keys: CanonicalEntry[] = await store.listAllCanonicalKeys();
 
@@ -299,10 +550,11 @@ export async function reconcileOrphans(
   // regresses flags nearly the whole corpus, and re-ingesting all of it would be
   // far worse than the damage being repaired.
   const staleTotal = keys.reduce((n, k) => {
-    if (k.bytes == null || k.sessionId.includes(AGENT_LANE)) return n;
+    if (k.bytes == null) return n;
     const nat = `${k.userId}/${k.family}/${k.sessionId}`;
     if (!have.has(nat)) return n;
-    return (indexedBytes.get(nat) ?? 0) < k.bytes ? n + 1 : n;
+    const m = k.sessionId.includes(AGENT_LANE) ? laneBytes : indexedBytes;
+    return (m.get(nat) ?? 0) < k.bytes ? n + 1 : n;
   }, 0);
   const ceiling = opts.staleRepairCeiling ?? 0.25;
   const wantRepair = opts.repairStaleIndexes ?? true;
@@ -335,8 +587,10 @@ export async function reconcileOrphans(
   // Base session keys whose PARENT re-ingest threw this pass. ingestAgentCommit
   // inserts a title/turn-less parent stub when the parent row is absent, and that
   // stub would then enter the `have`/keyExists gate and block the parent's real
-  // re-ingest forever (permanent content loss). So if a parent failed this pass,
-  // defer its agent lanes — the parent (still orphaned) retries next sweep first.
+  // re-ingest forever. ingestAgentCommit now throws ParentSessionNotIndexedError
+  // instead of minting one, but the ordering still matters: a lane is only
+  // meaningful under an indexed parent, so if a parent failed this pass, defer
+  // its agent lanes — the parent (still orphaned) retries next sweep first.
   const failedParents = new Set<string>();
   for (const key of keys) {
     res.scanned += 1;
@@ -347,32 +601,69 @@ export async function reconcileOrphans(
     // so the ingest-time existence re-check below must not veto the repair.
     let staleRepair = false;
     let alreadyIndexedBytes = 0;
+    // What the row held when this pass started — the value every compare-and-swap
+    // below is anchored to. Distinct from the tail offset, which is forced to 0
+    // for a holed lane so it takes the full rebuild.
+    let scanBytes: number | undefined;
     if (have.has(natural)) {
       // The row exists — but does it cover the whole transcript? An index that is
       // BEHIND its canonical (a chunk whose commit failed while earlier ones
       // landed) is invisible to an existence check, and no sweep would ever find
       // it. Byte counts are only compared when the store reported one.
       const canonicalBytes = key.bytes ?? null;
-      if (key.sessionId.includes(AGENT_LANE)) continue;
+      if (canonicalBytes == null) res.unjudgeable += 1;
+      const isLane = key.sessionId.includes(AGENT_LANE);
       const holed = gapped.has(natural);
       if (holed) res.gappedLanes += 1;
       // Only BEHIND is damage. A live session can legitimately run ahead of the
       // size captured when this pass started, and rebuilding it for that would
       // re-index a healthy session every sweep — churn that looks like repair.
-      const behind =
-        canonicalBytes != null && (indexedBytes.get(natural) ?? 0) < canonicalBytes;
+      const indexedNow = (isLane ? laneBytes : indexedBytes).get(natural) ?? 0;
+      const behind = canonicalBytes != null && indexedNow < canonicalBytes;
       if (!holed && !behind) continue;
       if (behind) res.staleIndexes += 1;
       if (!repairStale) continue;
       staleRepair = true;
+      scanBytes = indexedNow;
       // A hole in the middle cannot be appended away — force the full rebuild.
-      alreadyIndexedBytes = holed ? 0 : (indexedBytes.get(natural) ?? 0);
+      alreadyIndexedBytes = holed ? 0 : scanBytes;
     }
     const laneIdx = key.sessionId.indexOf(AGENT_LANE);
     const baseSid = laneIdx >= 0 ? key.sessionId.slice(0, laneIdx) : key.sessionId;
     const baseKey = `${key.userId}/${key.family}/${baseSid}`;
     if (laneIdx >= 0 && failedParents.has(baseKey)) {
       res.deferred += 1; // parent failed this pass → defer the lane to the next sweep
+      continue;
+    }
+    // A canonical that parses to NOTHING restores to a zero-event row, which the
+    // INDEXED gate then excludes from `have` — so it looks orphaned again on the
+    // very next pass, forever. Under the old constant repair key that loop was
+    // free (iteration 2+ deduped to a no-op); with unique keys every iteration is
+    // a real replace txn, a fresh ingest-event row, and a slot of the per-pass
+    // cap. So such a row is a CANDIDATE to leave alone.
+    //
+    // But covering bytes are NOT proof the canonical is empty. A chunk that
+    // parsed to no events can commit carrying a totalBytes spanning content whose
+    // own commits never landed, leaving a zero-event row over a content-BEARING
+    // canonical. Skipping that would permanently ignore real content the pre-fix
+    // code would have restored — trading an hourly wasted write for silent data
+    // loss, which is the wrong way round.
+    //
+    // Hence: zero bytes cannot hold an event and is free to skip; an UNKNOWN size
+    // never skips (that is what `unjudgeable` records); anything else must be read
+    // and PARSED before we are allowed to ignore it — decided below, where the
+    // canonical is already in hand.
+    const coveredByRow = (() => {
+      if (staleRepair) return false;
+      const isLane = key.sessionId.includes(AGENT_LANE);
+      const m = isLane ? anyLaneBytes : anyRowBytes;
+      if (!m.has(natural)) return false;
+      if (gapped.has(natural)) return false;
+      if (key.bytes == null) return false;
+      return (m.get(natural) ?? 0) >= key.bytes;
+    })();
+    if (coveredByRow && key.bytes === 0) {
+      res.emptyCanonicals += 1;
       continue;
     }
     res.orphans += 1;
@@ -387,8 +678,16 @@ export async function reconcileOrphans(
         continue;
       }
       const chunkText = await store.readCanonicalText(key);
+      // The candidate from above, decided on CONTENT rather than on bytes.
+      // Parsing to anything at all means this is masked damage, not an empty
+      // canonical — fall through and restore it.
+      if (coveredByRow && parseChunk(chunkText).eventCount === 0) {
+        res.emptyCanonicals += 1;
+        if (delay > 0) await sleep(delay);
+        continue;
+      }
       const base = {
-        chunkId: "reconcile",
+        chunkId: repairChunkId("full"),
         replace: true as const,
         chunkText,
         totalBytes: Buffer.byteLength(chunkText),
@@ -401,20 +700,84 @@ export async function reconcileOrphans(
           deviceId: null,
         },
         recovered: true as const,
-        // The reconciler has already decided this row must be rebuilt (missing,
-        // content-less, or behind its canonical), so the recovered-write guard —
-        // which exists to stop a restore clobbering a LIVE upload — must yield.
-        rebuild: true as const,
+        // Only a repair of an EXISTING row needs the no-clobber guard lifted. An
+        // orphan restore has nothing to override, and passing it there would
+        // strip the protection against a live row materialising between the
+        // existence re-check and the advisory lock.
+        rebuild: staleRepair,
       };
       if (laneIdx >= 0) {
-        // Agent lane → the parent session key + the agentId.
-        await ingestAgentCommit(db, {
-          ...base,
-          key: { userId: key.userId, family: key.family, sessionId: baseSid },
-          agentId: key.sessionId.slice(laneIdx + AGENT_LANE.length),
-        });
-        res.restored += 1;
-        res.repairedFull += 1;
+        // Agent lane → the parent session key + the agentId. Lanes get the same
+        // contract as parents now: compare-and-swap against what the sweep saw,
+        // then PROVE the result rather than assume it. A lane is rebuilt whole —
+        // there is no tail path for lanes until the parent one has proven itself
+        // in production.
+        const agentId = key.sessionId.slice(laneIdx + AGENT_LANE.length);
+        const laneKey = { userId: key.userId, family: key.family, sessionId: baseSid };
+        let laneOutcome: Awaited<ReturnType<typeof ingestAgentCommit>>;
+        try {
+          laneOutcome = await ingestAgentCommit(db, {
+            ...base,
+            key: laneKey,
+            agentId,
+            ...(scanBytes !== undefined ? { expectIndexedBytes: scanBytes } : {}),
+          });
+        } catch (err) {
+          if (!(err instanceof IndexAdvancedError)) throw err;
+          res.liveRaces += 1;
+          opts.logger?.info?.("reconciler: lane advanced under the sweep — deferring to the live write", {
+            sessionId: baseSid, agentId, family: key.family,
+            expected: err.expected, nowIndexed: err.actual,
+          });
+          if (delay > 0) await sleep(delay);
+          continue;
+        }
+        if (!laneOutcome.applied) {
+          if (laneOutcome.reason === "recovered_skip") {
+            // The guard refused because a live lane is already there: working as
+            // intended, not the "believed it repaired something" bug signal.
+            res.protectedSkips += 1;
+            opts.logger?.info?.("reconciler: lane already live — restore stood down", {
+              sessionId: baseSid, agentId, family: key.family,
+            });
+          } else {
+            res.noOpRepairs += 1;
+            opts.logger?.warn?.("reconciler: lane repair reported NO-OP", {
+              sessionId: baseSid, agentId, family: key.family, reason: laneOutcome.reason,
+            });
+          }
+        } else {
+          const v = await verifyLane(db, laneKey, key.bytes ?? null, store, agentId, key);
+          if (v.ok) {
+            res.repairedFull += 1;
+          } else {
+            const why = classifyShortfall(v, base.totalBytes, key.bytes ?? null);
+            if (why === "grew") {
+              res.liveRaces += 1;
+              opts.logger?.info?.("reconciler: lane grew during its rebuild — tail lands next pass", {
+                sessionId: baseSid, agentId, family: key.family,
+                indexedBytes: v.bytes, readBytes: base.totalBytes, nowBytes: v.canonical,
+                turns: v.turns,
+              });
+            } else if (why === "shortRead") {
+              res.shortReads += 1;
+              opts.logger?.warn?.("reconciler: lane stat exceeds what the read returned — index is complete for the bytes we got", {
+                sessionId: baseSid, agentId, family: key.family,
+                indexedBytes: v.bytes, readBytes: base.totalBytes, statBytes: v.canonical,
+                shortfall: (v.canonical ?? 0) - base.totalBytes, turns: v.turns,
+              });
+            } else {
+              res.integrityFailures += 1;
+              opts.logger?.warn?.("reconciler: LANE STILL INCOMPLETE after a full rebuild", {
+                sessionId: baseSid, agentId, family: key.family,
+                indexedBytes: v.bytes, readBytes: base.totalBytes,
+                canonicalBytes: v.canonical ?? key.bytes ?? null,
+                turns: v.turns, dense: v.dense,
+              });
+            }
+          }
+          res.restored += 1;
+        }
       } else {
         const canonicalBytes = key.bytes ?? Buffer.byteLength(chunkText);
 
@@ -424,6 +787,7 @@ export async function reconcileOrphans(
         // end at a newline would slice a record in half, and half a record is the
         // gap this must never create — so that case takes the slow path instead.
         let landed = false;
+        let tailApplied = false;
         const buf = Buffer.from(chunkText, "utf8");
         const canAppendTail =
           (opts.repairTails ?? true) &&
@@ -431,75 +795,175 @@ export async function reconcileOrphans(
           alreadyIndexedBytes > 0 &&
           alreadyIndexedBytes < buf.length &&
           buf[alreadyIndexedBytes - 1] === 0x0a;
+
         if (canAppendTail) {
-          let advanced = false;
+          // Parse the prefix OUTSIDE the transaction (pure CPU) and assert the
+          // count INSIDE it, under the advisory lock: the lane must hold exactly
+          // the prefix this tail was cut from, or appending splices unrelated
+          // content onto it.
+          const expectPriorTurns = parseChunk(
+            buf.subarray(0, alreadyIndexedBytes).toString("utf8"),
+          ).turns.length;
+          let outcome: Awaited<ReturnType<typeof ingestCommit>> | null = null;
           try {
-            await ingestCommit(db, {
+            outcome = await ingestCommit(db, {
               ...base,
               key,
-              chunkId: "reconcile-tail", // distinguishable in hx.ingest_events
+              chunkId: repairChunkId("tail"),
               replace: false,
               chunkText: buf.subarray(alreadyIndexedBytes).toString("utf8"),
-              totalBytes: canonicalBytes,
-              // …only if the lane is still exactly where the slice was cut.
+              totalBytes: canonicalBytes ?? buf.length,
               expectIndexedBytes: alreadyIndexedBytes,
+              expectPriorTurns,
             });
           } catch (err) {
-            if (!(err instanceof IndexAdvancedError)) throw err;
-            // A live commit beat us to it. Never append from a stale offset —
-            // that duplicates turns, and a duplicated lane is still dense and
-            // still covers the canonical, so nothing downstream would catch it.
-            advanced = true;
-            res.liveRaces += 1;
-            opts.logger?.info?.("reconciler: session advanced under the sweep — deferring to the live write", {
-              sessionId: key.sessionId,
-              family: key.family,
-              slicedFrom: err.expected,
-              nowIndexed: err.actual,
+            if (err instanceof IndexAdvancedError) {
+              // A live commit beat us to it. The live write is the more current
+              // truth; re-check next pass rather than writing from a stale slice.
+              res.liveRaces += 1;
+              opts.logger?.info?.("reconciler: session advanced under the sweep — deferring to the live write", {
+                sessionId: key.sessionId, family: key.family,
+                slicedFrom: err.expected, nowIndexed: err.actual,
+              });
+              if (delay > 0) await sleep(delay);
+              continue;
+            }
+            if (!(err instanceof LanePrefixMismatchError)) throw err;
+            // The lane does not hold the prefix — a byte count that regressed
+            // under a replayed chunk, or a canonical that was rewritten rather
+            // than appended. Both are repaired correctly by a full rebuild.
+            res.prefixMismatches += 1;
+            opts.logger?.warn?.("reconciler: lane does not hold the sliced prefix — rebuilding in full", {
+              sessionId: key.sessionId, family: key.family,
+              expectedTurns: err.expectedTurns, actualTurns: err.actualTurns,
+              slicedFrom: alreadyIndexedBytes,
             });
           }
-          if (advanced) { if (delay > 0) await sleep(delay); continue; }
-          // VERIFY — never trust the fast path. Bytes prove it covers the whole
-          // canonical; seq density proves it left no hole behind.
-          const v = await verifyLane(db, key, canonicalBytes, store);
-          if (v.ok) {
-            landed = true;
-            res.repairedTail += 1;
-          } else {
-            res.verifyFallbacks += 1;
-            opts.logger?.warn?.("reconciler: tail repair did not verify — rebuilding in full", {
-              sessionId: key.sessionId,
-              family: key.family,
-              indexedBytes: v.bytes,
-              canonicalBytes,
-              turns: v.turns,
-              dense: v.dense,
+
+          if (outcome && !outcome.applied) {
+            // The commit reported it did nothing. Never treat that as repaired.
+            res.noOpRepairs += 1;
+            opts.logger?.warn?.("reconciler: tail repair reported NO-OP", {
+              sessionId: key.sessionId, family: key.family, reason: outcome.reason,
             });
+          } else if (outcome) {
+            tailApplied = true;
+            const v = await verifyLane(db, key, canonicalBytes, store);
+            if (v.ok) {
+              landed = true;
+              res.repairedTail += 1;
+            } else {
+              res.verifyFallbacks += 1;
+              opts.logger?.warn?.("reconciler: tail repair did not verify — rebuilding in full", {
+                sessionId: key.sessionId, family: key.family,
+                indexedBytes: v.bytes, canonicalBytes, turns: v.turns, dense: v.dense,
+              });
+            }
           }
         }
 
-        // SLOW PATH — rebuild the whole lane from the canonical. Either the tail
-        // was not safely sliceable, or it was and did not verify.
+        // SLOW PATH — rebuild the whole lane from the canonical.
+        //
+        // If a tail APPLIED and then failed verification, the row's byte count is
+        // no longer what the sweep observed — the tail moved it. Anchoring this
+        // CAS to the stale scan value could never match, so the escalation always
+        // aborted as a phantom live race and the promised rebuild never ran.
         if (!landed) {
-          await ingestCommit(db, { ...base, key });
-          const v = await verifyLane(db, key, canonicalBytes, store);
-          if (v.ok) {
-            res.repairedFull += 1;
-          } else {
-            // The one outcome that leaves damage behind. Named loudly, with the
-            // id, so it is greppable in logs and joinable in the database.
-            res.integrityFailures += 1;
-            opts.logger?.warn?.("reconciler: SESSION STILL INCOMPLETE after a full rebuild", {
-              sessionId: key.sessionId,
-              family: key.family,
-              indexedBytes: v.bytes,
-              canonicalBytes,
-              turns: v.turns,
-              dense: v.dense,
-            });
+          // The text in hand was read before any of this iteration's writes. If
+          // the canonical has GROWN since, rebuilding from that text deletes the
+          // lane and reinstates a prefix — a real, if self-healing, wipe. A
+          // verify-triggered escalation is precisely the "canonical grew" case,
+          // so re-stat and defer rather than rebuild from something stale.
+          if (tailApplied && canonicalBytes != null) {
+            let freshBytes: number | null = null;
+            try {
+              freshBytes = await store.statCanonical(key);
+            } catch {
+              // unreadable — fall through and let the CAS decide
+            }
+            if (freshBytes != null && freshBytes > canonicalBytes) {
+              res.liveRaces += 1;
+              opts.logger?.info?.("reconciler: canonical grew mid-repair — deferring the rebuild", {
+                sessionId: key.sessionId, family: key.family,
+                readAt: canonicalBytes, nowBytes: freshBytes,
+              });
+              if (delay > 0) await sleep(delay);
+              continue;
+            }
           }
+          const rebuildAnchor = tailApplied ? await currentBytes(db, key) : scanBytes;
+          let full: Awaited<ReturnType<typeof ingestCommit>>;
+          try {
+            full = await ingestCommit(db, {
+              ...base,
+              key,
+              // A rebuild DELETES the lane and reinserts from text read before
+              // the lock was taken. Without this CAS a chunk that committed in
+              // that window is deleted and never restored — the guarantor
+              // destroying data that was fine. Only meaningful when the row
+              // already existed; an orphan restore has nothing to compare.
+              ...(rebuildAnchor !== undefined ? { expectIndexedBytes: rebuildAnchor } : {}),
+            });
+          } catch (err) {
+            if (!(err instanceof IndexAdvancedError)) throw err;
+            res.liveRaces += 1;
+            opts.logger?.info?.("reconciler: session advanced before its rebuild — deferring to the live write", {
+              sessionId: key.sessionId, family: key.family,
+              expected: err.expected, nowIndexed: err.actual,
+            });
+            if (delay > 0) await sleep(delay);
+            continue;
+          }
+
+          if (!full.applied) {
+            // A no-op is not a repair. Counting it toward `restored` would also
+            // spend a slot of the per-pass cap on work that did nothing.
+            if (full.reason === "recovered_skip") {
+              res.protectedSkips += 1;
+              opts.logger?.info?.("reconciler: session already live — restore stood down", {
+                sessionId: key.sessionId, family: key.family,
+              });
+            } else {
+              res.noOpRepairs += 1;
+              opts.logger?.warn?.("reconciler: full rebuild reported NO-OP", {
+                sessionId: key.sessionId, family: key.family, reason: full.reason,
+              });
+            }
+          } else {
+            res.restored += 1;
+            const v = await verifyLane(db, key, canonicalBytes, store);
+            if (v.ok) {
+              res.repairedFull += 1;
+            } else {
+              const why = classifyShortfall(v, base.totalBytes, canonicalBytes);
+              if (why === "grew") {
+                res.liveRaces += 1;
+                opts.logger?.info?.("reconciler: session grew during its rebuild — tail lands next pass", {
+                  sessionId: key.sessionId, family: key.family,
+                  indexedBytes: v.bytes, readBytes: base.totalBytes, nowBytes: v.canonical,
+                  turns: v.turns,
+                });
+              } else if (why === "shortRead") {
+                res.shortReads += 1;
+                opts.logger?.warn?.("reconciler: store stat exceeds what the read returned — index is complete for the bytes we got", {
+                  sessionId: key.sessionId, family: key.family,
+                  indexedBytes: v.bytes, readBytes: base.totalBytes, statBytes: v.canonical,
+                  shortfall: (v.canonical ?? 0) - base.totalBytes, turns: v.turns,
+                });
+              } else {
+                res.integrityFailures += 1;
+                opts.logger?.warn?.("reconciler: SESSION STILL INCOMPLETE after a full rebuild", {
+                  sessionId: key.sessionId, family: key.family,
+                  indexedBytes: v.bytes, readBytes: base.totalBytes,
+                  canonicalBytes: v.canonical ?? canonicalBytes,
+                  turns: v.turns, dense: v.dense,
+                });
+              }
+            }
+          }
+        } else {
+          res.restored += 1; // the tail landed and verified
         }
-        res.restored += 1;
       }
     } catch (err) {
       // A parse failure, a missing canonical, or a transient DB/store error must

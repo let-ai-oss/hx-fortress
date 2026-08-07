@@ -248,6 +248,16 @@ export interface IngestCommitInput {
    *  the transaction, under the per-session advisory lock, and a mismatch aborts
    *  with IndexAdvancedError so the caller can fall back to a full rebuild. */
   expectIndexedBytes?: number;
+  /** Turn count the lane MUST already hold for this append to be valid — the
+   *  parse of the canonical prefix the tail was cut from.
+   *
+   *  `expectIndexedBytes` alone is not enough: `bytes_uploaded` is stamped from
+   *  whichever chunk committed last, so a replayed earlier chunk REGRESSES it
+   *  below what the lane actually holds. The slice offset and the stored value
+   *  then agree — both regressed — and the byte CAS passes while the tail
+   *  re-inserts turns that are already there. Comparing the actual turn count
+   *  against the prefix catches that, and catches a rewritten canonical too. */
+  expectPriorTurns?: number;
   /** The reconciler has determined this row must be rebuilt (absent,
    *  content-less, or behind its canonical). Lets a recovered write materialise
    *  over an EXISTING row, which the plain recovered guard refuses so a restore
@@ -278,9 +288,28 @@ export class ParentSessionNotIndexedError extends Error {
   }
 }
 
-/** A live write landed between the reconciler slicing a tail and the repair
- *  reaching the lock, so the offset the slice was taken from is no longer the
- *  indexed length. Appending anyway would duplicate turns. */
+/** What a commit actually DID. Every early return inside ingestCommit used to be
+ *  indistinguishable from success — a dedupe hit, a recovered-write guard and a
+ *  clean index all returned void. The guarantor therefore could not tell "repaired"
+ *  from "silently did nothing", which is how a session stayed frozen for a week.
+ *  Callers that care must branch on `applied`. */
+export type IngestOutcome =
+  | { applied: true; sessionRowId: string; turnsInserted: number }
+  | { applied: false; reason: "no_user" | "deduped" | "recovered_skip" };
+
+/** The lane does not hold exactly the prefix the caller sliced its tail from, so
+ *  appending would splice unrelated content onto it. Raised under the advisory
+ *  lock, where the answer cannot change between check and write. */
+export class LanePrefixMismatchError extends Error {
+  constructor(public readonly expectedTurns: number, public readonly actualTurns: number) {
+    super("lane_prefix_mismatch");
+  }
+}
+
+/** A live write landed between the reconciler observing this row and the repair
+ *  reaching the advisory lock, so the value the repair was planned against is no
+ *  longer current. Writing anyway would append from a stale offset, or delete a
+ *  lane and reinstate text that predates the live commit. */
 export class IndexAdvancedError extends Error {
   constructor(public readonly expected: number, public readonly actual: number) {
     super("index_advanced");
@@ -521,9 +550,10 @@ export function maxIso(a: string | null | undefined, b: string | null | undefine
 }
 
 /** Ingest a parent session commit into the bundled hx schema. */
-export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<void> {
+export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<IngestOutcome> {
   const userExternalId = input.key.userId;
-  if (!userExternalId) return; // no user → can't satisfy the NOT NULL session FK
+  // no user → can't satisfy the NOT NULL session FK
+  if (!userExternalId) return { applied: false, reason: "no_user" };
   // Hard-deleted sessions must never come back — mirrors re-push on activity
   // and migrate-from-workbench replays whole histories; the tombstone outranks
   // every producer.
@@ -557,7 +587,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }
-    if (await alreadyIngested(tx, dedupeKey)) return null;
+    if (await alreadyIngested(tx, dedupeKey)) return { skip: "deduped" as const };
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
@@ -587,7 +617,9 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // recovered write MUST be allowed to materialise over it. Without this the
     // guarantor would find the stub as an orphan (0.19.0 makes it one) and then
     // no-op on arrival, looping forever without ever repairing it.
-    if (input.recovered && !input.rebuild && existing && (existing.eventCount ?? 0) > 0) return null;
+    if (input.recovered && !input.rebuild && existing && (existing.eventCount ?? 0) > 0) {
+      return { skip: "recovered_skip" as const };
+    }
 
     // CAS: the slice is only valid if the lane is still exactly where it was when
     // the tail was cut. Checked here because this is the first point under the
@@ -596,6 +628,21 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       const actual = Number(existing?.bytesUploaded ?? 0);
       if (actual !== input.expectIndexedBytes) {
         throw new IndexAdvancedError(input.expectIndexedBytes, actual);
+      }
+    }
+
+    // …and the lane must actually HOLD that prefix. The byte CAS above compares
+    // two numbers that can both be wrong together (a replayed chunk regresses
+    // bytes_uploaded, and the tail is then sliced from the same regressed
+    // offset); this compares against the turns really present.
+    if (input.expectPriorTurns !== undefined && existing) {
+      const [priorAgg] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, existing.id), isNull(hxTurns.agentId)));
+      const actualTurns = Number(priorAgg?.n ?? 0);
+      if (actualTurns !== input.expectPriorTurns) {
+        throw new LanePrefixMismatchError(input.expectPriorTurns, actualTurns);
       }
     }
 
@@ -647,7 +694,15 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
           lastUserText: parsed.lastUserText ?? existing.lastUserText,
           lastAssistantText: parsed.lastAssistantText ?? existing.lastAssistantText,
           ...rollup,
-          bytesUploaded: input.totalBytes,
+          // A replace rebuilds the lane, so its total is the truth. An APPEND
+          // must never move this backwards: totalBytes is whatever the producer
+          // computed for ITS chunk, and a replayed earlier chunk carries a
+          // smaller one. Letting that regress the stored value is what makes a
+          // later tail repair slice from an offset the lane has already passed,
+          // duplicating turns that no downstream check can see.
+          bytesUploaded: input.replace
+            ? input.totalBytes
+            : Math.max(Number(existing.bytesUploaded ?? 0), input.totalBytes),
           lastActivityAt,
           updatedAt: now,
         })
@@ -766,6 +821,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       sessionRowId,
       userId: dims.userId,
       factsSeed: existing?.firstEventAt ?? parsed.firstActivityAt ?? now,
+      turnsInserted: parsed.turns.length,
     };
   });
 
@@ -783,7 +839,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   // the dedupe key without ever re-running facts. Facts recompute on every
   // subsequent chunk of the session, so a transient failure self-heals; only a
   // persistent one leaves facts stale (recorded via the ingest-event row).
-  if (committed) {
+  if (committed && !("skip" in committed)) {
     try {
       await db.transaction((tx) =>
         recomputeSessionFacts(tx, committed.sessionRowId, committed.userId, committed.factsSeed, now),
@@ -796,12 +852,31 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   // Off the commit path: nudge the embed worker that new indexable turns may
   // have landed (debounced + max-wait capped). Best-effort — never throws.
   signalEmbedWork();
+
+  if (!committed) return { applied: false, reason: "deduped" };
+  // The transaction callback returns a union, so TypeScript widens every field to
+  // optional across both arms. Read it once through the union shape rather than
+  // narrowing in place.
+  const outcome = committed as {
+    skip?: "deduped" | "recovered_skip";
+    sessionRowId?: string;
+    turnsInserted?: number;
+  };
+  if (outcome.skip) return { applied: false, reason: outcome.skip };
+  return {
+    applied: true,
+    sessionRowId: outcome.sessionRowId ?? "",
+    turnsInserted: outcome.turnsInserted ?? 0,
+  };
 }
 
 /** Ingest a child-lane (subagent / workflow-agent) commit. */
-export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput): Promise<void> {
+export async function ingestAgentCommit(
+  db: HxDb,
+  input: IngestAgentCommitInput,
+): Promise<IngestOutcome> {
   const userExternalId = input.key.userId;
-  if (!userExternalId || !input.agentId) return;
+  if (!userExternalId || !input.agentId) return { applied: false, reason: "no_user" };
   // Cross-family by identity — child lanes can carry a stale family (see
   // isSessionDeleted); a deleted parent blocks every lane.
   if (await isSessionDeleted(db, userExternalId, input.key.sessionId)) {
@@ -812,7 +887,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
   const parsed = parseChunk(input.chunkText);
   scrubParsed(parsed);
 
-  await db.transaction(async (tx) => {
+  const committed = await db.transaction(async (tx) => {
     // M2: same per-session advisory lock + in-lock tombstone re-check as the
     // parent path (keyed on the base session id, so parent + agent + purge
     // serialize together).
@@ -824,7 +899,7 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }
-    if (await alreadyIngested(tx, dedupeKey)) return;
+    if (await alreadyIngested(tx, dedupeKey)) return { skip: "deduped" as const };
 
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
@@ -873,7 +948,41 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
     // the agent lane already exists under the lock, no-op rather than rebuild it
     // (which would race a concurrent live delta for the same lane). The parent
     // row here is pre-existing when the agent exists (FK), so no stub was made.
-    if (input.recovered && existingAgent) return;
+    // …but `rebuild` overrides it, exactly as on the parent path: the reconciler
+    // sets that only once it has already decided this lane must be rebuilt
+    // (behind its canonical, or holed). Without the override every lane repair
+    // was a silent no-op on the FIRST attempt — the same shape as the constant
+    // repair key, but total.
+    // The eventCount clause is load-bearing and mirrors the parent guard at the
+    // top of ingestCommit. Without it a CONTENT-LESS lane row (eventCount 0)
+    // blocks its own repair: the reconciler reaches it via the orphan path, where
+    // `rebuild` is deliberately false (an orphan restore must not be able to
+    // clobber a live row), and the guard then refuses the one write that would
+    // fix it — forever. The protection this guard exists for is against a
+    // CONTENT-BEARING lane materialising in the window, which the clause keeps.
+    if (input.recovered && !input.rebuild && existingAgent && (existingAgent.eventCount ?? 0) > 0) {
+      return { skip: "recovered_skip" as const };
+    }
+
+    // Compare-and-swap, same contract as the parent lane: the sweep read this
+    // lane's byte count and the canonical minutes ago, so a live commit in
+    // between must abort the repair rather than write from a stale observation.
+    if (input.expectIndexedBytes !== undefined) {
+      const actual = Number(existingAgent?.bytesUploaded ?? 0);
+      if (actual !== input.expectIndexedBytes) {
+        throw new IndexAdvancedError(input.expectIndexedBytes, actual);
+      }
+    }
+    if (input.expectPriorTurns !== undefined && existingAgent) {
+      const [priorAgg] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, sessionRowId), eq(hxTurns.agentId, existingAgent.id)));
+      const actualTurns = Number(priorAgg?.n ?? 0);
+      if (actualTurns !== input.expectPriorTurns) {
+        throw new LanePrefixMismatchError(input.expectPriorTurns, actualTurns);
+      }
+    }
     const prev = input.replace ? undefined : existingAgent;
     const agentRollup = {
       eventCount: (prev?.eventCount ?? 0) + parsed.eventCount,
@@ -904,7 +1013,13 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
           gitBranch: metaStr(meta, "gitBranch") ?? existingAgent.gitBranch,
           modelId: dims.modelId ?? existingAgent.modelId,
           ...agentRollup,
-          bytesUploaded: input.totalBytes,
+          // Monotone on append for the same reason as the parent lane: a replayed
+          // earlier chunk carries a smaller total, and letting it regress the
+          // stored value is what makes a later tail slice from an offset the lane
+          // has already passed.
+          bytesUploaded: input.replace
+            ? input.totalBytes
+            : Math.max(Number(existingAgent.bytesUploaded ?? 0), input.totalBytes),
           lastActivityAt: agentLastActivityAt,
           updatedAt: now,
         })
@@ -967,8 +1082,23 @@ export async function ingestAgentCommit(db: HxDb, input: IngestAgentCommitInput)
       status: "processed",
       processedAt: now,
     });
+
+    return { sessionRowId, turnsInserted: parsed.turns.length };
   });
 
   // Off the commit path: nudge the embed worker (best-effort — never throws).
   signalEmbedWork();
+
+  if (!committed) return { applied: false, reason: "deduped" };
+  const outcome = committed as {
+    skip?: "deduped" | "recovered_skip";
+    sessionRowId?: string;
+    turnsInserted?: number;
+  };
+  if (outcome.skip) return { applied: false, reason: outcome.skip };
+  return {
+    applied: true,
+    sessionRowId: outcome.sessionRowId ?? "",
+    turnsInserted: outcome.turnsInserted ?? 0,
+  };
 }

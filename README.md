@@ -115,6 +115,8 @@ re-`hello` with the saved credential instead of re-enrolling).
 | `FORTRESS_DB_BG_POOL_MAX` | no | Connection ceiling for the background guarantor/reconciler pool (default `2`). Separate from the live pools by design: whole-transcript restores must never be able to spend the write path's budget. |
 | `FORTRESS_DB_PROBE_INTERVAL_MS` | no | hx-db liveness probe cadence (default `60000`; `0` disables — mirrors the store probe, **and disables pool-saturation detection with it**). 3 consecutive breaches rebuild the pools; 2 futile rebuilds escalate per `FORTRESS_STORE_EXIT_ON_WEDGE`. Sustained pool saturation also rebuilds, independently of the probe verdict. |
 | `FORTRESS_DB_MIGRATION_TIMEOUT_MS` | no | Per-statement bound inside every migration batch (default `300000`; validated integer). **Each single migration must fit this budget** — per-migration journaling converges incrementally across attempts, one too-slow migration never does; raise it for backfill-class migrations. |
+| `FORTRESS_GUARANTOR_MAX_ORPHANS_PER_PASS` | no | Sessions repaired per sweep (default `100`). **`0` now means the default, not unbounded** — a full rebuild costs 40-115 s of IO against a GIN-indexed turns table, and an unbounded pass after a large backlog unfreezes is a self-inflicted incident. Raise it to drain faster on a quiet database. |
+| `FORTRESS_GUARANTOR_REPAIR_STALE` | no | Repair sessions whose index is behind their canonical (default on). `false` leaves detection (`staleIndexes` in every pass) but stops it acting. |
 | `FORTRESS_GUARANTOR_INTERVAL_MS` | no | Reconcile sweep interval (default `3600000`; `0` ⇒ default — use `FORTRESS_GUARANTOR_DISABLED` to turn the guarantor off). |
 
 **Upgrade note — pooler-fronted `FORTRESS_DATABASE_URL` (PgBouncer-class):**

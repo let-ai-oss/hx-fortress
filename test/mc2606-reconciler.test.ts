@@ -5,7 +5,13 @@ import { createHxDb, type HxDb } from "../src/host/postgres/db";
 import { runMigrations } from "../src/host/postgres/migrate";
 import { migrations } from "../src/host/postgres/migrations/manifest";
 import { makeMigrationExec } from "../src/host/postgres/sql-exec";
-import { IndexAdvancedError, ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
+import {
+  IndexAdvancedError,
+  LanePrefixMismatchError,
+  ingestAgentCommit,
+  ingestCommit,
+  type IngestAttribution,
+} from "../src/ingest/ingest";
 import { markSessionDeleted } from "../src/ingest/delete";
 import { reconcileOrphans } from "../src/ingest/reconciler";
 import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
@@ -656,5 +662,546 @@ describe.if(!!DSN)("Component G — integrity of a repaired session", () => {
     const l = await lane(key);
     expect(l.turns).toBe(10);
     expect(l.dense).toBe(true);
+  });
+});
+
+
+// The guarantor's correctness contract. Each of these encodes a defect that
+// reached production or was one deploy away from it.
+describe.if(!!DSN)("Component G — repair can always run, and can never destroy", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`turn ${i}`)).join("\n")}\n`;
+  const repairKey = () => `reconcile-full:${crypto.randomUUID()}`;
+
+  async function seed(nHead: number) {
+    const key: SessionKey = {
+      userId: `contract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const head = body(nHead);
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    return { key, headBytes: Buffer.byteLength(head) };
+  }
+  async function lane(key: SessionKey) {
+    const [row] = await db
+      .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const turns = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    return { bytes: Number(row!.bytes ?? 0), turns: turns.length };
+  }
+
+  test("a session can be rebuilt MORE THAN ONCE — the constant repair key froze it forever", async () => {
+    const { key } = await seed(5);
+    const whole = body(5);
+    const opts = {
+      replace: true as const, chunkText: whole, totalBytes: Buffer.byteLength(whole),
+      componentCount: 1, meta: null, attribution: ATTR, recovered: true as const, rebuild: true as const,
+    };
+    const first = await ingestCommit(db, { key, chunkId: repairKey(), ...opts });
+    const second = await ingestCommit(db, { key, chunkId: repairKey(), ...opts });
+    expect(first.applied).toBe(true);
+    expect(second.applied).toBe(true);
+    expect((await lane(key)).turns).toBe(5);
+  });
+
+  test("a commit that does NOTHING says so — a dedupe hit is not success", async () => {
+    const { key } = await seed(3);
+    const whole = body(3);
+    const opts = {
+      chunkId: "a-fixed-key", replace: true as const, chunkText: whole,
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null,
+      attribution: ATTR, recovered: true as const, rebuild: true as const,
+    };
+    expect((await ingestCommit(db, { key, ...opts })).applied).toBe(true);
+    const again = await ingestCommit(db, { key, ...opts });
+    expect(again.applied).toBe(false);
+    expect(again).toMatchObject({ reason: "deduped" });
+  });
+
+  test("bytes_uploaded is MONOTONE on append — a replayed chunk cannot regress it", async () => {
+    // The regression is what lets a later tail repair slice from an offset the
+    // lane has already passed, duplicating turns invisibly.
+    const { key, headBytes } = await seed(3);
+    const whole = body(10);
+    await ingestCommit(db, {
+      key, chunkId: "c2", replace: false,
+      chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const live = await lane(key);
+    await ingestCommit(db, {
+      key, chunkId: "c1-replay", replace: false, chunkText: "",
+      totalBytes: headBytes, componentCount: 1, meta: null, attribution: ATTR,
+    });
+    expect((await lane(key)).bytes).toBe(live.bytes);
+  });
+
+  test("a tail sliced from a stale prefix is REFUSED — the byte CAS alone cannot see it", async () => {
+    const { key, headBytes } = await seed(3);
+    const whole = body(10);
+    await ingestCommit(db, {
+      key, chunkId: "c2", replace: false,
+      chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const before = await lane(key);
+    let caught: unknown = null;
+    try {
+      await ingestCommit(db, {
+        key, chunkId: `reconcile-tail:${crypto.randomUUID()}`, replace: false,
+        chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+        totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+        recovered: true, rebuild: true,
+        // Both sides agree — and both are wrong. Only the turn count catches it.
+        expectIndexedBytes: before.bytes, expectPriorTurns: 3,
+      });
+    } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(LanePrefixMismatchError);
+    expect((await lane(key)).turns).toBe(before.turns);
+  });
+
+  test("a stale full rebuild cannot WIPE turns a live commit just wrote", async () => {
+    const { key, headBytes } = await seed(3);
+    const scanBytes = headBytes; // what the sweep observed before reading the canonical
+    const whole = body(10);
+    await ingestCommit(db, {
+      key, chunkId: "live-later", replace: false,
+      chunkText: Buffer.from(whole).subarray(headBytes).toString("utf8"),
+      totalBytes: Buffer.byteLength(whole), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const live = await lane(key);
+    const stale = body(3);
+    let caught: unknown = null;
+    try {
+      await ingestCommit(db, {
+        key, chunkId: `reconcile-full:${crypto.randomUUID()}`, replace: true, chunkText: stale,
+        totalBytes: Buffer.byteLength(stale), componentCount: 1, meta: null, attribution: ATTR,
+        recovered: true, rebuild: true, expectIndexedBytes: scanBytes,
+      });
+    } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(IndexAdvancedError);
+    // Without the CAS this lane would be back to 3 turns, permanently.
+    expect((await lane(key)).turns).toBe(live.turns);
+  });
+});
+
+
+// Agent lanes hold ~a third of all indexed content and were existence-only: a
+// half-indexed lane was undetectable, and repairing one was a silent no-op
+// because ingestAgentCommit's recovered guard had no rebuild override.
+describe.if(!!DSN)("Component G — agent lanes are checked and repaired like parents", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+  const AGENT = "agent-1";
+
+  test("lane verification measures the LANE's canonical, not the parent's", async () => {
+    // The lane row is found via the parent key, but the object to re-measure is
+    // the `sid:a:agentId` composite. Statting the parent instead compares a lane
+    // against the wrong file: with a parent BIGGER than the lane it reports a
+    // healthy lane as an integrity failure, and with the far commoner tiny parent
+    // it passes trivially and verifies nothing at all.
+    const key: SessionKey = {
+      userId: `lanestat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const parentText = body(20); // deliberately MUCH larger than the lane
+    const laneHead = body(2);
+    const laneWhole = body(8);
+    await ingestCommit(db, {
+      key, chunkId: "p1", replace: false, chunkText: parentText,
+      totalBytes: Buffer.byteLength(parentText), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestAgentCommit(db, {
+      key, agentId: AGENT, chunkId: "a1", replace: false, chunkText: laneHead,
+      totalBytes: Buffer.byteLength(laneHead), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const store = {
+      listAllCanonicalKeys: async () => [
+        { ...key, bytes: Buffer.byteLength(parentText) },
+        { ...key, sessionId: `${key.sessionId}:a:${AGENT}`, bytes: Buffer.byteLength(laneWhole) },
+      ],
+      readCanonicalText: async (k: SessionKey) =>
+        k.sessionId.includes(":a:") ? laneWhole : parentText,
+      statCanonical: async (k: SessionKey) =>
+        Buffer.byteLength(k.sessionId.includes(":a:") ? laneWhole : parentText),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    // Statting the parent would make the repaired lane (768 B) look short of the
+    // parent canonical (~1.9 kB) and report a false integrity failure.
+    expect(res.integrityFailures).toBe(0);
+    expect(res.repairedFull).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a canonical that parses to NOTHING is restored once, not every pass forever", async () => {
+    // Unique repair keys removed an accidental loop-breaker: a zero-event row is
+    // excluded by the INDEXED gate, so it looks orphaned again next pass. Under
+    // the old constant key iteration 2+ was a free no-op; now every iteration is
+    // a real replace txn, a fresh ingest-event row, and a slot of the per-pass
+    // repair cap — every hour, indefinitely.
+    const key: SessionKey = {
+      userId: `empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    // Must parse to ZERO events. An unknown record type still counts as one
+    // event, so the row keeps event_count > 0 and never enters the loop; a
+    // whitespace-only canonical is the real shape (bytes > 0, nothing to index).
+    const nothing = "\n\n\n";
+    const canonicals = new Map<string, string>([[canonicalObject(key), nothing]]);
+    const store = {
+      ...memStore(canonicals),
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(nothing) }],
+      statCanonical: async () => Buffer.byteLength(nothing),
+    } as unknown as SessionStore;
+
+    const first = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    const second = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    const third = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(first.restored).toBe(1);
+    // …and then it must stop. A loop here silently eats the repair budget.
+    expect(second.restored).toBe(0);
+    expect(third.restored).toBe(0);
+    // It is still EXAMINED each pass (the decision is now made on parsed content,
+    // which requires the read) — but it does no work and writes nothing.
+    expect(second.emptyCanonicals).toBe(1);
+    expect(second.noOpRepairs).toBe(0);
+  });
+
+  test("a partially indexed LANE is detected and fully repaired", async () => {
+    const key: SessionKey = {
+      userId: `lane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const parentText = body(4);
+    const laneHead = body(2);
+    const laneWhole = body(8);
+
+    await ingestCommit(db, {
+      key, chunkId: "p1", replace: false, chunkText: parentText,
+      totalBytes: Buffer.byteLength(parentText), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    await ingestAgentCommit(db, {
+      key, agentId: AGENT, chunkId: "a1", replace: false, chunkText: laneHead,
+      totalBytes: Buffer.byteLength(laneHead), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const laneState = async () => {
+      const [row] = await db
+        .select({ id: hxSessionAgents.id, bytes: hxSessionAgents.bytesUploaded })
+        .from(hxSessionAgents)
+        .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const turns = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(eq(hxTurns.agentId, row!.id));
+      return { bytes: Number(row!.bytes ?? 0), turns: turns.length };
+    };
+    const before = await laneState();
+    expect(before.turns).toBe(2);
+
+    // The store holds the WHOLE lane transcript; the index holds only its head.
+    const store = {
+      listAllCanonicalKeys: async () => [
+        { ...key, bytes: Buffer.byteLength(parentText) },
+        { ...key, sessionId: `${key.sessionId}:a:${AGENT}`, bytes: Buffer.byteLength(laneWhole) },
+      ],
+      readCanonicalText: async (k: SessionKey) =>
+        k.sessionId.includes(":a:") ? laneWhole : parentText,
+      statCanonical: async (k: SessionKey) =>
+        Buffer.byteLength(k.sessionId.includes(":a:") ? laneWhole : parentText),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(res.staleIndexes).toBeGreaterThanOrEqual(1);
+    expect(res.noOpRepairs).toBe(0);        // the old recovered guard made this a no-op
+    expect(res.integrityFailures).toBe(0);  // …and it is verified now, not assumed
+
+    const after = await laneState();
+    expect(after.turns).toBe(8);
+    expect(after.bytes).toBe(Buffer.byteLength(laneWhole));
+  });
+});
+
+
+// The two directions of the empty-canonical skip. Getting the second one wrong
+// trades an hourly wasted write for silent data loss.
+describe.if(!!DSN)("Component G — a zero-event row is only ignored when the canonical really is empty", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+
+  async function zeroEventRowOver(canonicalText: string, declaredBytes: number | null) {
+    const key: SessionKey = {
+      userId: `mask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    // A committed chunk that parses to nothing, but claims to cover everything —
+    // the shape that makes covering bytes a lie about emptiness.
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: "\n\n",
+      totalBytes: Math.max(declaredBytes ?? 0, Buffer.byteLength(canonicalText)),
+      componentCount: 1, meta: null, attribution: ATTR,
+    });
+    const canonicals = new Map<string, string>([[canonicalObject(key), canonicalText]]);
+    const store = {
+      ...memStore(canonicals),
+      listAllCanonicalKeys: async () => [
+        declaredBytes === null ? { ...key } : { ...key, bytes: declaredBytes },
+      ],
+      statCanonical: async () => Buffer.byteLength(canonicalText),
+    } as unknown as SessionStore;
+    const turns = async () => {
+      const [row] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const t = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+      return t.length;
+    };
+    return { key, store, turns };
+  }
+
+  test("REAL CONTENT behind a covering zero-event row is RESTORED, never skipped", async () => {
+    const real = body(6);
+    const { store, turns } = await zeroEventRowOver(real, Buffer.byteLength(real));
+    expect(await turns()).toBe(0); // indexed as nothing, bytes claim full coverage
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    // Deciding on bytes alone would skip this forever and lose 6 records.
+    expect(res.emptyCanonicals).toBe(0);
+    expect(await turns()).toBe(6);
+  });
+
+  test("an UNKNOWN canonical size never takes the skip", async () => {
+    const real = body(4);
+    const { store, turns } = await zeroEventRowOver(real, null);
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    expect(res.emptyCanonicals).toBe(0);
+    expect(await turns()).toBe(4);
+  });
+});
+
+// The lane twin of the parent guard. Without the eventCount clause the repair of
+// a content-less lane dies at the guard instead of the gates above it.
+describe.if(!!DSN)("Component G — a content-less LANE row does not block its own repair", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+  const rec = (t: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+  const AGENT = "agent-x";
+
+  test("zero-event lane row + content-bearing lane canonical → repaired", async () => {
+    const key: SessionKey = {
+      userId: `laneguard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const parentText = body(3);
+    const laneWhole = body(5);
+    await ingestCommit(db, {
+      key, chunkId: "p1", replace: false, chunkText: parentText,
+      totalBytes: Buffer.byteLength(parentText), componentCount: 1, meta: null, attribution: ATTR,
+    });
+    // A lane commit that parses to NOTHING leaves a zero-event lane row.
+    await ingestAgentCommit(db, {
+      key, agentId: AGENT, chunkId: "a1", replace: false, chunkText: "\n\n",
+      totalBytes: 2, componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const laneTurns = async () => {
+      const [row] = await db
+        .select({ id: hxSessionAgents.id })
+        .from(hxSessionAgents)
+        .innerJoin(hxSessions, eq(hxSessions.id, hxSessionAgents.sessionId))
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      if (!row) return -1;
+      const t = await db.select({ seq: hxTurns.seq }).from(hxTurns).where(eq(hxTurns.agentId, row.id));
+      return t.length;
+    };
+    expect(await laneTurns()).toBe(0);
+
+    const store = {
+      listAllCanonicalKeys: async () => [
+        { ...key, bytes: Buffer.byteLength(parentText) },
+        { ...key, sessionId: `${key.sessionId}:a:${AGENT}`, bytes: Buffer.byteLength(laneWhole) },
+      ],
+      readCanonicalText: async (k: SessionKey) =>
+        k.sessionId.includes(":a:") ? laneWhole : parentText,
+      statCanonical: async (k: SessionKey) =>
+        Buffer.byteLength(k.sessionId.includes(":a:") ? laneWhole : parentText),
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+    // Without the eventCount clause on the lane guard this is a recovered_skip
+    // every pass and the lane stays empty forever.
+    expect(res.noOpRepairs).toBe(0);
+    expect(await laneTurns()).toBe(5);
+  });
+});
+
+
+// The one untested data-safety behaviour left after pass 4: a tail that applies
+// and then fails verification must NOT rebuild from text read before the growth
+// that caused the failure — that deletes the new content.
+describe.if(!!DSN)("Component G — a canonical growing mid-repair defers the rebuild", () => {
+  const dsn = DSN as string;
+  let db: HxDb;
+  beforeAll(async () => {
+    await runMigrations(makeMigrationExec(dsn), migrations);
+    db = createHxDb(dsn);
+  });
+  const rec = (t2: string) =>
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: t2 }] } });
+  const body = (n: number) => `${Array.from({ length: n }, (_, i) => rec(`t${i}`)).join("\n")}\n`;
+
+  test("the tail lands, the canonical has grown, and the rebuild stands down", async () => {
+    const key: SessionKey = {
+      userId: `grew-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const head = body(3);
+    const atScan = body(8);   // what the pass listed and read
+    const grown = body(12);   // what the store holds by verify time
+    await ingestCommit(db, {
+      key, chunkId: "c1", replace: false, chunkText: head,
+      totalBytes: Buffer.byteLength(head), componentCount: 1, meta: null, attribution: ATTR,
+    });
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: Buffer.byteLength(atScan) }],
+      readCanonicalText: async () => atScan,
+      // Verification and the escalation guard both re-measure, and by then the
+      // canonical is larger than the pass ever saw.
+      statCanonical: async () => Buffer.byteLength(grown),
+    } as unknown as SessionStore;
+
+    const turns = async () => {
+      const [row] = await db
+        .select({ id: hxSessions.id })
+        .from(hxSessions)
+        .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+        .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+        .limit(1);
+      const x = await db
+        .select({ seq: hxTurns.seq })
+        .from(hxTurns)
+        .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+      return x.length;
+    };
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    // The tail appended and then failed verification against the grown canonical…
+    expect(res.verifyFallbacks).toBe(1);
+    // …and the rebuild stood down rather than reinstating the pre-growth prefix.
+    expect(res.liveRaces).toBe(1);
+    expect(res.repairedFull).toBe(0);
+    expect(res.integrityFailures).toBe(0);
+    // The tail's 8 records are intact — a rebuild from `atScan` would also give 8,
+    // so the load-bearing assertion is that nothing was DELETED and no false
+    // integrity failure was reported.
+    expect(await turns()).toBe(8);
+  });
+
+  // The prod shape behind "SESSION STILL INCOMPLETE after a full rebuild" on a
+  // session that was in fact whole: the store's stat reports more bytes than its
+  // read hands back (a canonical holding non-UTF-8 bytes re-encodes shorter, and
+  // a capped/truncated download returns short outright). The rebuild indexes
+  // everything it was given, densely — yet a stat-vs-read comparison can never be
+  // satisfied, so the old code re-ran a full rebuild every pass, forever, and
+  // reported permanent damage. It must be named for what it is instead.
+  test("a stat that exceeds the read is a shortRead, not an integrity failure", async () => {
+    const key: SessionKey = {
+      userId: `short-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      family: "claude-cli",
+      sessionId: crypto.randomUUID(),
+    };
+    const text = body(6);
+    const readBytes = Buffer.byteLength(text);
+    const STAT = readBytes + 219; // what the object claims; never changes
+
+    const store = {
+      listAllCanonicalKeys: async () => [{ ...key, bytes: STAT }],
+      readCanonicalText: async () => text,
+      statCanonical: async () => STAT,
+    } as unknown as SessionStore;
+
+    const res = await reconcileOrphans(db, store, { batchDelayMs: 0, correctExistingTitles: false });
+
+    expect(res.restored).toBe(1);
+    expect(res.shortReads).toBe(1);
+    // The two counters this must NOT land in: it is neither damage nor a live race.
+    expect(res.integrityFailures).toBe(0);
+    expect(res.liveRaces).toBe(0);
+
+    // Every record the store actually returned is indexed, densely.
+    const [row] = await db
+      .select({ id: hxSessions.id, bytes: hxSessions.bytesUploaded })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, key.userId), eq(hxSessions.sessionId, key.sessionId)))
+      .limit(1);
+    const rows = await db
+      .select({ seq: hxTurns.seq })
+      .from(hxTurns)
+      .where(and(eq(hxTurns.sessionId, row!.id), isNull(hxTurns.agentId)));
+    expect(rows.length).toBe(6);
+    // The watermark records the bytes we really indexed — never the stat we could
+    // not read. Inflating it to STAT would be the guarantor lying about coverage.
+    expect(Number(row!.bytes)).toBe(readBytes);
   });
 });
